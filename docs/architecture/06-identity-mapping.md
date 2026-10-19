@@ -88,3 +88,7 @@ Library default: an adapter built without a resolver uses `NewPassthroughResolve
 4. Only MSISDN, IMSI and NAI. GPSI-based Nchf identification and SIP-URI / private Gy identifiers are not handled.
 5. No number normalisation beyond dropping `+` (no national to E.164 conversion).
 6. Resolution metrics (`Resolver.Stats`, `CachedDirectory.Stats`) exist but are not exported anywhere yet.
+
+## Other users of the directory
+
+The provisioning workers write bindings (doc 08); the offline mediation pipeline (doc 10) resolves IMSI/MSISDN of CDRs through the same cached `Resolver` with `ConflictReject`, and sends unknown or conflicting identities to a suspense output instead of guessing.
