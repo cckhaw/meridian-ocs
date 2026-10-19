@@ -384,3 +384,21 @@ func BenchmarkRateStub(b *testing.B) {
 		}
 	})
 }
+
+func TestUsageOnlyUpdateIsNotRefused(t *testing.T) {
+	store := datalayer.New(redistest.Start(t))
+	ctx := context.Background()
+	_ = store.PutBucket(ctx, "u9", datalayer.Bucket{ID: "b", Class: datalayer.ClassBundle, Kind: canonical.UnitBytes, Balance: 1000, Order: 1})
+	e, _ := New(Config{Workers: 1}, Deps{Store: store, Tariff: tariff})
+	defer e.Close()
+
+	rate(t, e, newReq(canonical.TypeInitial, "u9", "s", 0, 400, 0))
+	// Reports 100 used but asks for no more quota.
+	r := rate(t, e, newReq(canonical.TypeUpdate, "u9", "s", 1, 0, 100))
+	if r.Result != canonical.ResultGranted || r.Grants[0].Result != canonical.ResultGranted || r.Grants[0].Granted != 0 {
+		t.Fatalf("%+v", r)
+	}
+	if got, _ := store.Balance(ctx, "u9", "b"); got != 1000-100 {
+		t.Fatalf("balance %d", got)
+	}
+}

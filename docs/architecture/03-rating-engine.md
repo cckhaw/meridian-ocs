@@ -1,6 +1,6 @@
 # Rating Engine & Atomic Reservation Scripts
 
-Code: `pkg/datalayer` (Lua + Go client), `pkg/canonical`, `services/ocs-rating-engine/internal/engine`.
+Code: `pkg/datalayer` (Lua + Go client), `pkg/canonical`, `pkg/engine` (shared so the gateway can run it in-process).
 
 ## What is implemented
 

@@ -365,18 +365,25 @@ func (w *worker) fill(req *canonical.Request, resp *canonical.Response) {
 	}
 	anyGranted, allGranted := false, true
 	first := canonical.ResultUnspecified
-	for _, it := range w.dres.Items {
+	for i, it := range w.dres.Items {
 		r := canonical.ResultNoBucket
 		if int(it.Code) < len(itemResult) {
 			r = itemResult[it.Code]
+		}
+		// A unit that asked for nothing (e.g. an update that only reports
+		// usage) has nothing to be refused.
+		if i < len(req.Units) && req.Units[i].Requested == 0 && req.Type != canonical.TypeTerminate && it.Granted == 0 {
+			r = canonical.ResultGranted
 		}
 		resp.Grants = append(resp.Grants, canonical.UnitGrant{
 			RatingGroup: it.RatingGroup, Result: r, Granted: it.Granted,
 			ValiditySeconds: it.ValidityS, FinalUnit: it.Final, Shortfall: it.Shortfall,
 		})
-		if it.Granted > 0 {
+		switch {
+		case it.Granted > 0:
 			anyGranted = true
-		} else {
+		case r == canonical.ResultGranted: // asked for nothing
+		default:
 			allGranted = false
 			if first == canonical.ResultUnspecified {
 				first = r
@@ -393,7 +400,7 @@ func (w *worker) fill(req *canonical.Request, resp *canonical.Response) {
 			resp.Result = first
 		}
 	default:
-		if anyGranted {
+		if anyGranted || first == canonical.ResultUnspecified {
 			resp.Result = canonical.ResultGranted
 		} else {
 			resp.Result = first
