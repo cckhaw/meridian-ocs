@@ -11,14 +11,16 @@ import (
 
 // CatalogRater prices each container at the cash rate of the catalog version
 // that was in effect when the record was opened (time travel), so re-processing
-// a late file after a price change still uses the price that applied.
+// a late file after a price change still uses the price that applied. The plan
+// is the one the subscriber's *current* offering points to (the Tariff's
+// resolver), or the Tariff's default plan: the offering the subscriber was on
+// when the record was opened is not recorded anywhere yet.
 //
 // The result is a list-price value: allowances and bundles are not applied,
 // because online charging already debited them. It is meant for reconciliation
 // and for post-paid billing input, not as the amount taken from a balance.
 type CatalogRater struct {
 	Tariff *catalog.Tariff
-	Plan   string
 }
 
 const maxRatedUnits = 1 << 40 // the exact-arithmetic ceiling used by the charge script
@@ -29,6 +31,13 @@ func (c CatalogRater) Rate(r *cdr.Record) (unrated bool) {
 		return false
 	}
 	req := canonical.Request{RATType: r.RATType, SubscriberID: r.SubscriberKey, EventTime: r.OpenTime}
+	plan, err := c.Tariff.PlanAt(r.SubscriberKey, r.OpenTime)
+	if err != nil || plan == "" {
+		for i := range r.Containers {
+			r.Containers[i].RatedWith = "plan_unknown"
+		}
+		return true
+	}
 	var total int64
 	var rates [4]datalayer.Rate
 	for i := range r.Containers {
@@ -40,7 +49,7 @@ func (c CatalogRater) Rate(r *cdr.Record) (unrated bool) {
 			unrated = true
 			continue
 		}
-		rs, m, err := c.Tariff.RatesAt(r.OpenTime, c.Plan, &req, &u, rates[:0])
+		rs, m, err := c.Tariff.RatesAt(r.OpenTime, plan, &req, &u, rates[:0])
 		if err != nil {
 			ct.RatedWith = reason(err)
 			unrated = true
@@ -64,7 +73,7 @@ func (c CatalogRater) Rate(r *cdr.Record) (unrated bool) {
 	if unrated {
 		return true
 	}
-	r.Charge, r.PlanID = &total, c.Plan
+	r.Charge, r.PlanID = &total, plan
 	if sn := c.Tariff.Store.At(r.OpenTime); sn != nil {
 		r.CatalogVer = sn.Version
 	}

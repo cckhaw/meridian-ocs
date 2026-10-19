@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
+	"github.com/cckhaw/meridian-ocs/pkg/catalog"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/identity"
 	"github.com/cckhaw/meridian-ocs/pkg/svcenv"
@@ -35,6 +36,7 @@ type App struct {
 	prod *bus.KafkaProducer
 	cons *kgo.Client
 	wrk  *worker.Worker
+	rep  *catalog.Replicator
 
 	restSrv *http.Server
 	grpcSrv *grpc.Server
@@ -95,7 +97,19 @@ func NewApp(ctx context.Context, cfg Config, g svcenv.Getenv, logf func(string, 
 			az = auth.New(cfg.Standard, cfg.Privileged)
 		}
 		logf("API access: %s", az.Describe())
-		svc := service.New(service.Config{Limits: cfg.Limits, CommandsTopic: cfg.Bus.CommandsTopic}, st, a.prod, data)
+		// The catalog resolves attach_offering. Provisioning does not depend on it
+		// for anything else, so a catalog that cannot be read yet is not fatal:
+		// attach_offering answers 503 until it can.
+		store := catalog.NewStore(0)
+		a.rep = &catalog.Replicator{Redis: a.rdb, Store: store, OnError: func(err error) { logf("catalog sync: %v", err) }}
+		if err := a.rep.Sync(ctx); err != nil {
+			logf("WARNING cannot read the catalog yet (%v); attach_offering is unavailable until it can", err)
+		} else if cur := store.Current(); cur != nil {
+			logf("catalog version %d in effect", cur.Version)
+		} else {
+			logf("no catalog version in effect yet; attach_offering is unavailable until one is published")
+		}
+		svc := service.New(service.Config{Limits: cfg.Limits, CommandsTopic: cfg.Bus.CommandsTopic, Catalog: store}, st, a.prod, data)
 
 		if cfg.RESTAddr != "off" {
 			a.restSrv = &http.Server{Handler: rest.New(svc, az), ReadHeaderTimeout: 5 * time.Second,
@@ -143,6 +157,9 @@ func (a *App) Run(ctx context.Context) error {
 	if a.wrk != nil {
 		a.logf("command worker running (group %s, topic %s)", a.cfg.Bus.Group, a.cfg.Bus.CommandsTopic)
 		start(func() error { return a.wrk.Run(ctx) })
+	}
+	if a.rep != nil {
+		start(func() error { return a.rep.Run(ctx) })
 	}
 	if a.restSrv != nil {
 		a.logf("REST listening on %s", a.RESTAddr())

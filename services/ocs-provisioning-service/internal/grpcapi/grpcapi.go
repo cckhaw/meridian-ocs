@@ -138,6 +138,11 @@ func (s *Server) AddBundle(ctx context.Context, r *ocsv1.AddBundleRequest) (*ocs
 	return s.submit(ctx, c, err)
 }
 
+func (s *Server) AttachOffering(ctx context.Context, r *ocsv1.AttachOfferingRequest) (*ocsv1.CommandAccepted, error) {
+	return s.submit(ctx, &command.Command{ID: r.IdempotencyKey, Type: command.AttachOffering, Key: r.SubscriberKey,
+		Offering: r.OfferingId, Renew: r.Renew}, nil)
+}
+
 func (s *Server) ReloadBucket(ctx context.Context, r *ocsv1.ReloadBucketRequest) (*ocsv1.CommandAccepted, error) {
 	c := &command.Command{ID: r.IdempotencyKey, Type: command.ReloadBucket, Key: r.SubscriberKey,
 		BucketID: r.BucketId, Amount: r.Amount, KeepExpiry: r.KeepExpiry, Priority: r.Priority}
@@ -179,6 +184,9 @@ func (s *Server) GetCommand(ctx context.Context, r *ocsv1.GetCommandRequest) (*o
 	out := &ocsv1.CommandStatus{CommandId: rec.ID, Type: string(rec.Type), SubscriberKey: rec.Key, State: commandState(rec.State),
 		Outcome: rec.Outcome, Message: rec.Message, Balance: rec.Balance, OldBalance: rec.OldBalance,
 		FromState: rec.From, ToState: rec.To, Version: rec.Version, AcceptedAt: timestamppb.New(rec.AcceptedAt)}
+	if rec.Type == command.AttachOffering {
+		out.FromState, out.ToState, out.FromOffering, out.ToOffering = "", "", rec.From, rec.To
+	}
 	if !rec.CompletedAt.IsZero() {
 		out.CompletedAt = timestamppb.New(rec.CompletedAt)
 	}
@@ -193,7 +201,7 @@ func (s *Server) GetSubscriber(ctx context.Context, r *ocsv1.GetSubscriberReques
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	out := &ocsv1.Subscriber{SubscriberKey: v.Key, Version: v.Profile.Version,
+	out := &ocsv1.Subscriber{SubscriberKey: v.Key, Version: v.Profile.Version, OfferingId: v.Profile.Offering,
 		CreatedAt: tsOrNil(v.Profile.CreatedAt), StatusAt: tsOrNil(v.Profile.StatusAt), GraceUntil: tsOrNil(v.Profile.GraceUntil)}
 	switch v.Profile.Payment {
 	case "prepaid":
@@ -265,6 +273,8 @@ func toStatus(err error) error {
 		return status.Error(codes.Canceled, "cancelled")
 	case errors.Is(err, context.DeadlineExceeded):
 		return status.Error(codes.DeadlineExceeded, "deadline exceeded")
+	case errors.Is(err, service.ErrNoCatalog):
+		return status.Error(codes.Unavailable, "no tariff catalog is available to resolve the offering; retry later")
 	case errors.Is(err, service.ErrUnavailable):
 		return status.Error(codes.Unavailable, "temporarily unavailable, retry with the same idempotency key")
 	}

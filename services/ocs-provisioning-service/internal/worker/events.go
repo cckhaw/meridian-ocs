@@ -12,6 +12,7 @@ const (
 	EventProvisioned     = "subscriber.provisioned"
 	EventBalanceModified = "balance.modified"
 	EventLifecycle       = "lifecycle.changed"
+	EventOffering        = "offering.changed"
 	EventCommandFailed   = "command.failed"
 )
 
@@ -37,6 +38,7 @@ type Event struct {
 	Balance   *int64 `json:"balance,omitempty"`
 	From      string `json:"from,omitempty"`
 	To        string `json:"to,omitempty"`
+	Buckets   int    `json:"buckets,omitempty"`
 	Reason    string `json:"reason,omitempty"`
 	Outcome   string `json:"outcome,omitempty"`
 	Message   string `json:"message,omitempty"`
@@ -55,6 +57,8 @@ func eventFor(c *command.Command, o Outcome) Event {
 		e.Type, e.Payment = EventProvisioned, c.Payment
 	case command.ChangeLifecycle:
 		e.Type, e.From, e.To, e.Reason = EventLifecycle, o.Res.From, o.Res.To, c.Reason
+	case command.AttachOffering:
+		e.Type, e.From, e.To, e.Buckets = EventOffering, o.Res.PrevOffering, o.Res.Offering, o.Res.Buckets
 	default:
 		bal := o.Res.Balance
 		e.Type, e.Bucket, e.Balance, e.Reason = EventBalanceModified, c.BucketID, &bal, c.Reason

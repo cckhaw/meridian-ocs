@@ -106,7 +106,7 @@ other nodes, so a filter does not save the round trip it was meant to save.
   "unknown subscriber".
 - **Rating** (`OCS_MED_RATING=catalog`, `OCS_DEFAULT_PLAN`) adds a list-price
   `charge` per container and per record, priced with the cash rate of the
-  **catalog version in effect when the record opened** (`Tariff.RatesAt`), so a
+  **catalog version in effect when the record opened** (`Tariff.RatesAt`) and the subscriber's plan (per-subscriber offering, doc 09), so a
   late file after a price change still uses the price that applied; the version
   is recorded on the record. Allowances and bundles are *not* applied (online
   charging already debited them): this is a reconciliation/post-paid value, not
@@ -173,8 +173,9 @@ invalid record and a copy of a file record; restart with a fresh group.
    duplicates. The window is configurable; the cost is Redis memory.
 6. **Unmatched records are held in suspense but nothing re-drives them** when the
    subscriber is later provisioned.
-7. **Offline rating is list price on cash only**, bytes only, using the single
-   default plan (per-subscriber plans are a catalog gap, doc 09).
+7. **Offline rating is list price on cash only**, bytes only, on the plan of the
+   subscriber's *current* offering (the offering in force when the record was
+   opened is not recorded; doc 09).
 8. **No Kafka TLS/SASL** in this service (same as provisioning).
 9. **The duplicate window and ledger are in Redis**: their durability is the
    durability of that Redis (doc 07). Losing the dedup window can let a

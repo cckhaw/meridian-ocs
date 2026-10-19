@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cckhaw/meridian-ocs/pkg/catalog"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer/redistest"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/auth"
@@ -70,7 +71,7 @@ func newRig(t *testing.T, az *auth.Authorizer) *rig {
 	st := status.New(rdb, "", 0)
 	prod := &capturingProducer{}
 	data := datalayer.New(rdb)
-	svc := service.New(service.Config{Limits: lim}, st, prod, data)
+	svc := service.New(service.Config{Limits: lim, Catalog: testCatalog(t)}, st, prod, data)
 	return &rig{h: New(svc, az), prod: prod, st: st, data: data}
 }
 
@@ -145,6 +146,10 @@ func TestEveryWriteEndpointQueuesTheRightCommand(t *testing.T) {
 			}},
 		{"remove, not forced", "DELETE", "/v1/subscribers/acct-1/buckets/data", ``,
 			func(c *command.Command) bool { return c.Type == command.RemoveBucket && !c.Force }},
+		{"offering", "POST", "/v1/subscribers/acct-1/offering", `{"offering":"gold-offer","renew":true}`,
+			func(c *command.Command) bool {
+				return c.Type == command.AttachOffering && c.Offering == "gold-offer" && c.Renew && c.Key == "acct-1" && len(c.Allowances) == 1 && c.Allowances[0].ID == "data" && c.CatalogVersion == 1
+			}},
 		{"lifecycle", "POST", "/v1/subscribers/acct-1/lifecycle", `{"target":"grace","graceUntil":"2030-01-01T00:00:00Z","reason":"low balance"}`,
 			func(c *command.Command) bool {
 				return c.Type == command.ChangeLifecycle && c.Target == "grace" && c.GraceUntil != 0 && c.Reason == "low balance"
@@ -343,5 +348,62 @@ func TestReadEndpoints(t *testing.T) {
 	m = obj(t, g.do("GET", "/v1/commands/susp-9", "", "", ""))
 	if m["state"] != "failed" || m["outcome"] != "invalid_transition" || m["message"] == nil || m["balance"] != nil {
 		t.Fatalf("a failed command reports its reason and no balance: %v", m)
+	}
+}
+
+func testCatalog(t testing.TB) *catalog.Store {
+	t.Helper()
+	d := catalog.Document{EffectiveFrom: time.Now().Add(-time.Hour),
+		Plans: []catalog.PricePlan{{ID: "gold", Rules: []catalog.ChargeRule{{ID: "r", Cash: &catalog.Price{Num: 1, Den: 1}}}}},
+		Offerings: []catalog.ProductOffering{{ID: "gold-offer", PlanID: "gold", Allowances: []catalog.AllowanceBucket{
+			{ID: "data", Class: "bundle", Unit: "bytes", Amount: 1000}}}}}
+	s := catalog.NewStore(0)
+	if _, _, err := s.Publish(d, 0); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestOfferingErrorsAndRead(t *testing.T) {
+	g := newRig(t, auth.Off())
+	if w := g.do("POST", "/v1/subscribers/acct-1/offering", `{"offering":"platinum"}`, "o-1", ""); w.Code != http.StatusBadRequest || errCode(t, w) != "invalid_request" {
+		t.Fatalf("unknown offering: %d %s", w.Code, w.Body.String())
+	}
+	if w := g.do("POST", "/v1/subscribers/acct-1/offering", `{"offering":"gold-offer","surprise":1}`, "o-2", ""); w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown field: %d", w.Code)
+	}
+	if w := g.do("POST", "/v1/subscribers/acct-1/offering", `{}`, "o-3", ""); w.Code != http.StatusBadRequest {
+		t.Fatalf("no offering: %d", w.Code)
+	}
+	if g.prod.count() != 0 {
+		t.Fatal("a refused request was queued")
+	}
+
+	// With no catalog configured the answer is a retryable 503, not a 400.
+	rdb := redistest.Start(t)
+	svc := service.New(service.Config{Limits: lim}, status.New(rdb, "", 0), &capturingProducer{}, datalayer.New(rdb))
+	h := New(svc, auth.Off())
+	r := httptest.NewRequest("POST", "/v1/subscribers/acct-1/offering", strings.NewReader(`{"offering":"gold-offer"}`))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Idempotency-Key", "o-4")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusServiceUnavailable || errCode(t, w) != "catalog_unavailable" || w.Header().Get("Retry-After") == "" {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+
+	// The subscriber read shows the offering.
+	ctx := context.Background()
+	for _, op := range []datalayer.ProvisionOp{
+		{Op: datalayer.ProvCreate, Key: "acct-2", Token: "c", Payment: "prepaid"},
+		{Op: datalayer.ProvOffering, Key: "acct-2", Token: "o", Offering: "gold-offer"},
+	} {
+		op.Now, op.Fingerprint = time.Now(), op.Token
+		if res, err := g.data.Provision(ctx, op); err != nil || res.Code != datalayer.ProvApplied {
+			t.Fatalf("%v %+v", err, res)
+		}
+	}
+	if m := obj(t, g.do("GET", "/v1/subscribers/acct-2", "", "", "")); m["offering"] != "gold-offer" {
+		t.Fatalf("%v", m)
 	}
 }

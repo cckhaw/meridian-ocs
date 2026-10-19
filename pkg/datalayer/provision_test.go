@@ -463,3 +463,104 @@ func TestGraceStillServesAndNoProfileMeansServed(t *testing.T) {
 		t.Fatalf("%+v", resp.Items[0])
 	}
 }
+
+func gb(id string, amount int64) datalayer.Allowance {
+	return datalayer.Allowance{BucketID: id, Class: datalayer.ClassBundle, Unit: canonical.UnitBytes, Amount: amount, Order: 100}
+}
+
+func TestAttachOfferingIsAllOrNothing(t *testing.T) {
+	c, ctx := setup(t)
+	create(t, c, "o1", "prepaid")
+	if off, err := c.Offering(ctx, "o1"); err != nil || off != "" {
+		t.Fatalf("%q %v", off, err)
+	}
+	if _, err := c.Offering(ctx, "ghost"); err != datalayer.ErrNoSubscriber {
+		t.Fatalf("%v", err)
+	}
+
+	r := prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvOffering, Key: "o1", Token: "a1", Offering: "gold",
+		Allowances: []datalayer.Allowance{gb("data", 1000), {BucketID: "sms", Class: datalayer.ClassPromo, Unit: canonical.UnitEvents, Amount: 50, Order: 10}}})
+	if r.Code != datalayer.ProvApplied || r.Offering != "gold" || r.PrevOffering != "" || r.Buckets != 2 || r.Version != 2 {
+		t.Fatalf("%+v", r)
+	}
+	if off, _ := c.Offering(ctx, "o1"); off != "gold" {
+		t.Fatalf("%q", off)
+	}
+	if p, _ := c.GetProfile(ctx, "o1"); p.Offering != "gold" {
+		t.Fatalf("%+v", p)
+	}
+	bs, _ := c.ListBuckets(ctx, "o1")
+	if len(bs) != 2 || bs[0].ID != "sms" || bs[1].ID != "data" || bs[1].Balance != 1000 {
+		t.Fatalf("%+v", bs)
+	}
+
+	// Attaching again without renew conflicts, and writes nothing: not even the
+	// allowance that did not exist yet, nor the offering id.
+	r = prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvOffering, Key: "o1", Token: "a2", Offering: "platinum",
+		Allowances: []datalayer.Allowance{gb("extra", 5), gb("data", 9999)}})
+	if r.Code != datalayer.ProvAllowanceExists || r.Conflict != "data" {
+		t.Fatalf("%+v", r)
+	}
+	if off, _ := c.Offering(ctx, "o1"); off != "gold" {
+		t.Fatalf("a refused attach changed the offering to %q", off)
+	}
+	if bs, _ = c.ListBuckets(ctx, "o1"); len(bs) != 2 || bs[1].Balance != 1000 {
+		t.Fatalf("a refused attach changed buckets: %+v", bs)
+	}
+
+	// Renew resets existing allowances to their full amount and switches offering.
+	prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvAdjust, Key: "o1", Token: "use", BucketID: "data", Amount: -400})
+	r = prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvOffering, Key: "o1", Token: "a3", Offering: "gold", Renew: true,
+		Allowances: []datalayer.Allowance{gb("data", 1000)}})
+	if r.Code != datalayer.ProvApplied || r.PrevOffering != "gold" || r.Buckets != 1 {
+		t.Fatalf("%+v", r)
+	}
+	if bal, _ := c.Balance(ctx, "o1", "data"); bal != 1000 {
+		t.Fatalf("renewed balance %d", bal)
+	}
+
+	// A bucket id that exists with another class is a conflict even on renew.
+	prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvTopUp, Key: "o1", Token: "tu", BucketID: "cash", Amount: 10, Order: 1000})
+	r = prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvOffering, Key: "o1", Token: "a4", Offering: "x", Renew: true,
+		Allowances: []datalayer.Allowance{gb("cash", 1)}})
+	if r.Code != datalayer.ProvAllowanceExists {
+		t.Fatalf("%+v", r)
+	}
+
+	// Redelivery of the first attach returns its stored outcome and does not apply again.
+	r = prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvOffering, Key: "o1", Token: "a1", Offering: "gold",
+		Allowances: []datalayer.Allowance{gb("data", 1000), {BucketID: "sms", Class: datalayer.ClassPromo, Unit: canonical.UnitEvents, Amount: 50, Order: 10}}})
+	if r.Code != datalayer.ProvDuplicate || r.OriginalCode != datalayer.ProvApplied || r.Offering != "gold" {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestAttachOfferingGuards(t *testing.T) {
+	c, ctx := setup(t)
+	if r := prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvOffering, Key: "none", Token: "t", Offering: "gold"}); r.Code != datalayer.ProvNoSubscriber {
+		t.Fatalf("%+v", r)
+	}
+	create(t, c, "o2", "postpaid")
+	prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvLifecycle, Key: "o2", Token: "kill", Target: "terminated"})
+	if r := prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvOffering, Key: "o2", Token: "t2", Offering: "gold"}); r.Code != datalayer.ProvTerminated {
+		t.Fatalf("%+v", r)
+	}
+	for name, op := range map[string]datalayer.ProvisionOp{
+		"no offering":  {Offering: ""},
+		"comma in id":  {Offering: "a,b"},
+		"bad class":    {Offering: "g", Allowances: []datalayer.Allowance{{BucketID: "x", Class: datalayer.ClassCash, Amount: 1}}},
+		"zero amount":  {Offering: "g", Allowances: []datalayer.Allowance{gb("x", 0)}},
+		"duplicate id": {Offering: "g", Allowances: []datalayer.Allowance{gb("x", 1), gb("x", 2)}},
+		"too many": {Offering: "g", Allowances: func() (a []datalayer.Allowance) {
+			for i := 0; i <= datalayer.MaxAllowances; i++ {
+				a = append(a, gb(fmt.Sprintf("b%d", i), 1))
+			}
+			return
+		}()},
+	} {
+		op.Op, op.Key, op.Token, op.Fingerprint, op.Now = datalayer.ProvOffering, "o2", "g-"+name, "fp", t0
+		if _, err := c.Provision(ctx, op); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

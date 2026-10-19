@@ -20,7 +20,7 @@ versioned tariff catalog, provisions subscribers asynchronously, and mediates of
 | Subscriber identity mapping | done | `pkg/identity` | [06](docs/architecture/06-identity-mapping.md) |
 | Durability (replica-acknowledged commits) | done | `pkg/datalayer/durability.go` | [07](docs/architecture/07-durability.md) |
 | Provisioning & lifecycle | done | `services/ocs-provisioning-service` | [08](docs/architecture/08-provisioning.md) |
-| Tariff catalog | done | `pkg/catalog`, `services/ocs-catalog-service` | [09](docs/architecture/09-catalog.md) |
+| Tariff catalog + per-subscriber plans (offerings) | done | `pkg/catalog`, `services/ocs-catalog-service`, `attach_offering` in provisioning | [09](docs/architecture/09-catalog.md), [08](docs/architecture/08-provisioning.md) |
 | Offline CDR mediation | done (BER mapping unverified) | `services/ocs-mediation-pipeline` | [10](docs/architecture/10-mediation.md) |
 | Multi-region active-active | design only | doc 01 §6 | |
 | AI Ops layer (telemetry, guarded control plane, declarative mappings) | scaffold only | `services/ocs-aiops-layer`, `api/proto/ocs/v1/aiops.proto` | |
@@ -62,7 +62,8 @@ Key ideas (details and trade-offs in the docs):
   postpaid may get a small, journalled, capped grant.
 - **Durable by acknowledgement.** Committing steps wait for a replica (`WAIT`) before answering.
 - **Versioned tariffs.** Rules are compiled, type-checked and published as append-only versions that
-  can be future-dated; rating nodes swap them in atomically with no restart.
+  can be future-dated; rating nodes swap them in atomically with no restart. A subscriber's offering
+  (set by provisioning, which also creates its allowance buckets atomically) selects its price plan.
 
 ## Repository layout
 
@@ -140,8 +141,9 @@ Honest list; each module doc has the detail.
   against a real cluster.
 - **No Redis Cluster deployment**, and `WAIT`-based durability is not available on Cluster.
 - **No multi-region replication** is implemented (single-writer-per-subscriber is the design).
-- **Per-subscriber price plans** do not exist yet: provisioning stores no plan, so every subscriber is
-  priced on one default plan; attaching an offering does not create its buckets.
+- **Offering changes are not pushed**: gateways see a subscriber's new offering after a 30 s cache TTL,
+  and there is no command to switch plan without re-creating the offering's allowances.
+- **Pricing is per request attribute only**: no tiered or volume pricing across a billing period.
 - **The AI Ops layer, Helm charts and standalone rating/data-layer services** are not built.
 - **BER CDR field mapping** (PGW-CDR) comes from the specification as recalled and must be verified
   against real network files before use; no SMF-CDR mapping.

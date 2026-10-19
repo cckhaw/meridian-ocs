@@ -10,6 +10,10 @@
 --   B  bucketId, class, kind, amount, expMs, order
 --   R  bucketId, amount, expMs|-1, order|keep   (reset an allowance)
 --   X  bucketId, force
+--   P  offering, renew, n, then n x (bucketId, class, kind, amount, expMs, order)
+--      attach an offering: set the subscriber's offering and create its allowances,
+--      all or nothing. With renew=1 an existing allowance bucket is reset instead
+--      of being an error.
 --
 -- Reply: {code, values...}, every value a string.
 --   0 applied | 1 duplicate (values are the stored original: code, values...)
@@ -17,6 +21,7 @@
 --   5 insufficient balance (balance) | 6 token reused with a different request
 --   7 no such bucket | 8 subscriber terminated | 9 balance overflow
 --   10 bucket not empty (balance) | 11 not a cash bucket
+--   12 allowance bucket already exists (bucket id), nothing applied
 --
 -- The outcome of every request, failures included, is stored under the token,
 -- so a redelivered command gets the same answer even if state has changed.
@@ -141,6 +146,35 @@ if op == 'X' then
   local ver = bump()
   ledger(P, 'type', 'remove', 'bucket', id, 'balance', fmt(bal), 'token', token, 'at', fmt(now))
   return finish(0, { fmt(bal), fmt(ver) })
+end
+
+if op == 'P' then
+  local offering, renew, n = ARGV[6], ARGV[7], tonumber(ARGV[8])
+  local base = 9
+  if not n or n < 0 or n > 32 then error('provision: bad allowance count') end
+  -- Check everything before writing anything.
+  for i = 0, n - 1 do
+    local at = base + i * 6
+    local bk = P .. ':b:' .. ARGV[at]
+    if redis.call('EXISTS', bk) == 1 then
+      if renew ~= '1' then return finish(12, { ARGV[at] }) end
+      if redis.call('HGET', bk, 'cls') ~= ARGV[at + 1] then return finish(12, { ARGV[at] }) end
+    end
+    if tonumber(ARGV[at + 3]) > MAXBAL then return finish(9) end
+  end
+  for i = 0, n - 1 do
+    local at = base + i * 6
+    local id, cls, kind, amount, exp, order = ARGV[at], ARGV[at + 1], ARGV[at + 2], ARGV[at + 3], ARGV[at + 4], ARGV[at + 5]
+    local bk = P .. ':b:' .. id
+    redis.call('HSET', bk, 'cls', cls, 'kind', kind, 'bal', amount, 'exp', exp)
+    redis.call('ZADD', P .. ':ord', tonumber(order), id)
+  end
+  -- '-' stands for "none": empty values do not survive the stored reply (it is comma joined)
+  local old = redis.call('HGET', pk, 'offering') or '-'
+  redis.call('HSET', pk, 'offering', offering)
+  local ver = bump()
+  ledger(P, 'type', 'offering', 'from', old, 'to', offering, 'buckets', fmt(n), 'token', token, 'at', fmt(now))
+  return finish(0, { old, offering, fmt(n), fmt(ver) })
 end
 
 error('provision: unknown op ' .. tostring(op))

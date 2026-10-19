@@ -8,6 +8,7 @@ import (
 
 	"github.com/cckhaw/meridian-ocs/pkg/canonical"
 	"github.com/cckhaw/meridian-ocs/pkg/catalog"
+	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer/redistest"
 )
 
@@ -87,5 +88,50 @@ func TestTariffModes(t *testing.T) {
 			t.Fatal("the gateway never picked up the new catalog version")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestCatalogTariffPricesBySubscribersOffering(t *testing.T) {
+	rdb := redistest.Start(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := catalog.Document{EffectiveFrom: time.Now().Add(-time.Hour),
+		Plans: []catalog.PricePlan{
+			{ID: "basic", Rules: []catalog.ChargeRule{{ID: "r", Cash: &catalog.Price{Num: 4, Den: 1}}}},
+			{ID: "gold", Rules: []catalog.ChargeRule{{ID: "r", Cash: &catalog.Price{Num: 1, Den: 1}}}},
+		},
+		Offerings: []catalog.ProductOffering{{ID: "gold-offer", PlanID: "gold"}},
+	}
+	if _, _, err := (&catalog.Replicator{Redis: rdb, Store: catalog.NewStore(0)}).Publish(ctx, d, 0); err != nil {
+		t.Fatal(err)
+	}
+	dl := datalayer.New(rdb)
+	for _, op := range []datalayer.ProvisionOp{
+		{Op: datalayer.ProvCreate, Key: "alice", Token: "c1", Payment: "prepaid"},
+		{Op: datalayer.ProvOffering, Key: "alice", Token: "o1", Offering: "gold-offer"},
+		{Op: datalayer.ProvCreate, Key: "bob", Token: "c2", Payment: "prepaid"},
+	} {
+		op.Now, op.Fingerprint = time.Now(), op.Token
+		if r, err := dl.Provision(ctx, op); err != nil || r.Code != datalayer.ProvApplied {
+			t.Fatalf("%v %+v", err, r)
+		}
+	}
+	tf, stop, err := newTariff(ctx, envOf(map[string]string{"OCS_TARIFF": "catalog", "OCS_DEFAULT_PLAN": "basic"}), rdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	cash := func(sub string) int64 {
+		rates, err := tf.Rates(&canonical.Request{SubscriberID: sub}, &canonical.UnitRequest{Kind: canonical.UnitBytes}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rates[len(rates)-1].Num
+	}
+	if cash("alice") != 1 || cash("bob") != 4 || cash("stranger") != 4 {
+		t.Fatalf("alice %d (want 1), bob %d (want 4), stranger %d (want 4)", cash("alice"), cash("bob"), cash("stranger"))
+	}
+	if _, _, err := newTariff(ctx, envOf(map[string]string{"OCS_TARIFF": "catalog", "OCS_DEFAULT_PLAN": "basic", "OCS_PLAN_CACHE_TTL": "0s"}), rdb); err == nil {
+		t.Fatal("a zero cache TTL must be refused")
 	}
 }

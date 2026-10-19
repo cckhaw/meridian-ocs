@@ -97,6 +97,29 @@ could have dropped a settlement. Counted in `engine.Stats.Unpriced`.
 Gateway: `OCS_TARIFF=catalog` with `OCS_DEFAULT_PLAN`. It refuses to start
 unless a version is in effect and the plan exists.
 
+## Per-subscriber plans
+
+A subscriber's profile carries an offering id (set by the provisioning service,
+doc 08). `catalog.ProfileResolver` turns it into a plan:
+
+```
+subscriber --(profile HGET, cached 30 s)--> offering id --(catalog version in effect)--> plan id
+```
+
+- The offering is cached per subscriber (sharded, bounded at 1,000,000 entries,
+  `OCS_PLAN_CACHE_TTL`). The offering -> plan step is not cached: it is a map
+  lookup in the snapshot, so a catalog publish that re-points an offering at
+  another plan applies at once.
+- A subscriber with no profile or no offering is priced on `OCS_DEFAULT_PLAN`.
+- A **failed lookup is never answered with the default plan** (that would price
+  someone on the wrong tariff because Redis blinked): the unit gets no rates
+  (no new quota, usage already reserved still settles) and the engine counts it
+  as unpriced. An offering missing from the catalog is handled the same way.
+- Cost: one extra Redis `HMGET` on a cache miss, with a 100 ms bound; hits are a
+  sharded map read. Not yet measured under load.
+- The mediation pipeline uses the same resolver with the subscriber's *current*
+  offering (the offering at record time is not recorded).
+
 ## API
 
 See `services/ocs-catalog-service/internal/api`. Reads, validate and dry-run
@@ -115,12 +138,12 @@ prices from the replicated catalog, including a future-dated version.
 
 ## Known gaps
 
-1. **No per-subscriber plan.** Provisioning stores no plan/offering on a
-   subscriber, so the gateway prices everyone on `OCS_DEFAULT_PLAN`.
-   `PlanResolver` is the seam; the fix is an `offering` field on create/attach
-   and a cached profile lookup (the same cache the fail policy needs).
-2. **Offering allowances are not applied.** Attaching an offering should create
-   its buckets through provisioning; today `AddBundle` takes explicit values.
+1. **Offering changes are seen after the cache TTL** (30 s by default) by gateways
+   and mediation nodes; there is no push invalidation. There is no command to
+   move a subscriber to another plan without also creating its allowances.
+2. **Offering ids must outlive their subscribers.** A subscriber whose offering is
+   missing from the catalog version in effect is not priced (no new quota)
+   rather than silently moved to the default plan.
 3. **Rule inputs are request attributes only.** There is no subscriber
    location, tier or accumulated-usage variable, so tiered or volume-discount
    pricing across a billing period is not expressible.

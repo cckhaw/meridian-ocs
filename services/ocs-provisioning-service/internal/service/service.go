@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cckhaw/meridian-ocs/pkg/catalog"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/bus"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/command"
@@ -23,6 +24,9 @@ var (
 	ErrUnavailable = errors.New("service: temporarily unavailable")
 	// ErrNotFound: unknown command or subscriber.
 	ErrNotFound = errors.New("service: not found")
+	// ErrNoCatalog: an offering was requested but no catalog version is in
+	// effect (or the service has no catalog); nothing was accepted.
+	ErrNoCatalog = errors.New("service: no catalog available")
 )
 
 // Config configures the Service.
@@ -35,6 +39,9 @@ type Config struct {
 	// is idempotent, so a duplicate message is harmless. Default 30s.
 	RepublishAfter time.Duration
 	Now            func() time.Time
+	// Catalog supplies the offerings for attach_offering (optional: without it
+	// that command is refused with ErrNoCatalog).
+	Catalog *catalog.Store
 }
 
 // Service accepts commands and answers reads.
@@ -80,6 +87,11 @@ func (s *Service) Submit(ctx context.Context, c *command.Command) (Accepted, err
 	if err := c.Validate(s.cfg.Limits); err != nil {
 		return Accepted{}, err
 	}
+	if c.Type == command.AttachOffering {
+		if err := s.expandOffering(c); err != nil {
+			return Accepted{}, err
+		}
+	}
 	rec, created, err := s.status.Begin(ctx, c)
 	if err != nil {
 		return Accepted{}, fmt.Errorf("%w: %w", ErrUnavailable, err)
@@ -103,6 +115,37 @@ func (s *Service) Submit(ctx context.Context, c *command.Command) (Accepted, err
 		return Accepted{}, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	return Accepted{CommandID: c.ID, State: status.Accepted}, nil
+}
+
+// expandOffering copies the offering's allowances from the catalog version in
+// effect into the command, so what is queued is exactly what will be applied.
+func (s *Service) expandOffering(c *command.Command) error {
+	if s.cfg.Catalog == nil {
+		return ErrNoCatalog
+	}
+	sn := s.cfg.Catalog.At(time.UnixMilli(c.AcceptedAt))
+	if sn == nil {
+		return ErrNoCatalog
+	}
+	o, ok := sn.Offering(c.Offering)
+	if !ok {
+		return &command.ValidationError{Msg: fmt.Sprintf("unknown offering %q in catalog version %d", c.Offering, sn.Version)}
+	}
+	c.CatalogVersion, c.Allowances = sn.Version, nil
+	for _, a := range o.Allowances {
+		al := command.Allowance{ID: a.ID, Class: a.Class, Unit: a.Unit, Amount: a.Amount, Order: a.Order}
+		if al.Order == 0 {
+			al.Order = command.DefaultBundlePriority
+			if a.Class == "promo" {
+				al.Order = command.DefaultPromoPriority
+			}
+		}
+		if a.ValidityDays > 0 {
+			al.ExpiresAt = c.AcceptedAt + int64(a.ValidityDays)*24*60*60*1000
+		}
+		c.Allowances = append(c.Allowances, al)
+	}
+	return c.Validate(s.cfg.Limits)
 }
 
 func (s *Service) publish(ctx context.Context, c *command.Command) error {

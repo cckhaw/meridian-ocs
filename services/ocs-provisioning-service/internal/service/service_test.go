@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cckhaw/meridian-ocs/pkg/catalog"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer/redistest"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/command"
@@ -219,5 +220,83 @@ func TestGetCommandAndGetSubscriber(t *testing.T) {
 	}
 	if _, err := svc.GetSubscriber(ctx, "a{b}"); !errors.Is(err, ErrNotFound) {
 		t.Fatal("an invalid key is not found, not a server error")
+	}
+}
+
+func catalogWith(t *testing.T, from time.Time, dataAmount int64) *catalog.Store {
+	t.Helper()
+	d := catalog.Document{EffectiveFrom: from,
+		Plans: []catalog.PricePlan{{ID: "gold", Rules: []catalog.ChargeRule{{ID: "r", Cash: &catalog.Price{Num: 1, Den: 1}}}}},
+		Offerings: []catalog.ProductOffering{{ID: "gold-offer", PlanID: "gold", Allowances: []catalog.AllowanceBucket{
+			{ID: "data", Class: "bundle", Unit: "bytes", Amount: dataAmount, ValidityDays: 30},
+			{ID: "welcome", Class: "promo", Unit: "events", Amount: 5, Order: 3}}}}}
+	s := catalog.NewStore(0)
+	if _, _, err := s.Publish(d, 0); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestAttachOfferingIsExpandedFromTheCatalogAtAcceptance(t *testing.T) {
+	svc, prod, clk, _ := setup(t)
+	svc.cfg.Catalog = catalogWith(t, clk.Now().Add(-time.Hour), 1000)
+	c := &command.Command{ID: "att-1", Type: command.AttachOffering, Key: "acct-1", Offering: "gold-offer"}
+	if _, err := svc.Submit(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	queued, _ := command.Decode(prod.msgs[0].value)
+	if queued.CatalogVersion != 1 || len(queued.Allowances) != 2 {
+		t.Fatalf("%+v", queued)
+	}
+	data, welcome := queued.Allowances[0], queued.Allowances[1]
+	if data.ID != "data" || data.Amount != 1000 || data.Order != command.DefaultBundlePriority ||
+		data.ExpiresAt != clk.Now().UnixMilli()+30*24*3600*1000 {
+		t.Fatalf("%+v", data)
+	}
+	if welcome.Order != 3 || welcome.ExpiresAt != 0 {
+		t.Fatalf("an explicit order is kept and no validity means no expiry: %+v", welcome)
+	}
+}
+
+func TestAttachOfferingRefusals(t *testing.T) {
+	svc, prod, clk, _ := setup(t)
+	c := func(id, off string) *command.Command {
+		return &command.Command{ID: id, Type: command.AttachOffering, Key: "acct-1", Offering: off}
+	}
+	if _, err := svc.Submit(context.Background(), c("x1", "gold-offer")); !errors.Is(err, ErrNoCatalog) {
+		t.Fatalf("no catalog configured: %v", err)
+	}
+	svc.cfg.Catalog = catalog.NewStore(0)
+	if _, err := svc.Submit(context.Background(), c("x2", "gold-offer")); !errors.Is(err, ErrNoCatalog) {
+		t.Fatalf("empty catalog: %v", err)
+	}
+	svc.cfg.Catalog = catalogWith(t, clk.Now().Add(-time.Hour), 1000)
+	if _, err := svc.Submit(context.Background(), c("x3", "platinum")); !command.IsValidation(err) {
+		t.Fatalf("unknown offering: %v", err)
+	}
+	svc.cfg.Catalog = catalogWith(t, clk.Now().Add(time.Hour), 1000) // starts in the future
+	if _, err := svc.Submit(context.Background(), c("x4", "gold-offer")); !errors.Is(err, ErrNoCatalog) {
+		t.Fatalf("catalog not yet in effect: %v", err)
+	}
+	if prod.count() != 0 {
+		t.Fatal("a refused attach was queued")
+	}
+}
+
+// A retry after the catalog changed is still the same request: it returns the
+// original command and does not conflict with it.
+func TestRetryAfterACatalogChangeIsTheSameRequest(t *testing.T) {
+	svc, prod, clk, _ := setup(t)
+	svc.cfg.Catalog = catalogWith(t, clk.Now().Add(-time.Hour), 1000)
+	mk := func() *command.Command {
+		return &command.Command{ID: "att-2", Type: command.AttachOffering, Key: "acct-1", Offering: "gold-offer"}
+	}
+	if _, err := svc.Submit(context.Background(), mk()); err != nil {
+		t.Fatal(err)
+	}
+	svc.cfg.Catalog = catalogWith(t, clk.Now().Add(-time.Hour), 9999) // the catalog now says 9999
+	acc, err := svc.Submit(context.Background(), mk())
+	if err != nil || !acc.Duplicate || prod.count() != 1 {
+		t.Fatalf("%+v %v queued=%d", acc, err, prod.count())
 	}
 }

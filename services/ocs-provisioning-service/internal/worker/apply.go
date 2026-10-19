@@ -75,6 +75,15 @@ func (a *DataApplier) Apply(ctx context.Context, c *command.Command) (Outcome, e
 		if c.GraceUntil > 0 {
 			op.Until = time.UnixMilli(c.GraceUntil)
 		}
+	case command.AttachOffering:
+		op.Op, op.Offering, op.Renew = datalayer.ProvOffering, c.Offering, c.Renew
+		for _, al := range c.Allowances {
+			x := datalayer.Allowance{BucketID: al.ID, Class: datalayer.Class(al.Class), Unit: unitKind(al.Unit), Amount: al.Amount, Order: al.Order}
+			if al.ExpiresAt > 0 {
+				x.ExpiresAt = time.UnixMilli(al.ExpiresAt)
+			}
+			op.Allowances = append(op.Allowances, x)
+		}
 	default:
 		return failed("invalid", "unknown command type"), nil
 	}
@@ -128,6 +137,8 @@ func failureMessage(c datalayer.ProvisionCode, r datalayer.ProvisionResult) stri
 		return fmt.Sprintf("the bucket still holds %d; use force to remove it", r.Balance)
 	case datalayer.ProvNotCashBucket:
 		return "a top-up needs a cash bucket"
+	case datalayer.ProvAllowanceExists:
+		return fmt.Sprintf("allowance bucket %q already exists (or has another class); set renew to reset allowances", r.Conflict)
 	}
 	return c.String()
 }

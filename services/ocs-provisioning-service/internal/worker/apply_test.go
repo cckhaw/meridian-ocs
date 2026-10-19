@@ -303,3 +303,43 @@ func TestChargingUsesWhatProvisioningCreated(t *testing.T) {
 		t.Fatalf("%+v", it)
 	}
 }
+
+func TestAttachOfferingCommand(t *testing.T) {
+	a, data, _ := newApplier(t)
+	ctx := context.Background()
+	apply(t, a, create("c", "acct-1", msisdn))
+	exp := time.Unix(1_900_000_000, 0).UnixMilli()
+	attach := func(id string, renew bool) command.Command {
+		return command.Command{ID: id, Type: command.AttachOffering, Offering: "gold", Renew: renew, CatalogVersion: 3,
+			Allowances: []command.Allowance{
+				{ID: "data", Class: "bundle", Unit: "bytes", Amount: 1000, ExpiresAt: exp, Order: 100},
+				{ID: "welcome", Class: "promo", Unit: "events", Amount: 5, Order: 3}}}
+	}
+	out := apply(t, a, attach("o1", false))
+	if out.State != status.Applied || out.Res.Offering != "gold" || out.Res.PrevOffering != "" || out.Res.Buckets != 2 {
+		t.Fatalf("%+v", out)
+	}
+	if off, _ := data.Offering(ctx, "acct-1"); off != "gold" {
+		t.Fatalf("%q", off)
+	}
+	bs, _ := data.ListBuckets(ctx, "acct-1")
+	if len(bs) != 2 || bs[0].ID != "welcome" || bs[0].Kind != "events" || bs[1].ID != "data" || bs[1].ExpiresAt.UnixMilli() != exp {
+		t.Fatalf("%+v", bs)
+	}
+
+	out = apply(t, a, attach("o2", false))
+	if out.State != status.Failed || out.Code != "allowance_exists" || !strings.Contains(out.Message, "renew") {
+		t.Fatalf("%+v", out)
+	}
+	if out = apply(t, a, attach("o3", true)); out.State != status.Applied || out.Res.PrevOffering != "gold" {
+		t.Fatalf("%+v", out)
+	}
+	// The event says what changed.
+	ev := eventFor(&command.Command{ID: "o3", Type: command.AttachOffering, Key: "acct-1"}, out)
+	if ev.Type != EventOffering || ev.From != "gold" || ev.To != "gold" || ev.Buckets != 2 {
+		t.Fatalf("%+v", ev)
+	}
+	if out = apply(t, a, command.Command{ID: "o4", Type: command.AttachOffering, Key: "nobody", Offering: "gold"}); out.Code != "no_such_subscriber" {
+		t.Fatalf("%+v", out)
+	}
+}

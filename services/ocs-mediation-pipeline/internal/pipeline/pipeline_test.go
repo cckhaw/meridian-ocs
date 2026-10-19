@@ -319,7 +319,7 @@ func TestRatingUsesThePriceInEffectWhenTheRecordOpened(t *testing.T) {
 	}
 	pub(t0.Add(-24*time.Hour), 2)
 	pub(t0.Add(30*time.Minute), 10) // price rises 30 minutes after t0
-	e.p.Rater = CatalogRater{Tariff: &catalog.Tariff{Store: cat}, Plan: "std"}
+	e.p.Rater = CatalogRater{Tariff: &catalog.Tariff{Store: cat, DefaultPlan: "std"}}
 
 	early := rec("262010000000001", 0, 10, 20) // opens at t0: price 2
 	late := rec("262010000000002", 60, 10, 20) // opens at t0+60m: price 10
