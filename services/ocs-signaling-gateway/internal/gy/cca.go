@@ -23,7 +23,7 @@ func resultCode(r canonical.Result) uint32 {
 		return diameter.ResultUnknownSessionID
 	case canonical.ResultStaleRequest:
 		return diameter.ResultUnableToComply
-	case canonical.ResultUnavailable:
+	case canonical.ResultUnavailable, canonical.ResultBarred:
 		return diameter.ResultEndUserDenied
 	case canonical.ResultTooBusy:
 		return diameter.ResultTooBusy
@@ -37,6 +37,8 @@ func unitResultCode(r canonical.Result) uint32 {
 		return diameter.ResultCreditLimitReached
 	case canonical.ResultNoBucket:
 		return diameter.ResultRatingFailed
+	case canonical.ResultBarred:
+		return diameter.ResultEndUserDenied
 	}
 	return diameter.ResultUnableToComply
 }

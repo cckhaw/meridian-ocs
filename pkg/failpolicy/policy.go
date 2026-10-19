@@ -5,7 +5,7 @@
 //
 //   - Prepaid subscribers fail CLOSED: no authoritative balance means no grant,
 //     because usage cannot be recovered from a wallet that was never debited.
-//   - Postpaid and high-value subscribers fail OPEN WITH A CAP: a small,
+//   - Postpaid subscribers fail OPEN WITH A CAP: a small,
 //     short-lived grant is issued from locally cached profile data, journalled
 //     for later reconciliation, and bounded per grant, per subscriber and
 //     process-wide so worst-case leakage is a known number.
@@ -44,9 +44,8 @@ const (
 // from process memory: the whole point of this package is that the data tier
 // is unavailable.
 type Profile struct {
-	Payment   PaymentType
-	HighValue bool
-	Status    Status
+	Payment PaymentType
+	Status  Status
 }
 
 // ProfileSource looks up a cached profile without network I/O.
@@ -78,10 +77,6 @@ type Config struct {
 	FailOpenEnabled bool
 	// AllowPostpaid permits fail-open for postpaid subscribers.
 	AllowPostpaid bool
-	// AllowHighValue permits fail-open for high-value subscribers, including
-	// high-value PREPAID ones. Their usage is recovered by reconciliation
-	// from the journal, so unlike postpaid it carries real revenue risk.
-	AllowHighValue bool
 	// Validity is the grant validity time; keep it short so the network
 	// element returns quickly and the data tier is retried.
 	Validity time.Duration
@@ -94,7 +89,6 @@ func DefaultConfig() *Config {
 	c := &Config{
 		FailOpenEnabled: true,
 		AllowPostpaid:   true,
-		AllowHighValue:  true,
 		Validity:        30 * time.Second,
 	}
 	c.Caps[UnitBytes] = Caps{PerGrant: 10 << 20, PerSubscriber: 100 << 20, Global: 50 << 30}
@@ -172,7 +166,6 @@ type Grant struct {
 	Units        int64
 	Epoch        uint64
 	At           time.Time
-	Prepaid      bool // true: must be debited from the wallet on reconciliation
 }
 
 // Journal durably (or at least reliably) records grants. Record must not
@@ -257,11 +250,12 @@ func (e *Engine) Decide(req Request) Decision {
 		return Decision{Reason: ReasonNotActive}
 	}
 
+	// Only postpaid is ever eligible. Prepaid always fails closed, however
+	// valuable the customer: there is no later bill to recover the usage from.
 	switch {
-	case p.Payment == Postpaid && cfg.AllowPostpaid:
-	case p.HighValue && cfg.AllowHighValue:
 	case p.Payment == Prepaid:
 		return Decision{Reason: ReasonPrepaid}
+	case p.Payment == Postpaid && cfg.AllowPostpaid:
 	default:
 		return Decision{Reason: ReasonClassNotAllowed}
 	}
@@ -296,7 +290,6 @@ func (e *Engine) Decide(req Request) Decision {
 		Units:        got,
 		Epoch:        epoch,
 		At:           e.now(),
-		Prepaid:      p.Payment == Prepaid,
 	})
 	if err != nil {
 		e.globalUsed[req.Kind].Add(-got) // return the reservation

@@ -1,8 +1,10 @@
 version: v2
+# Plugins are the locally installed protoc-gen-go and protoc-gen-go-grpc (see
+# `make proto-tools`), so generation needs no network access.
 plugins:
-  - remote: buf.build/protocolbuffers/go
+  - local: protoc-gen-go
     out: ../../pkg/gen
     opt: paths=source_relative
-  - remote: buf.build/grpc/go
+  - local: protoc-gen-go-grpc
     out: ../../pkg/gen
     opt: paths=source_relative

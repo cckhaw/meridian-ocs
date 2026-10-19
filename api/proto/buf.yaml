@@ -4,6 +4,12 @@ modules:
 lint:
   use:
     - STANDARD
+  except:
+    # Commands share one acknowledgement type rather than one per RPC.
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    # RatingService streams the canonical request / response messages directly.
+    - RPC_REQUEST_STANDARD_NAME
 breaking:
   use:
     - FILE

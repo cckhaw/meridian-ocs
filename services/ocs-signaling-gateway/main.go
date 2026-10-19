@@ -12,6 +12,14 @@
 //	OCS_NCHF_ADDR        Nchf HTTP/2 listen address, "off"     (default :8000)
 //	OCS_NCHF_TLS_CERT    server certificate; with OCS_NCHF_TLS_KEY enables TLS
 //	OCS_NCHF_CLIENT_CA   CA file; when set, client certificates are required (mTLS)
+//	OCS_NCHF_OAUTH       "required" or "off"; no default, the gateway will not
+//	                     start the Nchf listener until you choose
+//	OCS_NCHF_OAUTH_KEYS  PEM file with the NRF's access-token signing certificate(s)
+//	                     or public key(s); reloaded when the file changes
+//	OCS_NCHF_OAUTH_AUDIENCE  accepted `aud` values, comma separated
+//	                     (default: CHF, plus OCS_NF_INSTANCE_ID if set)
+//	OCS_NCHF_OAUTH_ISSUERS   optional allow-list of `iss` (NRF instance ids)
+//	OCS_NCHF_OAUTH_SCOPE scope that must be granted (default nchf-convergedcharging)
 //	OCS_REGION           region embedded in charging references (default r1)
 //	OCS_IDENTITY_MODE    "directory" (default) or "direct" (see below)
 //	OCS_IDENTITY_PREFIX  Redis key prefix of the identity directory (default id:)
@@ -21,10 +29,27 @@
 //	OCS_ORIGIN_REALM     Diameter realm, required
 //	OCS_HOST_IP          address advertised in CEA, required
 //	OCS_REDIS_ADDR       hot-state store                      (default 127.0.0.1:6379)
+//	OCS_REDIS_REPLICAS   replicas that must acknowledge a commit     (default 1)
+//	OCS_REDIS_WAIT_TIMEOUT  how long to wait for them             (default 25ms)
+//	OCS_ALLOW_NO_REPLICA "true" starts without the required replicas (development only)
 //	OCS_MAX_TPS          admission rate limit, 0 = unlimited  (default 0; shared by Gy and Nchf)
 //	OCS_MAX_INFLIGHT     concurrent request limit, 0 = off    (default 10000)
 //	OCS_CASH_BYTES_RATE  cash price of data as num/den        (default 1/1024)
 //	OCS_ADMIN_ADDR       /healthz and /readyz                 (default :8080)
+//
+// Nchf authorization: with OCS_NCHF_OAUTH=required every request must carry an
+// NRF-issued OAuth2 access token (Authorization: Bearer ...), validated against
+// the configured NRF key(s); see docs/architecture/05-nchf-adapter.md. Tokens
+// are bearer credentials: run the listener with TLS (or inside a mesh that
+// terminates it), or they can be stolen from the network.
+//
+// Durability: committing steps (updates, terminates, events) wait for
+// OCS_REDIS_REPLICAS replicas to acknowledge the write before answering, so a
+// primary failure right after the answer does not lose the charge. The gateway
+// refuses to start if fewer replicas are connected, unless
+// OCS_ALLOW_NO_REPLICA=true. If a replica stops answering, waiting is suspended
+// after a few shortfalls (so it does not add the timeout to every commit) and
+// the shortfalls are counted; see docs/architecture/07-durability.md.
 //
 // Identity: in "directory" mode every MSISDN / IMSI / NAI is resolved through
 // the Redis identity directory (keys id:msisdn:<digits>, id:imsi:<digits>,
@@ -56,29 +81,16 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/engine"
 	"github.com/cckhaw/meridian-ocs/pkg/identity"
 	"github.com/cckhaw/meridian-ocs/pkg/service"
+	"github.com/cckhaw/meridian-ocs/pkg/svcenv"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/admission"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/gy"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/nchf"
+	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/oauth"
 )
 
-func env(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
+func env(key, def string) string { return svcenv.OS.String(key, def) }
 
-func envInt(key string, def int) (int, error) {
-	v := os.Getenv(key)
-	if v == "" {
-		return def, nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 0 {
-		return 0, fmt.Errorf("%s: want a non-negative integer, got %q", key, v)
-	}
-	return n, nil
-}
+func envInt(key string, def int) (int, error) { return svcenv.OS.Int(key, def) }
 
 func parseRate(s string) (engine.Frac, error) {
 	num, den, ok := strings.Cut(s, "/")
@@ -91,6 +103,61 @@ func parseRate(s string) (engine.Frac, error) {
 		return engine.Frac{}, fmt.Errorf("OCS_CASH_BYTES_RATE: %q out of range (num <= %d, den <= %d)", s, datalayer.MaxNum, datalayer.MaxDen)
 	}
 	return engine.Frac{Num: n, Den: d}, nil
+}
+
+// newAuthenticator builds the Nchf access-token verifier. There is no default:
+// running an unauthenticated charging API has to be a deliberate choice.
+func newAuthenticator(ctx context.Context, tlsOn bool) (nchf.Authenticator, error) {
+	switch mode := os.Getenv("OCS_NCHF_OAUTH"); mode {
+	case "off":
+		log.Printf("ocs-signaling-gateway: WARNING Nchf OAuth2 is OFF: any caller that can reach the listener can charge subscribers")
+		return nil, nil
+	case "required":
+	default:
+		return nil, fmt.Errorf("OCS_NCHF_OAUTH must be set to \"required\" (with OCS_NCHF_OAUTH_KEYS) or \"off\", got %q", mode)
+	}
+	path := os.Getenv("OCS_NCHF_OAUTH_KEYS")
+	if path == "" {
+		return nil, errors.New("OCS_NCHF_OAUTH=required needs OCS_NCHF_OAUTH_KEYS (PEM file with the NRF signing certificate or public key)")
+	}
+	ks, skipped, err := oauth.LoadKeySet(path, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("OCS_NCHF_OAUTH_KEYS: %w", err)
+	}
+	for _, s := range skipped {
+		log.Printf("ocs-signaling-gateway: WARNING OAuth key file: skipped %s", s)
+	}
+	audience := splitList(os.Getenv("OCS_NCHF_OAUTH_AUDIENCE"))
+	if len(audience) == 0 {
+		audience = []string{"CHF"}
+		if id := os.Getenv("OCS_NF_INSTANCE_ID"); id != "" {
+			audience = append(audience, id)
+		}
+	}
+	v, err := oauth.NewVerifier(oauth.Config{
+		Audience: audience,
+		Scope:    env("OCS_NCHF_OAUTH_SCOPE", oauth.DefaultScope),
+		Issuers:  splitList(os.Getenv("OCS_NCHF_OAUTH_ISSUERS")),
+	}, ks)
+	if err != nil {
+		return nil, err
+	}
+	go oauth.WatchKeyFile(ctx, path, v, 30*time.Second, log.Printf)
+	log.Printf("ocs-signaling-gateway: Nchf OAuth2 on: %d key(s), audience %v", ks.Len(), audience)
+	if !tlsOn {
+		log.Printf("ocs-signaling-gateway: WARNING OAuth2 is on but the Nchf listener has no TLS: bearer tokens cross the network in cleartext unless a mesh terminates TLS")
+	}
+	return v, nil
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func newResolver(rdb *redis.Client) (*identity.Resolver, error) {
@@ -147,6 +214,9 @@ func run(ctx context.Context, ready func()) error {
 	})
 	defer rdb.Close()
 	store := datalayer.New(rdb)
+	if err := svcenv.ConfigureDurability(ctx, svcenv.OS, store, func(f string, a ...any) { log.Printf("ocs-signaling-gateway: "+f, a...) }); err != nil {
+		return err
+	}
 	resolver, err := newResolver(rdb)
 	if err != nil {
 		return err
@@ -182,15 +252,21 @@ func run(ctx context.Context, ready func()) error {
 	}
 
 	if addr := env("OCS_NCHF_ADDR", ":8000"); addr != "off" {
-		h, err := nchf.NewHandler(nchf.Config{Region: env("OCS_REGION", "r1"), Identity: resolver}, eng, adm)
-		if err != nil {
-			return err
-		}
 		var tlsCfg *tls.Config
 		if cert := os.Getenv("OCS_NCHF_TLS_CERT"); cert != "" {
+			var err error
 			if tlsCfg, err = nchf.TLSConfig(cert, os.Getenv("OCS_NCHF_TLS_KEY"), os.Getenv("OCS_NCHF_CLIENT_CA")); err != nil {
 				return err
 			}
+		}
+		auth, err := newAuthenticator(ctx, tlsCfg != nil)
+		if err != nil {
+			return err
+		}
+		h, err := nchf.NewHandler(nchf.Config{Region: env("OCS_REGION", "r1"), Identity: resolver,
+			Auth: auth, AllowUnauthenticated: auth == nil}, eng, adm)
+		if err != nil {
+			return err
 		}
 		srv := nchf.NewServer(addr, h, tlsCfg)
 		ln, err := net.Listen("tcp", addr)

@@ -91,6 +91,7 @@ const (
 	ResultStaleRequest // request number older than the last processed one
 	ResultUnavailable  // data tier down and the fail policy denied
 	ResultTooBusy
+	ResultBarred // the subscriber is suspended or terminated
 )
 
 // UnitGrant is the answer for one rating group.

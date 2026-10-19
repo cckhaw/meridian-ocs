@@ -74,7 +74,7 @@ func with(base obj, mut func(obj)) obj {
 
 func newHandler(t testing.TB, r Rater, adm *admission.Admission, mod func(*Config)) *Handler {
 	t.Helper()
-	cfg := Config{}
+	cfg := Config{AllowUnauthenticated: true}
 	if mod != nil {
 		mod(&cfg)
 	}

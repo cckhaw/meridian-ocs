@@ -2,14 +2,13 @@ package nchf
 
 import (
 	"crypto/tls"
-	"crypto/x509"
-	"errors"
 	"net/http"
-	"os"
 	"time"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
+
+	"github.com/cckhaw/meridian-ocs/pkg/tlsconf"
 )
 
 // MaxConcurrentStreams bounds HTTP/2 streams per connection; the admission
@@ -41,29 +40,12 @@ func NewServer(addr string, h http.Handler, tlsCfg *tls.Config) *http.Server {
 	return srv
 }
 
-// TLSConfig loads a server certificate and, when clientCAFile is set, requires
-// and verifies client certificates (mutual TLS, TS 33.501 §13). TLS 1.2 is the
-// minimum.
+// TLSConfig loads a server certificate (TLS >= 1.2) and, if a client CA file
+// is given, requires and verifies client certificates (mutual TLS). HTTP/2 is
+// negotiated through ALPN.
 //
-// This is transport security only. OAuth2 access token validation (the
-// "nchf-convergedcharging" scope) is not implemented.
+// This is transport security only; access tokens are checked separately by the
+// handler (internal/oauth).
 func TLSConfig(certFile, keyFile, clientCAFile string) (*tls.Config, error) {
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, err
-	}
-	cfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}}
-	if clientCAFile != "" {
-		pem, err := os.ReadFile(clientCAFile)
-		if err != nil {
-			return nil, err
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, errors.New("nchf: no certificates found in client CA file")
-		}
-		cfg.ClientCAs = pool
-		cfg.ClientAuth = tls.RequireAndVerifyClientCert
-	}
-	return cfg, nil
+	return tlsconf.Server(certFile, keyFile, clientCAFile, "h2")
 }

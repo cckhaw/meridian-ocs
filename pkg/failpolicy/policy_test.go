@@ -14,8 +14,8 @@ func (m mapProfiles) Lookup(id string) (Profile, bool) { p, ok := m[id]; return 
 func newTestEngine(cfg *Config) (*Engine, *ChanJournal) {
 	profiles := mapProfiles{
 		"prepaid":       {Payment: Prepaid, Status: StatusActive},
-		"prepaid-hv":    {Payment: Prepaid, HighValue: true, Status: StatusActive},
 		"postpaid":      {Payment: Postpaid, Status: StatusActive},
+		"postpaid-2":    {Payment: Postpaid, Status: StatusActive},
 		"postpaid-susp": {Payment: Postpaid, Status: StatusSuspended},
 		"postpaid-grc":  {Payment: Postpaid, Status: StatusGrace},
 		"no-class":      {Status: StatusActive},
@@ -36,7 +36,6 @@ func TestDecideByClass(t *testing.T) {
 		reason Reason
 	}{
 		{"prepaid", false, ReasonPrepaid},
-		{"prepaid-hv", true, ReasonGranted},
 		{"postpaid", true, ReasonGranted},
 		{"postpaid-susp", false, ReasonNotActive},
 		{"postpaid-grc", false, ReasonNotActive},
@@ -61,18 +60,41 @@ func TestKillSwitchDeniesEveryone(t *testing.T) {
 	}
 }
 
-func TestClassToggles(t *testing.T) {
+func TestPostpaidToggle(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.AllowHighValue = false
+	cfg.AllowPostpaid = false
 	e, _ := newTestEngine(cfg)
-	if d := e.Decide(req("prepaid-hv", 100)); d.Allowed() || d.Reason != ReasonPrepaid {
-		t.Fatalf("hv prepaid with AllowHighValue=false: %+v", d)
-	}
-	cfg2 := DefaultConfig()
-	cfg2.AllowPostpaid = false
-	e2, _ := newTestEngine(cfg2)
-	if d := e2.Decide(req("postpaid", 100)); d.Allowed() || d.Reason != ReasonClassNotAllowed {
+	if d := e.Decide(req("postpaid", 100)); d.Allowed() || d.Reason != ReasonClassNotAllowed {
 		t.Fatalf("postpaid with AllowPostpaid=false: %+v", d)
+	}
+	if d := e.Decide(req("prepaid", 100)); d.Allowed() || d.Reason != ReasonPrepaid {
+		t.Fatalf("prepaid must stay refused: %+v", d)
+	}
+}
+
+// Every prepaid subscriber fails closed, whatever the configuration.
+func TestPrepaidAlwaysFailsClosed(t *testing.T) {
+	for _, mod := range []func(*Config){
+		func(*Config) {},
+		func(c *Config) { c.AllowPostpaid = false },
+		func(c *Config) {
+			for k := range c.Caps {
+				c.Caps[k] = Caps{PerGrant: 1 << 40, PerSubscriber: 1 << 40, Global: 1 << 40}
+			}
+		},
+	} {
+		cfg := DefaultConfig()
+		mod(cfg)
+		e, j := newTestEngine(cfg)
+		for kind := UnitKind(0); kind < numKinds; kind++ {
+			d := e.Decide(Request{SubscriberID: "prepaid", SessionID: "s", Kind: kind, Requested: 1})
+			if d.Allowed() || d.Reason != ReasonPrepaid {
+				t.Fatalf("kind %d: %+v", kind, d)
+			}
+		}
+		if len(j.C) != 0 {
+			t.Fatal("a refused prepaid request must not be journalled")
+		}
 	}
 }
 
@@ -106,7 +128,7 @@ func TestGlobalBudgetPartialThenExhausted(t *testing.T) {
 	if d := e.Decide(req("postpaid", 10)); d.Granted != 10 {
 		t.Fatalf("%+v", d)
 	}
-	if d := e.Decide(req("prepaid-hv", 10)); d.Granted != 5 {
+	if d := e.Decide(req("postpaid-2", 10)); d.Granted != 5 {
 		t.Fatalf("expected partial 5, got %+v", d)
 	}
 	if d := e.Decide(req("postpaid", 10)); d.Allowed() || d.Reason != ReasonGlobalBudget {
@@ -132,11 +154,10 @@ func TestNewOutageEpochResetsCounters(t *testing.T) {
 
 func TestJournalRecordsGrantsAndFailureDenies(t *testing.T) {
 	e, j := newTestEngine(nil)
-	e.Decide(req("prepaid-hv", 100))
 	e.Decide(req("postpaid", 100))
-	g1, g2 := <-j.C, <-j.C
-	if !g1.Prepaid || g2.Prepaid {
-		t.Fatalf("Prepaid flag wrong: %+v %+v", g1, g2)
+	g := <-j.C
+	if g.SubscriberID != "postpaid" || g.Units != 100 || g.Epoch != e.Epoch() {
+		t.Fatalf("%+v", g)
 	}
 
 	full := NewEngine(mapProfiles{"p": {Payment: Postpaid, Status: StatusActive}}, NewChanJournal(0), nil)

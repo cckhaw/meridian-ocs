@@ -187,7 +187,7 @@ sequenceDiagram
 | Retransmitted CCR (same Session-Id + CC-Request-Number) | Lua returns the **stored previous answer**; no second debit |
 | Lost CCA, PGW retries | Same as above — safe by construction |
 | PGW silently drops session | Reservation TTL (`Validity-Time` + grace) expires; wheel-timer sweeper + Redis key expiry event refund unused reservation |
-| Redis shard unreachable | Hybrid fail policy (see [02-decisions-and-failure-policy.md](02-decisions-and-failure-policy.md)): prepaid → `4010 END_USER_SERVICE_DENIED`; postpaid / high-value → capped, journalled, short-validity grant |
+| Redis shard unreachable | Hybrid fail policy (see [02-decisions-and-failure-policy.md](02-decisions-and-failure-policy.md)): prepaid → `4010 END_USER_SERVICE_DENIED`; postpaid → capped, journalled, short-validity grant |
 | Late CCR-Update after TTL refund | Treated as a fresh reservation attempt; used units beyond refund are charged via a **rated-late adjustment** (may drive balance negative within an overdraft bound) |
 
 ---
@@ -425,4 +425,4 @@ meridian-ocs/
 └── docs/architecture/
 ```
 
-**Decisions** are recorded in [02-decisions-and-failure-policy.md](02-decisions-and-failure-policy.md): Redis Cluster + Lua, in-house Gy codec, Kafka (`franz-go`), and a hybrid failure policy (prepaid fail-closed; postpaid / high-value fail-open with a cap).
+**Decisions** are recorded in [02-decisions-and-failure-policy.md](02-decisions-and-failure-policy.md): Redis Cluster + Lua, in-house Gy codec, Kafka (`franz-go`), and a hybrid failure policy (all prepaid fail-closed; postpaid fail-open with a cap).

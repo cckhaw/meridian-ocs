@@ -95,6 +95,9 @@ type Stats struct {
 	Degraded     uint64 // answered without the data tier
 	Overloaded   uint64
 	AuditDropped uint64
+	// Unreplicated counts committed steps that finished with fewer replica
+	// acknowledgements than required (see datalayer.WithDurability).
+	Unreplicated uint64
 }
 
 type job struct {
@@ -118,7 +121,7 @@ type Engine struct {
 	closed      atomic.Bool
 	wg          sync.WaitGroup
 
-	requests, degraded, overloaded, auditDropped atomic.Uint64
+	requests, degraded, overloaded, auditDropped, unreplicated atomic.Uint64
 }
 
 // New builds and starts an engine.
@@ -168,7 +171,7 @@ func (e *Engine) Close() {
 
 // Stats returns a snapshot of the counters.
 func (e *Engine) Stats() Stats {
-	return Stats{e.requests.Load(), e.degraded.Load(), e.overloaded.Load(), e.auditDropped.Load()}
+	return Stats{e.requests.Load(), e.degraded.Load(), e.overloaded.Load(), e.auditDropped.Load(), e.unreplicated.Load()}
 }
 
 // Rate processes one request and fills resp. It blocks until the answer is
@@ -304,6 +307,9 @@ func (w *worker) handle(j *job) {
 		w.degrade(req, resp, now)
 		return
 	}
+	if w.dres.Replication == datalayer.ReplicationShort {
+		e.unreplicated.Add(1)
+	}
 	w.fill(req, resp)
 	if mode == datalayer.ModeInitial || mode == datalayer.ModeUpdate {
 		for i := range resp.Grants {
@@ -351,6 +357,7 @@ var itemResult = [...]canonical.Result{
 	datalayer.ItemPartialFinal: canonical.ResultPartialFinal,
 	datalayer.ItemLimitReached: canonical.ResultCreditLimitReached,
 	datalayer.ItemNoBucket:     canonical.ResultNoBucket,
+	datalayer.ItemBarred:       canonical.ResultBarred,
 }
 
 // fill maps the data-layer answer onto the canonical response.
@@ -419,7 +426,7 @@ func policyKind(k canonical.UnitKind) failpolicy.UnitKind {
 }
 
 // degrade answers a request without the data tier, via the hybrid fail policy:
-// prepaid fail closed; postpaid / high-value get a capped, journalled grant.
+// prepaid (all of it) fails closed; postpaid gets a capped, journalled grant.
 func (w *worker) degrade(req *canonical.Request, resp *canonical.Response, now time.Time) {
 	e := w.e
 	e.degraded.Add(1)

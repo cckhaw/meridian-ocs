@@ -66,8 +66,34 @@ Errors are `application/problem+json` with `title`, `status`, `detail` and, for 
 
 - `NewServer` serves cleartext HTTP/2 with prior knowledge (h2c, as behind a mesh sidecar) and HTTP/1.1; with a `tls.Config` it negotiates HTTP/2 through ALPN. Max 1000 concurrent streams per connection.
 - `TLSConfig` loads a certificate (TLS ≥ 1.2) and, if a client CA file is given, requires and verifies client certificates (mutual TLS). Covered by a test with generated certificates: a client without a certificate is refused at the handshake.
-- **OAuth2 access-token validation is not implemented.** The API declares the `nchf-convergedcharging` scope (client-credentials flow via the NRF); until a token check exists, only network-level controls (mTLS, mesh policy) protect the endpoint. The OpenAPI also allows unauthenticated access as an alternative.
+- **OAuth2 access tokens** are validated on every request (next section), in addition to TLS / mutual TLS.
 - The rating call runs on a context detached from the client request (`context.WithoutCancel`): if the SMF hangs up after the charge was applied, cancelling would only trigger the degraded path. Redis client timeouts bound the call instead.
+
+## Access tokens (TS 33.501 §13.4, TS 29.510)
+
+Every request must carry `Authorization: Bearer <JWS>` issued by the NRF (`internal/oauth`). Tokens are parsed and verified with `golang-jwt/jwt/v5`; the policy around it is ours:
+
+| Check | Rule |
+|---|---|
+| Algorithm | allow-list ES256, ES384, RS256, PS256. `none`, HMAC and every other algorithm are refused; the key type must match the declared algorithm family, so a token cannot choose how it is verified |
+| Keys | the NRF's certificate(s) or public key(s) from a PEM file (`OCS_NCHF_OAUTH_KEYS`). ECDSA P-256/P-384, RSA ≥ 2048 bits. Expired or not-yet-valid certificates in a rotation bundle are skipped (logged); a file with no usable key is an error |
+| Time | `exp` is required; `exp` / `nbf` honoured with 30 s leeway |
+| Audience | `aud` must contain this producer: `CHF` and/or its NF instance id (`OCS_NF_INSTANCE_ID`) |
+| Scope | `scope` (space separated) must contain `nchf-convergedcharging` as a whole word (a prefix or suffix of it does not count) |
+| Issuer | optional allow-list (`OCS_NCHF_OAUTH_ISSUERS`) |
+
+Signature, format and time failures answer **401** with `WWW-Authenticate: Bearer realm="nchf-convergedcharging", error="invalid_token"` (no token: the bare realm). A correctly signed token that is not meant for this service (audience, scope, issuer) answers **403** with `error="insufficient_scope"`. The body never says which check failed.
+
+Other design points:
+- **No default.** The gateway will not start the Nchf listener until `OCS_NCHF_OAUTH` is `required` or `off`; `off` logs a warning. In the library, `NewHandler` fails unless an `Authenticator` or `AllowUnauthenticated` is given.
+- **Authentication runs before the body is read and before admission control**, so a flood of forged tokens neither costs a body parse nor uses up the request budget real traffic needs (both tested). It does cost CPU for the signature check; see below.
+- **Verified-token cache**, keyed by the SHA-256 of the token, bounded (10 000), never extending a token past its `exp` plus leeway, and invalidated at once when the key set changes. Forged tokens are never cached.
+- **Key rotation without restart:** the key file is watched (30 s). A new bundle takes effect immediately and drops cached tokens from removed keys; an unreadable or empty file is logged and the old keys stay in force rather than locking every consumer out.
+- Tokens are bearer credentials: the gateway warns when OAuth is on without TLS.
+
+Measured here (sandbox): a cached token costs about 0.56 µs and 1 allocation; a full ES256 signature verification about 89 µs and 72 allocations (mostly inside the JWT library). An SMF reuses one token for many requests, so the cache carries the load; an attacker sending distinct forged tokens costs one signature check each, which the mesh / network policy (and mutual TLS) should absorb: per-source throttling of failed authentication is not implemented.
+
+Verified with independent tooling: the built gateway behind `curl --http2-prior-knowledge`: no token 401, forged token 401, wrong scope 403, valid token 201, and only the valid call reserved quota. Unit tests include the classic attacks (unsigned `alg: none`, HS256 keyed with the public key, RS256 against an EC key set, tampered payload, truncated signature) and four deliberate mutations (no audience check, substring scope match, optional expiry, cache ignoring rotation) that each make tests fail.
 
 ## Measured (this sandbox, not a benchmark environment)
 
@@ -86,5 +112,5 @@ The charge script accepted an update with a higher request number **after** the 
 3. **`retransmissionIndicator`**, `notifyUri` / charging notifications (the callback), `triggers`, `quotaHoldingTime`, thresholds, `announcementInformation`, `invocationResult.failureHandling`, `sessionFailover`.
 4. Only `pduSessionInformation.ratType`, `pduSessionID` and S-NSSAI are read from the PDU session charging information; other 5G charging information blocks (SMS, MMTel, NEF, …) are ignored. No monetary units.
 5. **Feature negotiation** (`supportedFeatures`) is ignored.
-6. **OAuth2** (above) and per-consumer rate limits.
+6. Per-consumer rate limits and throttling of failed authentication; fine-grained scopes (per resource / operation) are not interpreted, only the service-level scope; EdDSA tokens are not accepted; tokens are not checked against revocation (they are short-lived and NRF-issued).
 7. The gateway binary has no fail-policy profile cache (see doc 04): with Redis down every request is denied.
