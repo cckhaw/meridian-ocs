@@ -117,6 +117,9 @@ type ItemResult struct {
 type Response struct {
 	Code  Code
 	Items []ItemResult
+	// Replication tells whether a committing step reached the configured
+	// number of replicas (see WithDurability).
+	Replication Replication
 }
 
 // Client talks to Redis (standalone, sentinel or cluster).
@@ -124,6 +127,7 @@ type Client struct {
 	rdb    redis.UniversalClient
 	charge *redis.Script
 	sweep  *redis.Script
+	dur    *durabilityState
 }
 
 // New wraps an existing go-redis client.
@@ -194,13 +198,22 @@ func (c *Client) Charge(ctx context.Context, req *Request, resp *Response) error
 			args = append(args, string(rt.Class), rt.Num, rt.Den)
 		}
 	}
-	res, err := c.charge.Run(ctx, c.rdb, []string{Prefix(req.SubscriberID)}, args...).Slice()
+	// Updates, terminates and events commit usage: their writes must survive
+	// a primary failure. An initial reservation need not: if it is lost, the
+	// final settlement finds no reservation and charges the reported usage.
+	commit := req.Mode != ModeInitial
+	v, rep, err := c.run(ctx, c.charge, []string{Prefix(req.SubscriberID)}, args, commit)
 	clear(args)
 	*ap = args[:0]
 	argPool.Put(ap)
 	if err != nil {
 		return err
 	}
+	res, ok := v.([]any)
+	if !ok {
+		return errors.New("datalayer: unexpected script reply type")
+	}
+	resp.Replication = rep
 	return decode(res, resp)
 }
 

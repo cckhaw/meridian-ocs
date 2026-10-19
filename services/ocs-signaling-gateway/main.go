@@ -21,10 +21,21 @@
 //	OCS_ORIGIN_REALM     Diameter realm, required
 //	OCS_HOST_IP          address advertised in CEA, required
 //	OCS_REDIS_ADDR       hot-state store                      (default 127.0.0.1:6379)
+//	OCS_REDIS_REPLICAS   replicas that must acknowledge a commit     (default 1)
+//	OCS_REDIS_WAIT_TIMEOUT  how long to wait for them             (default 25ms)
+//	OCS_ALLOW_NO_REPLICA "true" starts without the required replicas (development only)
 //	OCS_MAX_TPS          admission rate limit, 0 = unlimited  (default 0; shared by Gy and Nchf)
 //	OCS_MAX_INFLIGHT     concurrent request limit, 0 = off    (default 10000)
 //	OCS_CASH_BYTES_RATE  cash price of data as num/den        (default 1/1024)
 //	OCS_ADMIN_ADDR       /healthz and /readyz                 (default :8080)
+//
+// Durability: committing steps (updates, terminates, events) wait for
+// OCS_REDIS_REPLICAS replicas to acknowledge the write before answering, so a
+// primary failure right after the answer does not lose the charge. The gateway
+// refuses to start if fewer replicas are connected, unless
+// OCS_ALLOW_NO_REPLICA=true. If a replica stops answering, waiting is suspended
+// after a few shortfalls (so it does not add the timeout to every commit) and
+// the shortfalls are counted; see docs/architecture/07-durability.md.
 //
 // Identity: in "directory" mode every MSISDN / IMSI / NAI is resolved through
 // the Redis identity directory (keys id:msisdn:<digits>, id:imsi:<digits>,
@@ -93,6 +104,37 @@ func parseRate(s string) (engine.Frac, error) {
 	return engine.Frac{Num: n, Den: d}, nil
 }
 
+func configureDurability(ctx context.Context, store *datalayer.Client) error {
+	replicas, err := envInt("OCS_REDIS_REPLICAS", 1)
+	if err != nil {
+		return err
+	}
+	timeout, err := time.ParseDuration(env("OCS_REDIS_WAIT_TIMEOUT", "25ms"))
+	if err != nil || timeout <= 0 {
+		return fmt.Errorf("OCS_REDIS_WAIT_TIMEOUT: want a positive duration, got %q", os.Getenv("OCS_REDIS_WAIT_TIMEOUT"))
+	}
+	if replicas == 0 {
+		log.Printf("ocs-signaling-gateway: WARNING commits do not wait for replicas (OCS_REDIS_REPLICAS=0)")
+		return nil
+	}
+	if _, err := store.WithDurability(datalayer.Durability{Replicas: replicas, Timeout: timeout}); err != nil {
+		return err
+	}
+	have, err := store.ConnectedReplicas(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot check the Redis replicas: %w", err)
+	}
+	if have < replicas {
+		if env("OCS_ALLOW_NO_REPLICA", "") == "true" {
+			log.Printf("ocs-signaling-gateway: WARNING %d replica(s) connected, %d required: commits are not durable", have, replicas)
+			return nil
+		}
+		return fmt.Errorf("Redis has %d connected replica(s) but OCS_REDIS_REPLICAS=%d; connect them or set OCS_ALLOW_NO_REPLICA=true for development", have, replicas)
+	}
+	log.Printf("ocs-signaling-gateway: commits wait for %d replica(s), timeout %s", replicas, timeout)
+	return nil
+}
+
 func newResolver(rdb *redis.Client) (*identity.Resolver, error) {
 	switch mode := env("OCS_IDENTITY_MODE", "directory"); mode {
 	case "direct":
@@ -147,6 +189,9 @@ func run(ctx context.Context, ready func()) error {
 	})
 	defer rdb.Close()
 	store := datalayer.New(rdb)
+	if err := configureDurability(ctx, store); err != nil {
+		return err
+	}
 	resolver, err := newResolver(rdb)
 	if err != nil {
 		return err

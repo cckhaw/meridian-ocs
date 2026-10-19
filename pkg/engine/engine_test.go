@@ -133,6 +133,10 @@ func (s *stubStore) Charge(_ context.Context, req *datalayer.Request, resp *data
 		return err
 	}
 	resp.Code = datalayer.CodeOK
+	resp.Replication = datalayer.ReplicationNotRequested
+	if s.result != nil {
+		s.result(req, resp)
+	}
 	resp.Items = resp.Items[:0]
 	for i := range req.Items {
 		resp.Items = append(resp.Items, datalayer.ItemResult{RatingGroup: req.Items[i].RatingGroup, Granted: req.Items[i].Requested, ValidityS: 30})
@@ -400,5 +404,17 @@ func TestUsageOnlyUpdateIsNotRefused(t *testing.T) {
 	}
 	if got, _ := store.Balance(ctx, "u9", "b"); got != 1000-100 {
 		t.Fatalf("balance %d", got)
+	}
+}
+
+func TestUnreplicatedCommitsAreCounted(t *testing.T) {
+	st := &stubStore{}
+	st.result = func(_ *datalayer.Request, resp *datalayer.Response) { resp.Replication = datalayer.ReplicationShort }
+	e, _ := New(Config{Workers: 1}, Deps{Store: st, Tariff: tariff})
+	defer e.Close()
+	rate(t, e, newReq(canonical.TypeUpdate, "u", "s", 1, 10, 10))
+	rate(t, e, newReq(canonical.TypeUpdate, "u", "s", 2, 10, 10))
+	if got := e.Stats().Unreplicated; got != 2 {
+		t.Fatalf("%d", got)
 	}
 }

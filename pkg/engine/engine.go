@@ -95,6 +95,9 @@ type Stats struct {
 	Degraded     uint64 // answered without the data tier
 	Overloaded   uint64
 	AuditDropped uint64
+	// Unreplicated counts committed steps that finished with fewer replica
+	// acknowledgements than required (see datalayer.WithDurability).
+	Unreplicated uint64
 }
 
 type job struct {
@@ -118,7 +121,7 @@ type Engine struct {
 	closed      atomic.Bool
 	wg          sync.WaitGroup
 
-	requests, degraded, overloaded, auditDropped atomic.Uint64
+	requests, degraded, overloaded, auditDropped, unreplicated atomic.Uint64
 }
 
 // New builds and starts an engine.
@@ -168,7 +171,7 @@ func (e *Engine) Close() {
 
 // Stats returns a snapshot of the counters.
 func (e *Engine) Stats() Stats {
-	return Stats{e.requests.Load(), e.degraded.Load(), e.overloaded.Load(), e.auditDropped.Load()}
+	return Stats{e.requests.Load(), e.degraded.Load(), e.overloaded.Load(), e.auditDropped.Load(), e.unreplicated.Load()}
 }
 
 // Rate processes one request and fills resp. It blocks until the answer is
@@ -303,6 +306,9 @@ func (w *worker) handle(j *job) {
 	if err != nil {
 		w.degrade(req, resp, now)
 		return
+	}
+	if w.dres.Replication == datalayer.ReplicationShort {
+		e.unreplicated.Add(1)
 	}
 	w.fill(req, resp)
 	if mode == datalayer.ModeInitial || mode == datalayer.ModeUpdate {
