@@ -476,3 +476,32 @@ func TestTerminateWithoutItemsReleasesAllReservations(t *testing.T) {
 		t.Fatalf("open=%d", n)
 	}
 }
+
+func TestTerminatedSessionCannotBeReopenedByALaterRequest(t *testing.T) {
+	c, _ := setup(t)
+	put(t, c, "s16", datalayer.Bucket{ID: "bundle", Class: datalayer.ClassBundle, Kind: canonical.UnitBytes, Balance: 1000, Order: 1})
+	r := rates(cash2)
+	charge(t, c, req("s16", "x", datalayer.ModeInitial, 0, t0, 100, 0, r))
+	charge(t, c, req("s16", "x", datalayer.ModeTerminate, 1, t0, 0, 40, r))
+	if got := bal(t, c, "s16", "bundle"); got != 960 {
+		t.Fatal(got)
+	}
+
+	// A higher request number after termination must not reserve or charge.
+	for _, mode := range []datalayer.Mode{datalayer.ModeUpdate, datalayer.ModeTerminate} {
+		resp := charge(t, c, req("s16", "x", mode, 2, t0, 500, 10, r))
+		if resp.Code != datalayer.CodeUnknownSession {
+			t.Fatalf("mode %c after terminate: %+v", mode, resp)
+		}
+	}
+	if got := bal(t, c, "s16", "bundle"); got != 960 {
+		t.Fatalf("balance changed after termination: %d", got)
+	}
+	if n, _ := c.OpenReservations(context.Background(), "s16"); n != 0 {
+		t.Fatalf("open reservations %d", n)
+	}
+	// The retransmitted terminate still gets its stored answer.
+	if resp := charge(t, c, req("s16", "x", datalayer.ModeTerminate, 1, t0, 0, 40, r)); resp.Code != datalayer.CodeReplayed {
+		t.Fatalf("%+v", resp)
+	}
+}

@@ -1,4 +1,4 @@
-package gy
+package admission
 
 import (
 	"sync"
@@ -14,7 +14,7 @@ func fakeClock(a *Admission, start int64) *int64 {
 }
 
 func TestAdmissionRateAndBurst(t *testing.T) {
-	a := NewAdmission(100, 5, 0) // 100/s, burst 5 => 10ms per token
+	a := New(100, 5, 0) // 100/s, burst 5 => 10ms per token
 	clock := fakeClock(a, 1_000_000_000)
 	ok := 0
 	for i := 0; i < 20; i++ {
@@ -40,7 +40,7 @@ func TestAdmissionRateAndBurst(t *testing.T) {
 }
 
 func TestAdmissionInflightLimit(t *testing.T) {
-	a := NewAdmission(0, 0, 2)
+	a := New(0, 0, 2)
 	if !a.Acquire() || !a.Acquire() {
 		t.Fatal("first two must pass")
 	}
@@ -57,7 +57,7 @@ func TestAdmissionInflightLimit(t *testing.T) {
 }
 
 func TestAdmissionRateRefusalReleasesInflight(t *testing.T) {
-	a := NewAdmission(1, 1, 10)
+	a := New(1, 1, 10)
 	fakeClock(a, 1)
 	if !a.Acquire() {
 		t.Fatal()
@@ -71,7 +71,7 @@ func TestAdmissionRateRefusalReleasesInflight(t *testing.T) {
 }
 
 func TestAdmissionRuntimeTuning(t *testing.T) {
-	a := NewAdmission(0, 0, 0)
+	a := New(0, 0, 0)
 	for i := 0; i < 1000; i++ {
 		if !a.Acquire() {
 			t.Fatal("unlimited must admit")
@@ -84,7 +84,7 @@ func TestAdmissionRuntimeTuning(t *testing.T) {
 }
 
 func TestAdmissionConcurrentBurstIsExact(t *testing.T) {
-	a := NewAdmission(1, 100, 0) // effectively no refill during the test
+	a := New(1, 100, 0) // effectively no refill during the test
 	fakeClock(a, 1)
 	var admitted atomic.Int64
 	var wg sync.WaitGroup

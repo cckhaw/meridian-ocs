@@ -10,6 +10,7 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/canonical"
 	"github.com/cckhaw/meridian-ocs/pkg/diameter"
 	"github.com/cckhaw/meridian-ocs/pkg/engine"
+	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/admission"
 )
 
 func grantAll(_ context.Context, req *canonical.Request, resp *canonical.Response) error {
@@ -256,7 +257,7 @@ func TestMalformedCCRGetsErrorAnswerAndConnectionSurvives(t *testing.T) {
 
 func TestAdmissionControlShedsWith3004BeforeRating(t *testing.T) {
 	var calls atomic.Int64
-	adm := NewAdmission(1, 1, 0) // one request, then nothing for a long time
+	adm := admission.New(1, 1, 0) // one request, then nothing for a long time
 	srv, addr := startServer(t, raterFunc(func(ctx context.Context, r *canonical.Request, s *canonical.Response) error {
 		calls.Add(1)
 		return grantAll(ctx, r, s)

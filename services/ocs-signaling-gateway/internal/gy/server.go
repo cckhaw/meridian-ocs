@@ -21,6 +21,7 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/canonical"
 	"github.com/cckhaw/meridian-ocs/pkg/diameter"
 	"github.com/cckhaw/meridian-ocs/pkg/engine"
+	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/admission"
 )
 
 // Rater is the rating engine as seen by the adapter (*engine.Engine).
@@ -96,7 +97,7 @@ type Stats struct {
 type Server struct {
 	cfg   Config
 	rater Rater
-	adm   *Admission
+	adm   *admission.Admission
 
 	mu        sync.Mutex
 	listeners map[net.Listener]struct{}
@@ -112,7 +113,7 @@ type Server struct {
 }
 
 // NewServer builds a server. adm may be nil (no admission control).
-func NewServer(cfg Config, rater Rater, adm *Admission) (*Server, error) {
+func NewServer(cfg Config, rater Rater, adm *admission.Admission) (*Server, error) {
 	if rater == nil {
 		return nil, errors.New("gy: rater is required")
 	}
@@ -120,7 +121,7 @@ func NewServer(cfg Config, rater Rater, adm *Admission) (*Server, error) {
 		return nil, err
 	}
 	if adm == nil {
-		adm = NewAdmission(0, 0, 0)
+		adm = admission.New(0, 0, 0)
 	}
 	s := &Server{cfg: cfg, rater: rater, adm: adm,
 		listeners: map[net.Listener]struct{}{}, conns: map[*peerConn]struct{}{}}
@@ -134,7 +135,7 @@ func (s *Server) Stats() Stats {
 }
 
 // Admission returns the admission controller (for runtime tuning).
-func (s *Server) Admission() *Admission { return s.adm }
+func (s *Server) Admission() *admission.Admission { return s.adm }
 
 // Serve accepts peers on ln until Close. It returns nil after Close.
 func (s *Server) Serve(ln net.Listener) error {

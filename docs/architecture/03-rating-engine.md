@@ -19,7 +19,7 @@ Not implemented yet: the Gy and Nchf adapters, the catalog service (the engine u
 Modes: `I` initial, `U` update, `T` terminate, `E` event.
 
 1. **Sweep** expired reservations of this subscriber (refund in full).
-2. **Idempotency.** `(session, request number)` mutates state at most once. A retransmit returns the stored answer (`code=1`) with no state change. A lower number than the last processed is `stale`; an update/terminate for an unknown session is `unknown session`.
+2. **Idempotency.** `(session, request number)` mutates state at most once. A retransmit returns the stored answer (`code=1`) with no state change. A lower number than the last processed is `stale`; an update/terminate for an unknown session, **or for one that has already been terminated**, is `unknown session` (a terminate marks the session closed, so a later request with a higher number can no longer reserve quota on it).
 3. **Per rating group:**
    - *Settle* the open reservation: if `used < reserved`, refund the unused tail (newest debit first, exact inverse of the rate); if `used > reserved` (or the reservation had already expired), charge the extra from the buckets and report anything unchargeable as `shortfall`.
    - *Reserve* the next slice (`I`/`U`): consume buckets in `P:ord` order (promo, then bundle, then cash by convention of the `Order` score), skipping buckets of the wrong unit kind or past expiry. Partial grants set `final`.

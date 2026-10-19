@@ -9,6 +9,7 @@ import (
 
 	"github.com/cckhaw/meridian-ocs/pkg/canonical"
 	"github.com/cckhaw/meridian-ocs/pkg/diameter"
+	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/admission"
 )
 
 type raterFunc func(ctx context.Context, req *canonical.Request, resp *canonical.Response) error
@@ -272,7 +273,7 @@ func u32(t *testing.T, msg []byte, code uint32) uint32 {
 	return v
 }
 
-func startServer(t *testing.T, rater Rater, adm *Admission, mod func(*Config)) (*Server, string) {
+func startServer(t *testing.T, rater Rater, adm *admission.Admission, mod func(*Config)) (*Server, string) {
 	t.Helper()
 	cfg := Config{OriginHost: "ocs.example.net", OriginRealm: "example.net", HostIP: net.ParseIP("10.9.9.9"),
 		WatchdogInterval: 30 * time.Second}

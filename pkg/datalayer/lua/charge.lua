@@ -8,7 +8,7 @@
 --
 -- Reply (flat integers): code, nItems, then per item
 --       rg, result, granted, validityS, final, shortfall
---   code:   0 ok | 1 ok (replayed stored answer) | 2 unknown session | 3 stale request
+--   code:   0 ok | 1 ok (replayed stored answer) | 2 unknown or terminated session | 3 stale request
 --   result: 0 granted | 1 granted-partial + final | 2 limit reached | 3 no eligible bucket
 
 local P = KEYS[1]
@@ -42,6 +42,8 @@ else
   local l = tonumber(last)
   if reqNo == l then return replay() end
   if reqNo < l then return { 3 } end
+  -- A terminated session is gone: nothing may reserve quota on it again.
+  if redis.call('HEXISTS', sk, 'closed') == 1 then return { 2 } end
 end
 
 local expMs = now + validity * 1000 + grace
@@ -149,6 +151,7 @@ end
 local packed = {}
 for i = 1, #out do packed[i] = fmt(out[i]) end
 redis.call('HSET', sk, 'last', fmt(reqNo), 'ans', table.concat(packed, ','))
+if mode == 'T' then redis.call('HSET', sk, 'closed', '1') end
 local ttl = (mode == 'T' or mode == 'E') and 3600000 or (validity * 1000 + grace + 3600000)
 redis.call('PEXPIRE', sk, ttl)
 

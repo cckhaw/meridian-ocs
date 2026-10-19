@@ -1,6 +1,6 @@
 // Command ocs-signaling-gateway terminates network-facing charging protocols
-// (today: 4G Gy/Ro over Diameter/TCP) and hands canonical requests to the
-// rating engine.
+// (4G Gy/Ro over Diameter/TCP, 5G Nchf_ConvergedCharging over HTTP/2) and
+// hands canonical requests to the rating engine.
 //
 // This binary runs the rating engine in-process (the "co-located" mode of the
 // design): no network hop between adapter and engine. A remote mode over gRPC
@@ -8,12 +8,16 @@
 //
 // Configuration (environment):
 //
-//	OCS_GY_ADDR          Diameter listen address              (default :3868)
+//	OCS_GY_ADDR          Diameter listen address, "off" = none (default :3868)
+//	OCS_NCHF_ADDR        Nchf HTTP/2 listen address, "off"     (default :8000)
+//	OCS_NCHF_TLS_CERT    server certificate; with OCS_NCHF_TLS_KEY enables TLS
+//	OCS_NCHF_CLIENT_CA   CA file; when set, client certificates are required (mTLS)
+//	OCS_REGION           region embedded in charging references (default r1)
 //	OCS_ORIGIN_HOST      Diameter identity, required          (e.g. ocs1.example.net)
 //	OCS_ORIGIN_REALM     Diameter realm, required
 //	OCS_HOST_IP          address advertised in CEA, required
 //	OCS_REDIS_ADDR       hot-state store                      (default 127.0.0.1:6379)
-//	OCS_MAX_TPS          admission rate limit, 0 = unlimited  (default 0)
+//	OCS_MAX_TPS          admission rate limit, 0 = unlimited  (default 0; shared by Gy and Nchf)
 //	OCS_MAX_INFLIGHT     concurrent request limit, 0 = off    (default 10000)
 //	OCS_CASH_BYTES_RATE  cash price of data as num/den        (default 1/1024)
 //	OCS_ADMIN_ADDR       /healthz and /readyz                 (default :8080)
@@ -23,9 +27,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -37,7 +44,9 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/engine"
 	"github.com/cckhaw/meridian-ocs/pkg/service"
+	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/admission"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/gy"
+	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/nchf"
 )
 
 func env(key, def string) string {
@@ -113,27 +122,79 @@ func run(ctx context.Context, ready func()) error {
 	}
 	defer eng.Close()
 
-	srv, err := gy.NewServer(gy.Config{OriginHost: host, OriginRealm: realm, HostIP: ip},
-		eng, gy.NewAdmission(float64(maxTPS), maxTPS/10+1, maxInflight))
-	if err != nil {
-		return err
-	}
-	ln, err := net.Listen("tcp", env("OCS_GY_ADDR", ":3868"))
-	if err != nil {
-		return err
-	}
-	log.Printf("ocs-signaling-gateway: Gy listening on %s as %s@%s", ln.Addr(), host, realm)
+	adm := admission.New(float64(maxTPS), maxTPS/10+1, maxInflight)
+	errCh := make(chan error, 2)
+	var stops []func()
 
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ln) }()
+	if addr := env("OCS_GY_ADDR", ":3868"); addr != "off" {
+		srv, err := gy.NewServer(gy.Config{OriginHost: host, OriginRealm: realm, HostIP: ip}, eng, adm)
+		if err != nil {
+			return err
+		}
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			return err
+		}
+		log.Printf("ocs-signaling-gateway: Gy listening on %s as %s@%s", ln.Addr(), host, realm)
+		go func() { errCh <- srv.Serve(ln) }()
+		stops = append(stops, func() { _ = srv.Close() })
+	}
+
+	if addr := env("OCS_NCHF_ADDR", ":8000"); addr != "off" {
+		h, err := nchf.NewHandler(nchf.Config{Region: env("OCS_REGION", "r1")}, eng, adm)
+		if err != nil {
+			return err
+		}
+		var tlsCfg *tls.Config
+		if cert := os.Getenv("OCS_NCHF_TLS_CERT"); cert != "" {
+			if tlsCfg, err = nchf.TLSConfig(cert, os.Getenv("OCS_NCHF_TLS_KEY"), os.Getenv("OCS_NCHF_CLIENT_CA")); err != nil {
+				return err
+			}
+		}
+		srv := nchf.NewServer(addr, h, tlsCfg)
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			return err
+		}
+		mode := "h2c (cleartext HTTP/2)"
+		if tlsCfg != nil {
+			mode = "HTTP/2 over TLS"
+			if tlsCfg.ClientAuth != tls.NoClientCert {
+				mode += " with client certificates"
+			}
+		}
+		log.Printf("ocs-signaling-gateway: Nchf listening on %s, %s", ln.Addr(), mode)
+		go func() {
+			var err error
+			if tlsCfg != nil {
+				err = srv.ServeTLS(ln, "", "")
+			} else {
+				err = srv.Serve(ln)
+			}
+			if !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+		stops = append(stops, func() {
+			c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = srv.Shutdown(c)
+		})
+	}
+	if len(stops) == 0 {
+		return errors.New("both OCS_GY_ADDR and OCS_NCHF_ADDR are off: nothing to serve")
+	}
 	ready()
 
+	var serveErr error
 	select {
-	case err := <-serveErr:
-		return err
+	case serveErr = <-errCh:
 	case <-ctx.Done():
-		return srv.Close()
 	}
+	for _, stop := range stops {
+		stop()
+	}
+	return serveErr
 }
 
 func main() { service.RunWith("ocs-signaling-gateway", run) }
