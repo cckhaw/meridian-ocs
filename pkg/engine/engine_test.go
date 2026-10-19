@@ -444,3 +444,58 @@ func TestBarredSubscribersAreReportedAsSuch(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+type tariffFunc func(*canonical.Request, *canonical.UnitRequest, []datalayer.Rate) ([]datalayer.Rate, error)
+
+func (f tariffFunc) Rates(r *canonical.Request, u *canonical.UnitRequest, dst []datalayer.Rate) ([]datalayer.Rate, error) {
+	return f(r, u, dst)
+}
+
+// A unit the tariff cannot price must not fail the request: the other units
+// are priced normally and the unpriced one reaches the data tier with no rates,
+// so a terminate still settles what was already reserved.
+func TestUnpricedUnitDoesNotFailTheRequest(t *testing.T) {
+	var seen [][]int
+	st := &stubStore{}
+	st.result = func(req *datalayer.Request, _ *datalayer.Response) {
+		var lens []int
+		for _, it := range req.Items {
+			lens = append(lens, len(it.Rates))
+		}
+		seen = append(seen, lens)
+	}
+	tf := tariffFunc(func(r *canonical.Request, u *canonical.UnitRequest, dst []datalayer.Rate) ([]datalayer.Rate, error) {
+		if u.RatingGroup == 200 {
+			// A tariff may have appended before failing; the engine must drop it.
+			return append(dst, datalayer.Rate{Class: datalayer.ClassPromo, Num: 1, Den: 1}), fmt.Errorf("%w: barred", ErrNoTariff)
+		}
+		return tariff.Rates(r, u, dst)
+	})
+	e, _ := New(Config{Workers: 1}, Deps{Store: st, Tariff: tf})
+	defer e.Close()
+
+	r := newReq(canonical.TypeUpdate, "u", "s", 1, 10, 10)
+	r.Units = append(r.Units,
+		canonical.UnitRequest{RatingGroup: 200, Kind: canonical.UnitBytes, Requested: 10, Used: 10},
+		canonical.UnitRequest{RatingGroup: 300, Kind: canonical.UnitBytes, Requested: 10, Used: 10})
+	rate(t, e, r)
+
+	if len(seen) != 1 || len(seen[0]) != 3 || seen[0][0] != 3 || seen[0][1] != 0 || seen[0][2] != 3 {
+		t.Fatalf("rates per item: %v, want [[3 0 3]]", seen)
+	}
+	if got := e.Stats().Unpriced; got != 1 {
+		t.Fatalf("unpriced %d", got)
+	}
+}
+
+func TestOtherTariffErrorsStillFailTheRequest(t *testing.T) {
+	boom := errors.New("boom")
+	e, _ := New(Config{Workers: 1}, Deps{Store: &stubStore{}, Tariff: tariffFunc(func(*canonical.Request, *canonical.UnitRequest, []datalayer.Rate) ([]datalayer.Rate, error) {
+		return nil, boom
+	})})
+	defer e.Close()
+	resp := canonical.AcquireResponse()
+	if err := e.Rate(context.Background(), newReq(canonical.TypeUpdate, "u", "s", 1, 10, 0), resp); !errors.Is(err, boom) {
+		t.Fatalf("%v", err)
+	}
+}

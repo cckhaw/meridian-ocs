@@ -12,7 +12,7 @@ Code: `pkg/datalayer` (Lua + Go client), `pkg/canonical`, `pkg/engine` (shared s
 | Canonical model | `pkg/canonical` | Pooled `Request` / `Response` |
 | Engine | `internal/engine` | Subscriber-hash partitioned workers, per-worker scratch buffers, load shedding, timing wheel for sweeps, fail-policy integration |
 
-Not implemented yet: the Gy and Nchf adapters, the catalog service (the engine uses a `StaticTariff`), durable audit/journal drains, Redis Cluster deployment, the provisioning-side balance commands.
+Not implemented yet: per-subscriber plans for the catalog (doc 09), durable audit/journal drains, Redis Cluster deployment, the provisioning-side balance commands.
 
 ## Charge script semantics
 
