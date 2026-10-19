@@ -23,7 +23,7 @@ versioned tariff catalog, provisions subscribers asynchronously, and mediates of
 | Tariff catalog + per-subscriber plans (offerings) | done | `pkg/catalog`, `services/ocs-catalog-service`, `attach_offering` in provisioning | [09](docs/architecture/09-catalog.md), [08](docs/architecture/08-provisioning.md) |
 | Offline CDR mediation | done (BER mapping unverified) | `services/ocs-mediation-pipeline` | [10](docs/architecture/10-mediation.md) |
 | Multi-region active-active | design only | doc 01 §6 | |
-| AI Ops layer (telemetry, guarded control plane, declarative mappings) | scaffold only | `services/ocs-aiops-layer`, `api/proto/ocs/v1/aiops.proto` | |
+| AI Ops integration: metrics, guarded control plane, declarative mappings | done for the gateway and mediation (no agent included) | `pkg/telemetry`, `pkg/control`, `pkg/mapping`, `services/ocs-aiops-layer` | [11](docs/architecture/11-aiops.md) |
 | Standalone rating-engine / data-layer services | scaffold only (the engine runs in-process in the gateway) | `services/ocs-rating-engine`, `services/ocs-data-layer` | |
 | Helm charts (HPA, PDB, anti-affinity, mesh) | not started | `deploy/helm/` (empty) | |
 
@@ -78,11 +78,14 @@ pkg/                  shared library module
   identity/           MSISDN/IMSI/NAI -> subscriber key directory, resolver, cache
   diameter/           Diameter codec for Gy (RFC 4006)
   lifecycle/          subscriber lifecycle state machine
+  telemetry/          Prometheus-format metrics, latency histogram, JSON logger
+  control/            guarded control plane for AI Ops agents (+ controlrpc gRPC server)
+  mapping/            declarative JSON translation rules, hot-reloadable (+ JSON Schema, example)
   tlsconf/ svcenv/ service/   TLS/mTLS helpers, env parsing, service runner
 services/             one Go module per service (see go.work)
 build/Dockerfile      builds any service: --build-arg SERVICE=<name>
 deploy/helm/          (empty) charts to come
-docs/architecture/    design documents 01-10
+docs/architecture/    design documents 01-11
 .github/workflows/    CI: fmt, vet, build, test (with Redis); protobuf lint + generated-code check
 ```
 
@@ -144,7 +147,9 @@ Honest list; each module doc has the detail.
 - **Offering changes are not pushed**: gateways see a subscriber's new offering after a 30 s cache TTL,
   and there is no command to switch plan without re-creating the offering's allowances.
 - **Pricing is per request attribute only**: no tiered or volume pricing across a billing period.
-- **The AI Ops layer, Helm charts and standalone rating/data-layer services** are not built.
+- **Helm charts and the standalone rating/data-layer services** are not built. The AI Ops layer is the
+  interface only (metrics, a guarded control plane in the gateway, mapping workbench): there is no agent,
+  no OpenTelemetry/traces, and provisioning and catalog expose no metrics.
 - **BER CDR field mapping** (PGW-CDR) comes from the specification as recalled and must be verified
   against real network files before use; no SMF-CDR mapping.
 - **Kafka connections are plaintext** (no TLS/SASL), no SFTP pull for CDR files, no ClickHouse/S3 sink.

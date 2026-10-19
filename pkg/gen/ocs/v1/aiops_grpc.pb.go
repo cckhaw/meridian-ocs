@@ -19,19 +19,43 @@ import (
 const _ = grpc.SupportPackageIsVersion8
 
 const (
-	ControlService_SetParameter_FullMethodName  = "/ocs.v1.ControlService/SetParameter"
-	ControlService_ConfirmChange_FullMethodName = "/ocs.v1.ControlService/ConfirmChange"
+	ControlService_SetParameter_FullMethodName   = "/ocs.v1.ControlService/SetParameter"
+	ControlService_ConfirmChange_FullMethodName  = "/ocs.v1.ControlService/ConfirmChange"
+	ControlService_ApproveChange_FullMethodName  = "/ocs.v1.ControlService/ApproveChange"
+	ControlService_RevertChange_FullMethodName   = "/ocs.v1.ControlService/RevertChange"
+	ControlService_ListParameters_FullMethodName = "/ocs.v1.ControlService/ListParameters"
+	ControlService_ListChanges_FullMethodName    = "/ocs.v1.ControlService/ListChanges"
+	ControlService_Freeze_FullMethodName         = "/ocs.v1.ControlService/Freeze"
 )
 
 // ControlServiceClient is the client API for ControlService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// Guarded control plane for AI Ops agents. Every parameter is allow-listed and
-// clamped server-side; changes auto-revert after ttl_seconds unless confirmed.
+// Guarded control plane for AI Ops agents and operators. Each OCS process that
+// has tunable settings serves this API for itself.
+//
+// Safety is enforced server-side (pkg/control): only registered parameters
+// exist, numeric values are clamped to a declared range, every change reverts
+// after ttl_seconds unless confirmed, "risky" parameters need a second
+// principal's approval, and there is a per-principal rate limit and a freeze
+// switch. The caller is identified by its mTLS client certificate; agents and
+// approvers are separate allow-lists.
 type ControlServiceClient interface {
+	// Propose a change. Ordinary parameters are applied at once; risky ones wait
+	// in PENDING_APPROVAL.
 	SetParameter(ctx context.Context, in *SetParameterRequest, opts ...grpc.CallOption) (*SetParameterResponse, error)
+	// Make an applied change permanent until the process restarts.
 	ConfirmChange(ctx context.Context, in *ConfirmChangeRequest, opts ...grpc.CallOption) (*ConfirmChangeResponse, error)
+	// Approve a pending risky change (approvers only, and not the proposer).
+	ApproveChange(ctx context.Context, in *ApproveChangeRequest, opts ...grpc.CallOption) (*SetParameterResponse, error)
+	// Undo an applied change now, or withdraw a pending one.
+	RevertChange(ctx context.Context, in *RevertChangeRequest, opts ...grpc.CallOption) (*RevertChangeResponse, error)
+	ListParameters(ctx context.Context, in *ListParametersRequest, opts ...grpc.CallOption) (*ListParametersResponse, error)
+	ListChanges(ctx context.Context, in *ListChangesRequest, opts ...grpc.CallOption) (*ListChangesResponse, error)
+	// Stop (or resume) all new changes and approvals (approvers only). Reverts
+	// keep running.
+	Freeze(ctx context.Context, in *FreezeRequest, opts ...grpc.CallOption) (*FreezeResponse, error)
 }
 
 type controlServiceClient struct {
@@ -62,15 +86,84 @@ func (c *controlServiceClient) ConfirmChange(ctx context.Context, in *ConfirmCha
 	return out, nil
 }
 
+func (c *controlServiceClient) ApproveChange(ctx context.Context, in *ApproveChangeRequest, opts ...grpc.CallOption) (*SetParameterResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetParameterResponse)
+	err := c.cc.Invoke(ctx, ControlService_ApproveChange_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlServiceClient) RevertChange(ctx context.Context, in *RevertChangeRequest, opts ...grpc.CallOption) (*RevertChangeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevertChangeResponse)
+	err := c.cc.Invoke(ctx, ControlService_RevertChange_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlServiceClient) ListParameters(ctx context.Context, in *ListParametersRequest, opts ...grpc.CallOption) (*ListParametersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListParametersResponse)
+	err := c.cc.Invoke(ctx, ControlService_ListParameters_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlServiceClient) ListChanges(ctx context.Context, in *ListChangesRequest, opts ...grpc.CallOption) (*ListChangesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListChangesResponse)
+	err := c.cc.Invoke(ctx, ControlService_ListChanges_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlServiceClient) Freeze(ctx context.Context, in *FreezeRequest, opts ...grpc.CallOption) (*FreezeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FreezeResponse)
+	err := c.cc.Invoke(ctx, ControlService_Freeze_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControlServiceServer is the server API for ControlService service.
 // All implementations must embed UnimplementedControlServiceServer
 // for forward compatibility
 //
-// Guarded control plane for AI Ops agents. Every parameter is allow-listed and
-// clamped server-side; changes auto-revert after ttl_seconds unless confirmed.
+// Guarded control plane for AI Ops agents and operators. Each OCS process that
+// has tunable settings serves this API for itself.
+//
+// Safety is enforced server-side (pkg/control): only registered parameters
+// exist, numeric values are clamped to a declared range, every change reverts
+// after ttl_seconds unless confirmed, "risky" parameters need a second
+// principal's approval, and there is a per-principal rate limit and a freeze
+// switch. The caller is identified by its mTLS client certificate; agents and
+// approvers are separate allow-lists.
 type ControlServiceServer interface {
+	// Propose a change. Ordinary parameters are applied at once; risky ones wait
+	// in PENDING_APPROVAL.
 	SetParameter(context.Context, *SetParameterRequest) (*SetParameterResponse, error)
+	// Make an applied change permanent until the process restarts.
 	ConfirmChange(context.Context, *ConfirmChangeRequest) (*ConfirmChangeResponse, error)
+	// Approve a pending risky change (approvers only, and not the proposer).
+	ApproveChange(context.Context, *ApproveChangeRequest) (*SetParameterResponse, error)
+	// Undo an applied change now, or withdraw a pending one.
+	RevertChange(context.Context, *RevertChangeRequest) (*RevertChangeResponse, error)
+	ListParameters(context.Context, *ListParametersRequest) (*ListParametersResponse, error)
+	ListChanges(context.Context, *ListChangesRequest) (*ListChangesResponse, error)
+	// Stop (or resume) all new changes and approvals (approvers only). Reverts
+	// keep running.
+	Freeze(context.Context, *FreezeRequest) (*FreezeResponse, error)
 	mustEmbedUnimplementedControlServiceServer()
 }
 
@@ -83,6 +176,21 @@ func (UnimplementedControlServiceServer) SetParameter(context.Context, *SetParam
 }
 func (UnimplementedControlServiceServer) ConfirmChange(context.Context, *ConfirmChangeRequest) (*ConfirmChangeResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ConfirmChange not implemented")
+}
+func (UnimplementedControlServiceServer) ApproveChange(context.Context, *ApproveChangeRequest) (*SetParameterResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ApproveChange not implemented")
+}
+func (UnimplementedControlServiceServer) RevertChange(context.Context, *RevertChangeRequest) (*RevertChangeResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RevertChange not implemented")
+}
+func (UnimplementedControlServiceServer) ListParameters(context.Context, *ListParametersRequest) (*ListParametersResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListParameters not implemented")
+}
+func (UnimplementedControlServiceServer) ListChanges(context.Context, *ListChangesRequest) (*ListChangesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListChanges not implemented")
+}
+func (UnimplementedControlServiceServer) Freeze(context.Context, *FreezeRequest) (*FreezeResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Freeze not implemented")
 }
 func (UnimplementedControlServiceServer) mustEmbedUnimplementedControlServiceServer() {}
 
@@ -133,6 +241,96 @@ func _ControlService_ConfirmChange_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlService_ApproveChange_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ApproveChangeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServiceServer).ApproveChange(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlService_ApproveChange_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServiceServer).ApproveChange(ctx, req.(*ApproveChangeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlService_RevertChange_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevertChangeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServiceServer).RevertChange(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlService_RevertChange_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServiceServer).RevertChange(ctx, req.(*RevertChangeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlService_ListParameters_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListParametersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServiceServer).ListParameters(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlService_ListParameters_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServiceServer).ListParameters(ctx, req.(*ListParametersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlService_ListChanges_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListChangesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServiceServer).ListChanges(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlService_ListChanges_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServiceServer).ListChanges(ctx, req.(*ListChangesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlService_Freeze_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FreezeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServiceServer).Freeze(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlService_Freeze_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServiceServer).Freeze(ctx, req.(*FreezeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ControlService_ServiceDesc is the grpc.ServiceDesc for ControlService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -147,6 +345,26 @@ var ControlService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ConfirmChange",
 			Handler:    _ControlService_ConfirmChange_Handler,
+		},
+		{
+			MethodName: "ApproveChange",
+			Handler:    _ControlService_ApproveChange_Handler,
+		},
+		{
+			MethodName: "RevertChange",
+			Handler:    _ControlService_RevertChange_Handler,
+		},
+		{
+			MethodName: "ListParameters",
+			Handler:    _ControlService_ListParameters_Handler,
+		},
+		{
+			MethodName: "ListChanges",
+			Handler:    _ControlService_ListChanges_Handler,
+		},
+		{
+			MethodName: "Freeze",
+			Handler:    _ControlService_Freeze_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

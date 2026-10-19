@@ -27,6 +27,10 @@ type KafkaConfig struct {
 	MinBackoff time.Duration // retry delay after an infrastructure error (default 100ms)
 	MaxBackoff time.Duration // (default 5s)
 	Logf       func(string, ...any)
+	// Translate, when set, converts a message into normalized JSON before it is
+	// decoded (declarative mapping). A nil result with a nil error means "this
+	// message is already normalized".
+	Translate func([]byte) ([]byte, error)
 }
 
 // Kafka consumes normalized JSON CDRs. Each partition's slice of a poll is one
@@ -144,7 +148,10 @@ func (k *Kafka) process(ctx context.Context, topic string, part int32, recs []*k
 	items := make([]pipeline.Item, len(fresh))
 	for i, r := range fresh {
 		it := pipeline.Item{Pos: fmt.Sprintf("%s@%d", stream, r.Offset), Raw: r.Value}
-		if rec, err := cdr.FromJSON(r.Value); err != nil {
+		body, terr := translate(k.cfg.Translate, r.Value)
+		if terr != nil {
+			it.Err = terr
+		} else if rec, err := cdr.FromJSON(body); err != nil {
 			it.Err = err
 		} else {
 			it.Rec = &rec
@@ -160,3 +167,19 @@ func (k *Kafka) process(ctx context.Context, topic string, part int32, recs []*k
 }
 
 func isStale(err error) bool { return errors.Is(err, pipeline.ErrStale) }
+
+// translate applies an optional translation; no hook or "already normalized"
+// leaves the bytes as they are.
+func translate(f func([]byte) ([]byte, error), in []byte) ([]byte, error) {
+	if f == nil {
+		return in, nil
+	}
+	out, err := f(in)
+	if err != nil {
+		return nil, err
+	}
+	if out == nil {
+		return in, nil
+	}
+	return out, nil
+}

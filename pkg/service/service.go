@@ -9,10 +9,41 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 )
+
+var (
+	adminMu    sync.Mutex
+	adminExtra = map[string]http.Handler{}
+)
+
+// HandleAdmin adds a handler (for example /metrics) to the admin server at an
+// exact path. It may be called at any time, including from the start function
+// RunWith runs, because the admin server looks handlers up per request. The
+// admin port serves operations tooling and must not be exposed outside the
+// cluster network.
+func HandleAdmin(pattern string, h http.Handler) {
+	adminMu.Lock()
+	defer adminMu.Unlock()
+	adminExtra[pattern] = h
+}
+
+// adminHandler serves registered extra handlers first, then the base mux.
+func adminHandler(base http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		adminMu.Lock()
+		h := adminExtra[r.URL.Path]
+		adminMu.Unlock()
+		if h != nil {
+			h.ServeHTTP(w, r)
+			return
+		}
+		base.ServeHTTP(w, r)
+	})
+}
 
 // Run starts the admin HTTP server and blocks until SIGINT/SIGTERM. It is for
 // services that have no main loop yet.
@@ -48,7 +79,7 @@ func RunWith(name string, start func(ctx context.Context, ready func()) error) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{Addr: addr, Handler: adminHandler(mux), ReadHeaderTimeout: 5 * time.Second}
 	adminErr := make(chan error, 1)
 	go func() { adminErr <- srv.ListenAndServe() }()
 	log.Printf("%s: admin server listening on %s", name, addr)

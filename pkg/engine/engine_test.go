@@ -13,6 +13,7 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer/redistest"
 	"github.com/cckhaw/meridian-ocs/pkg/failpolicy"
+	"github.com/cckhaw/meridian-ocs/pkg/telemetry"
 )
 
 var tariff = StaticTariff{Cash: map[canonical.UnitKind]Frac{canonical.UnitBytes: {Num: 2, Den: 1}}}
@@ -497,5 +498,22 @@ func TestOtherTariffErrorsStillFailTheRequest(t *testing.T) {
 	resp := canonical.AcquireResponse()
 	if err := e.Rate(context.Background(), newReq(canonical.TypeUpdate, "u", "s", 1, 10, 0), resp); !errors.Is(err, boom) {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestLatencyIsRecordedForEveryCall(t *testing.T) {
+	h := telemetry.NewHistogram()
+	st := &stubStore{}
+	e, _ := New(Config{Workers: 1}, Deps{Store: st, Tariff: tariff, Latency: h})
+	defer e.Close()
+	rate(t, e, newReq(canonical.TypeInitial, "u", "s", 0, 10, 0))
+	rate(t, e, newReq(canonical.TypeUpdate, "u", "s", 1, 10, 10))
+	bad := newReq(canonical.TypeUpdate, "", "s", 2, 10, 0) // invalid: still observed
+	resp := canonical.AcquireResponse()
+	if err := e.Rate(context.Background(), bad, resp); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("%v", err)
+	}
+	if h.Count() != 3 {
+		t.Fatalf("%d observations, want 3", h.Count())
 	}
 }

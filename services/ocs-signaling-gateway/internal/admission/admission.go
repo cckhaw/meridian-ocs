@@ -14,6 +14,7 @@ type Admission struct {
 	burstNs     atomic.Int64 // tolerance: burst * interval
 	tat         atomic.Int64 // theoretical arrival time (GCRA)
 	inflight    atomic.Int64
+	rejected    atomic.Uint64
 	maxInflight atomic.Int64 // 0 disables
 	now         func() int64
 }
@@ -53,6 +54,7 @@ func (a *Admission) Acquire() bool {
 	n := a.inflight.Add(1)
 	if max := a.maxInflight.Load(); max > 0 && n > max {
 		a.inflight.Add(-1)
+		a.rejected.Add(1)
 		return false
 	}
 	iv := a.intervalNs.Load()
@@ -70,6 +72,7 @@ func (a *Admission) Acquire() bool {
 		next := base + iv
 		if next-now > burst {
 			a.inflight.Add(-1)
+			a.rejected.Add(1)
 			return false
 		}
 		if a.tat.CompareAndSwap(tat, next) {
@@ -83,3 +86,6 @@ func (a *Admission) Release() { a.inflight.Add(-1) }
 
 // Inflight reports the current number of admitted requests.
 func (a *Admission) Inflight() int64 { return a.inflight.Load() }
+
+// Rejected reports how many requests were refused (rate or concurrency).
+func (a *Admission) Rejected() uint64 { return a.rejected.Load() }

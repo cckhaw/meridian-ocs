@@ -25,6 +25,7 @@ type Breaker struct {
 	fails   atomic.Int32
 	openAt  atomic.Int64 // unix nanos; 0 = closed
 	probing atomic.Bool
+	forced  atomic.Bool // held open by an operator: no probes, no automatic close
 }
 
 // NewBreaker opens after `threshold` consecutive failures. onOpen/onClose may
@@ -45,13 +46,26 @@ func NewBreaker(threshold int, probeEvery time.Duration, onOpen, onClose func())
 	}
 }
 
-// Open reports whether the breaker is currently open.
-func (b *Breaker) Open() bool { return b.openAt.Load() != 0 }
+// Open reports whether the breaker is currently open (by failures or forced).
+func (b *Breaker) Open() bool { return b.forced.Load() || b.openAt.Load() != 0 }
+
+// SetForced holds the breaker open (or releases it). While forced, no call is
+// allowed to the data tier, not even probes, and successes do not close it. It
+// is an operator tool: during a data-tier incident it stops traffic from
+// piling timeouts onto a struggling store. Releasing it returns the breaker to
+// its automatic behaviour.
+func (b *Breaker) SetForced(on bool) { b.forced.Store(on) }
+
+// Forced reports whether the breaker is held open.
+func (b *Breaker) Forced() bool { return b.forced.Load() }
 
 // AllowDataTier reports whether this call should try the data tier. When the
 // breaker is open it returns true for at most one in-flight probe per
 // probeEvery.
 func (b *Breaker) AllowDataTier() bool {
+	if b.forced.Load() {
+		return false
+	}
 	t := b.openAt.Load()
 	if t == 0 {
 		return true

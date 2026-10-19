@@ -27,6 +27,9 @@ import (
 //	OCS_REDIS_REPLICAS, OCS_REDIS_WAIT_TIMEOUT, OCS_ALLOW_NO_REPLICA  see docs/architecture/07-durability.md
 //	OCS_IDENTITY_PREFIX        identity directory key prefix      (default id:)
 //	OCS_CDR_MAPPING            JSON file overriding the PGW BER field mapping
+//	OCS_MED_MAPPING            YAML/JSON mapping translating vendor JSON records into the normalized
+//	                           form (pkg/mapping); hot-reloaded, a bad edit keeps the previous mapping
+//	OCS_MED_MAPPING_RELOAD     how often to look for a changed mapping file (default 10s)
 //	OCS_MED_RATING             "off" (default) or "catalog": add a list-price charge
 //	OCS_DEFAULT_PLAN           plan for subscribers with no offering (required with catalog rating)
 type Config struct {
@@ -43,6 +46,8 @@ type Config struct {
 	Mapping      cdr.Mapping
 	Rating       string
 	Plan         string
+	MappingFile  string
+	MappingEvery time.Duration
 }
 
 // LoadConfig reads and validates the configuration.
@@ -58,6 +63,7 @@ func LoadConfig(g svcenv.Getenv) (Config, error) {
 		Mapping:     cdr.PGWMapping(),
 		Rating:      g.String("OCS_MED_RATING", "off"),
 		Plan:        g("OCS_DEFAULT_PLAN"),
+		MappingFile: g("OCS_MED_MAPPING"),
 	}
 	var err error
 	if c.ScanEvery, err = g.Duration("OCS_MED_SCAN_INTERVAL", 10*time.Second); err != nil {
@@ -67,6 +73,9 @@ func LoadConfig(g svcenv.Getenv) (Config, error) {
 		return c, err
 	}
 	if c.DedupWindow, err = g.Duration("OCS_MED_DEDUP_WINDOW", 72*time.Hour); err != nil {
+		return c, err
+	}
+	if c.MappingEvery, err = g.Duration("OCS_MED_MAPPING_RELOAD", 10*time.Second); err != nil {
 		return c, err
 	}
 	if c.MaxFileBytes, err = g.Int64("OCS_MED_MAX_FILE_BYTES", 256<<20); err != nil {

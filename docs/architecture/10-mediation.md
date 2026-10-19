@@ -113,6 +113,10 @@ other nodes, so a filter does not save the round trip it was meant to save.
   the amount taken from a balance. Containers that cannot be priced (barred,
   no rule, no cash rate) carry the reason and count as `unrated`.
 
+## Vendor record translation
+
+Kafka messages and JSON-lines files may be in a vendor layout. With `OCS_MED_MAPPING` a declarative mapping (doc 11, `pkg/mapping`) translates them before decoding, hot-reloaded without a restart. A record no rule matches is treated as already normalized; a record a rule matches but cannot convert goes to `rejects/`.
+
 ## Output (`OCS_MED_OUT_DIR`)
 
 ```

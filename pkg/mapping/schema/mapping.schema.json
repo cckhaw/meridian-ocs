@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://meridian-ocs.example/schemas/mapping.schema.json",
+  "title": "OCS declarative mapping",
+  "description": "A mapping document translates one JSON record layout into another. YAML or JSON. Unknown keys are rejected. Validation beyond this schema (path syntax, limits, unique ids) is done by the compiler: POST /v1/mappings/validate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "name", "rules"],
+  "properties": {
+    "version": {"const": 1},
+    "name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$"},
+    "description": {"type": "string"},
+    "rules": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"$ref": "#/$defs/rule"}}
+  },
+  "$defs": {
+    "path": {
+      "type": "string",
+      "description": "$ or $.field.field[0].field : fields and array indexes only; at most 16 steps.",
+      "pattern": "^\\$(\\.[A-Za-z_][A-Za-z0-9_-]*(\\[[0-9]{1,4}\\])*)*$"
+    },
+    "scalar": {"type": ["string", "number", "boolean", "null"]},
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "output"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$"},
+        "match": {"type": "array", "items": {"$ref": "#/$defs/condition"}, "description": "All conditions must hold. Rules are tried in order; the first match wins."},
+        "output": {"$ref": "#/$defs/fields"}
+      }
+    },
+    "condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": {"$ref": "#/$defs/path"},
+        "equals": {"type": "string"},
+        "in": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 1000},
+        "exists": {"type": "boolean"}
+      },
+      "oneOf": [{"required": ["equals"]}, {"required": ["in"]}, {"required": ["exists"]}]
+    },
+    "fields": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 64,
+      "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$"},
+      "additionalProperties": {"$ref": "#/$defs/value"}
+    },
+    "value": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Exactly one source (const, path, concat, each), then optional modifiers applied in the order listed.",
+      "properties": {
+        "const": {"$ref": "#/$defs/scalar"},
+        "path": {"$ref": "#/$defs/path"},
+        "concat": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"$ref": "#/$defs/value"}},
+        "each": {"$ref": "#/$defs/path"},
+        "item": {"$ref": "#/$defs/fields"},
+        "strip": {"type": "string"},
+        "trim": {"type": "boolean"},
+        "lower": {"type": "boolean"},
+        "upper": {"type": "boolean"},
+        "lookup": {"type": "object", "maxProperties": 1000, "additionalProperties": {"type": "string"}},
+        "divide": {"type": "number", "not": {"const": 0}},
+        "multiply": {"type": "number"},
+        "as": {"enum": ["string", "number", "integer", "bool", "time_rfc3339", "time_unix_s", "time_unix_ms"]},
+        "default": {"$ref": "#/$defs/scalar"},
+        "required": {"type": "boolean"}
+      },
+      "oneOf": [{"required": ["const"]}, {"required": ["path"]}, {"required": ["concat"]}, {"required": ["each"]}]
+    }
+  }
+}

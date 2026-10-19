@@ -2,27 +2,103 @@ syntax = "proto3";
 
 package ocs.v1;
 
+import "google/protobuf/timestamp.proto";
+
 option go_package = "github.com/cckhaw/meridian-ocs/pkg/gen/ocs/v1;ocsv1";
 
-// Guarded control plane for AI Ops agents. Every parameter is allow-listed and
-// clamped server-side; changes auto-revert after ttl_seconds unless confirmed.
+// Guarded control plane for AI Ops agents and operators. Each OCS process that
+// has tunable settings serves this API for itself.
+//
+// Safety is enforced server-side (pkg/control): only registered parameters
+// exist, numeric values are clamped to a declared range, every change reverts
+// after ttl_seconds unless confirmed, "risky" parameters need a second
+// principal's approval, and there is a per-principal rate limit and a freeze
+// switch. The caller is identified by its mTLS client certificate; agents and
+// approvers are separate allow-lists.
 service ControlService {
+  // Propose a change. Ordinary parameters are applied at once; risky ones wait
+  // in PENDING_APPROVAL.
   rpc SetParameter(SetParameterRequest) returns (SetParameterResponse);
+  // Make an applied change permanent until the process restarts.
   rpc ConfirmChange(ConfirmChangeRequest) returns (ConfirmChangeResponse);
+  // Approve a pending risky change (approvers only, and not the proposer).
+  rpc ApproveChange(ApproveChangeRequest) returns (SetParameterResponse);
+  // Undo an applied change now, or withdraw a pending one.
+  rpc RevertChange(RevertChangeRequest) returns (RevertChangeResponse);
+  rpc ListParameters(ListParametersRequest) returns (ListParametersResponse);
+  rpc ListChanges(ListChangesRequest) returns (ListChangesResponse);
+  // Stop (or resume) all new changes and approvals (approvers only). Reverts
+  // keep running.
+  rpc Freeze(FreezeRequest) returns (FreezeResponse);
+}
+
+enum ChangeState {
+  CHANGE_STATE_UNSPECIFIED = 0;
+  CHANGE_STATE_PENDING_APPROVAL = 1;
+  CHANGE_STATE_APPLIED = 2;      // in effect; reverts at reverts_at unless confirmed
+  CHANGE_STATE_CONFIRMED = 3;
+  CHANGE_STATE_REVERTED = 4;
+  CHANGE_STATE_EXPIRED = 5;      // reverted by its timer
+  CHANGE_STATE_CANCELLED = 6;
+  CHANGE_STATE_FAILED = 7;
 }
 
 message SetParameterRequest {
-  string service = 1;
-  string parameter = 2;   // e.g. "worker_pool_size", "failopen.enabled"
+  string service = 1;     // must name the service being called
+  string parameter = 2;   // e.g. "admission.max_inflight"
   string value = 3;
-  uint32 ttl_seconds = 4;
-  string reason = 5;
+  uint32 ttl_seconds = 4; // 0 = the default (300); capped at 3600
+  string reason = 5;      // required, 1-256 characters, kept in the audit trail
 }
 
 message SetParameterResponse {
   string change_id = 1;
-  string applied_value = 2;  // after clamping
+  string applied_value = 2;  // after clamping; empty while pending approval
+  ChangeState state = 3;
+  bool clamped = 4;
+  string previous_value = 5;
+  google.protobuf.Timestamp reverts_at = 6;
 }
 
-message ConfirmChangeRequest { string change_id = 1; }
+message ConfirmChangeRequest { string service = 1; string change_id = 2; }
 message ConfirmChangeResponse {}
+
+message ApproveChangeRequest { string service = 1; string change_id = 2; }
+
+message RevertChangeRequest { string service = 1; string change_id = 2; }
+message RevertChangeResponse {}
+
+message ListParametersRequest { string service = 1; }
+message ParameterInfo {
+  string name = 1;
+  string description = 2;
+  string kind = 3;               // int, float, bool, enum
+  string current_value = 4;
+  double min = 5;
+  double max = 6;
+  repeated string enum_values = 7;
+  bool risky = 8;
+  string active_change_id = 9;
+}
+message ListParametersResponse { repeated ParameterInfo parameters = 1; bool frozen = 2; }
+
+message ListChangesRequest { string service = 1; }
+message ChangeInfo {
+  string change_id = 1;
+  string parameter = 2;
+  string previous_value = 3;
+  string requested_value = 4;
+  string applied_value = 5;
+  bool clamped = 6;
+  string proposed_by = 7;
+  string approved_by = 8;
+  string reason = 9;
+  ChangeState state = 10;
+  google.protobuf.Timestamp proposed_at = 11;
+  google.protobuf.Timestamp applied_at = 12;
+  google.protobuf.Timestamp reverts_at = 13;
+}
+message ListChangesResponse { repeated ChangeInfo changes = 1; }
+
+message FreezeRequest { string service = 1; bool frozen = 2; string reason = 3; }
+message FreezeResponse {}
