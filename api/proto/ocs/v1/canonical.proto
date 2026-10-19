@@ -56,6 +56,8 @@ message CanonicalChargingResponse {
     RESULT_UNKNOWN_SESSION = 4;
     RESULT_UNAVAILABLE = 5;       // fail-closed outcome
     RESULT_TOO_BUSY = 6;
+    RESULT_NO_BUCKET = 7;         // nothing eligible to charge
+    RESULT_STALE_REQUEST = 8;     // request number older than the last processed
   }
   Result result = 1;
   repeated UnitGrant grants = 2;
@@ -68,4 +70,5 @@ message UnitGrant {
   uint32 validity_seconds = 3;
   bool final_unit = 4;
   bool degraded = 5;  // issued by the fail-open policy without an authoritative balance
+  int64 shortfall = 6; // used units that could not be charged
 }

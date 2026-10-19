@@ -1,5 +1,6 @@
-// Command ocs-rating-engine is the rating-engine service.
-// Scaffold only: business logic lands in later deliverables.
+// Command ocs-rating-engine is the real-time rating and credit-control service.
+// The gateway-facing gRPC listener is added with the signaling adapters; this
+// scaffold only wires process lifecycle.
 package main
 
 import "github.com/cckhaw/meridian-ocs/pkg/service"
