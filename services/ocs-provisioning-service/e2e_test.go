@@ -10,11 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
 	"github.com/cckhaw/meridian-ocs/pkg/canonical"
+	"github.com/cckhaw/meridian-ocs/pkg/catalog"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer/redistest"
 	ocsv1 "github.com/cckhaw/meridian-ocs/pkg/gen/ocs/v1"
@@ -27,6 +29,7 @@ type system struct {
 	app  *App
 	pki  *tlstest.PKI
 	data *datalayer.Client
+	rdb  *redis.Client
 	res  *identity.Resolver
 	rest string
 	grpc string
@@ -79,7 +82,7 @@ func startSystem(t *testing.T) *system {
 	})
 
 	dir := identity.NewRedisDirectory(rdb, cfg.IdentityPrefix)
-	return &system{app: app, pki: pki, data: datalayer.New(rdb),
+	return &system{app: app, pki: pki, data: datalayer.New(rdb), rdb: rdb,
 		res:  identity.NewResolver(identity.NewCachedDirectory(dir, identity.CacheConfig{TTL: time.Millisecond}), identity.ConflictReject),
 		rest: "https://" + app.RESTAddr(), grpc: app.GRPCAddr()}
 }
@@ -255,5 +258,115 @@ func TestProvisioningThroughTheWholeSystem(t *testing.T) {
 	if resp, err := noCert.Get(s.rest + "/v1/subscribers/acct-1"); err == nil {
 		resp.Body.Close()
 		t.Fatalf("a client without a certificate got through: %d", resp.StatusCode)
+	}
+}
+
+// An offering published in the catalog is attached through the API, applied
+// through Kafka and the workers, and then decides which price plan the charging
+// path uses for that subscriber.
+func TestOfferingsThroughTheWholeSystem(t *testing.T) {
+	s := startSystem(t)
+	for _, id := range []string{"gold-sub", "plain-sub"} {
+		s.call(t, "crm", "POST", "/v1/subscribers", "create-"+id, map[string]any{"subscriberKey": id, "paymentType": "prepaid",
+			"identifiers": []map[string]string{{"type": "imsi", "value": map[string]string{"gold-sub": "262011111111111", "plain-sub": "262012222222222"}[id]}}})
+		if got := s.waitApplied(t, "create-"+id); got["state"] != "applied" {
+			t.Fatalf("%v", got)
+		}
+	}
+
+	// No catalog yet: a retryable 503, nothing queued.
+	if code, m := s.call(t, "crm", "POST", "/v1/subscribers/gold-sub/offering", "att-0", map[string]any{"offering": "gold-offer"}); code != 503 {
+		t.Fatalf("%d %v", code, m)
+	}
+
+	pub := &catalog.Replicator{Redis: s.rdb, Store: catalog.NewStore(0)}
+	doc := catalog.Document{EffectiveFrom: time.Now().Add(-time.Hour),
+		Plans: []catalog.PricePlan{
+			{ID: "basic", Rules: []catalog.ChargeRule{{ID: "r", Cash: &catalog.Price{Num: 4, Den: 1}}}},
+			{ID: "gold", Rules: []catalog.ChargeRule{{ID: "r", Cash: &catalog.Price{Num: 1, Den: 1}}}},
+		},
+		Offerings: []catalog.ProductOffering{{ID: "gold-offer", PlanID: "gold", Allowances: []catalog.AllowanceBucket{
+			{ID: "data", Class: "bundle", Unit: "bytes", Amount: 1000, ValidityDays: 30},
+			{ID: "welcome", Class: "promo", Unit: "events", Amount: 5, Order: 3}}}}}
+	if _, _, err := pub.Publish(context.Background(), doc, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// The service follows the catalog on its own: retry until it has seen it.
+	var code int
+	var m map[string]any
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		code, m = s.call(t, "crm", "POST", "/v1/subscribers/gold-sub/offering", "att-1", map[string]any{"offering": "gold-offer"})
+		if code != 503 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if code != 202 {
+		t.Fatalf("%d %v", code, m)
+	}
+	got := s.waitApplied(t, "att-1")
+	if got["state"] != "applied" || got["toOffering"] != "gold-offer" || got["fromOffering"] != "" || got["buckets"] != float64(2) {
+		t.Fatalf("%v", got)
+	}
+
+	// Reading back over REST and gRPC.
+	_, sub := s.call(t, "crm", "GET", "/v1/subscribers/gold-sub", "", nil)
+	if sub["offering"] != "gold-offer" || len(sub["buckets"].([]any)) != 2 {
+		t.Fatalf("%v", sub)
+	}
+	conn, err := grpc.NewClient("passthrough:///"+s.grpc, grpc.WithTransportCredentials(credentials.NewTLS(s.pki.ClientTLS(t, "care"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	gc := ocsv1.NewProvisioningServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if gs, err := gc.GetSubscriber(ctx, &ocsv1.GetSubscriberRequest{SubscriberKey: "gold-sub"}); err != nil || gs.OfferingId != "gold-offer" {
+		t.Fatalf("%v %v", gs, err)
+	}
+
+	// Attaching it again is refused (the buckets exist), a renewal is accepted.
+	if _, err := gc.AttachOffering(ctx, &ocsv1.AttachOfferingRequest{IdempotencyKey: "att-2", SubscriberKey: "gold-sub", OfferingId: "gold-offer"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.waitApplied(t, "att-2"); got["state"] != "failed" || got["outcome"] != "allowance_exists" {
+		t.Fatalf("%v", got)
+	}
+	if _, err := gc.AttachOffering(ctx, &ocsv1.AttachOfferingRequest{IdempotencyKey: "att-3", SubscriberKey: "gold-sub", OfferingId: "gold-offer", Renew: true}); err != nil {
+		t.Fatal(err)
+	}
+	s.waitApplied(t, "att-3")
+	if st, err := gc.GetCommand(ctx, &ocsv1.GetCommandRequest{CommandId: "att-3"}); err != nil || st.FromOffering != "gold-offer" || st.ToOffering != "gold-offer" {
+		t.Fatalf("%v %v", st, err)
+	}
+
+	// The charging path prices each subscriber on the plan its offering selects.
+	resolver := catalog.NewProfileResolver(s.data, pub.Store)
+	if err := pub.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	tf := &catalog.Tariff{Store: pub.Store, Resolver: resolver, DefaultPlan: "basic"}
+	cash := func(key string) int64 {
+		rates, err := tf.Rates(&canonical.Request{SubscriberID: key}, &canonical.UnitRequest{Kind: canonical.UnitBytes}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rates[len(rates)-1].Num
+	}
+	if cash("gold-sub") != 1 || cash("plain-sub") != 4 {
+		t.Fatalf("gold-sub pays %d per byte (want 1), plain-sub %d (want 4)", cash("gold-sub"), cash("plain-sub"))
+	}
+	// And the bundle that came with the offering is consumed first.
+	rates, _ := tf.Rates(&canonical.Request{SubscriberID: "gold-sub"}, &canonical.UnitRequest{Kind: canonical.UnitBytes}, nil)
+	var resp datalayer.Response
+	err = s.data.Charge(context.Background(), &datalayer.Request{SubscriberID: "gold-sub", SessionID: "s1", Mode: datalayer.ModeInitial, Now: time.Now(),
+		Validity: 30 * time.Second, Items: []datalayer.Item{{RatingGroup: 1, Kind: canonical.UnitBytes, Requested: 400, Rates: rates}}}, &resp)
+	if err != nil || resp.Items[0].Granted != 400 {
+		t.Fatalf("%v %+v", err, resp)
+	}
+	if bal, _ := s.data.Balance(context.Background(), "gold-sub", "data"); bal != 600 {
+		t.Fatalf("the allowance should have paid: %d", bal)
 	}
 }

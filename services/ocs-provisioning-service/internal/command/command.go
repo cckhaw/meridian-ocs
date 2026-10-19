@@ -29,6 +29,7 @@ const (
 	ReloadBucket     Type = "reload_bucket"
 	RemoveBucket     Type = "remove_bucket"
 	ChangeLifecycle  Type = "change_lifecycle"
+	AttachOffering   Type = "attach_offering"
 )
 
 // Privileged commands move or destroy value in ways routine CRM flows do not
@@ -75,7 +76,29 @@ type Command struct {
 	// change_lifecycle
 	Target     string `json:"target,omitempty"`
 	GraceUntil int64  `json:"graceUntil,omitempty"`
+
+	// attach_offering. The caller supplies Offering and Renew; the service
+	// fills Allowances and CatalogVersion from the catalog when it accepts the
+	// command, so the command carries exactly what will be applied and a
+	// redelivery after a catalog change still applies the same thing.
+	Offering       string      `json:"offering,omitempty"`
+	Renew          bool        `json:"renew,omitempty"`
+	Allowances     []Allowance `json:"allowances,omitempty"`
+	CatalogVersion int64       `json:"catalogVersion,omitempty"`
 }
+
+// Allowance is a bucket an offering creates.
+type Allowance struct {
+	ID        string  `json:"id"`
+	Class     string  `json:"class"` // promo | bundle
+	Unit      string  `json:"unit"`  // bytes | seconds | events
+	Amount    int64   `json:"amount"`
+	ExpiresAt int64   `json:"expiresAt,omitempty"` // unix ms, absolute; 0 = never
+	Order     float64 `json:"order"`
+}
+
+// MaxAllowances bounds the allowances of one offering attachment.
+const MaxAllowances = datalayer.MaxAllowances
 
 // Limits bound what one command may do, to cap the damage of a mistake or a
 // compromised caller.
@@ -234,6 +257,29 @@ func (c *Command) Validate(l Limits) error {
 		if len(c.Reason) > 256 {
 			return bad("reason is at most 256 characters")
 		}
+	case AttachOffering:
+		if !bucketRe.MatchString(c.Offering) || c.Offering == "-" {
+			return bad("offering id must be 1-64 characters from A-Z a-z 0-9 . _ -")
+		}
+		if len(c.Allowances) > MaxAllowances {
+			return bad("an offering may create at most %d allowances", MaxAllowances)
+		}
+		seen := map[string]bool{}
+		for i, a := range c.Allowances {
+			switch {
+			case !bucketRe.MatchString(a.ID) || seen[a.ID]:
+				return bad("allowance %d: bad or duplicate id", i)
+			case a.Class != "bundle" && a.Class != "promo":
+				return bad("allowance %d: class must be bundle or promo", i)
+			case !validUnit(a.Unit):
+				return bad("allowance %d: unit must be bytes, seconds or events", i)
+			case a.Amount <= 0 || a.Amount > datalayer.MaxBalance:
+				return bad("allowance %d: amount out of range", i)
+			case a.ExpiresAt < 0:
+				return bad("allowance %d: negative expiry", i)
+			}
+			seen[a.ID] = true
+		}
 	default:
 		return bad("unknown command type %q", c.Type)
 	}
@@ -271,6 +317,9 @@ func validUnit(s string) bool { return s == "bytes" || s == "seconds" || s == "e
 func (c *Command) Fingerprint() string {
 	cp := *c
 	cp.ID, cp.AcceptedAt, cp.Principal = "", 0, ""
+	// Derived from the catalog at acceptance: a retry after a catalog change is
+	// still the same request.
+	cp.Allowances, cp.CatalogVersion = nil, 0
 	if len(cp.Identifiers) > 0 { // identifier order is not meaningful
 		ids := append([]Identifier(nil), cp.Identifiers...)
 		for i := range ids {

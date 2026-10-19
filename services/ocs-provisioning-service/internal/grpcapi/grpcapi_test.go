@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/cckhaw/meridian-ocs/pkg/catalog"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer/redistest"
 	ocsv1 "github.com/cckhaw/meridian-ocs/pkg/gen/ocs/v1"
@@ -65,7 +66,7 @@ func newRig(t *testing.T, az *auth.Authorizer, mtls bool) *rig {
 	t.Helper()
 	rdb := redistest.Start(t)
 	g := &rig{prod: &capturingProducer{}, st: cmdstatus.New(rdb, "", 0), data: datalayer.New(rdb)}
-	svc := service.New(service.Config{Limits: lim}, g.st, g.prod, g.data)
+	svc := service.New(service.Config{Limits: lim, Catalog: testCatalog(t)}, g.st, g.prod, g.data)
 	var opts []grpc.ServerOption
 	if mtls {
 		g.pki = tlstest.New(t)
@@ -156,6 +157,11 @@ func TestEveryRPCQueuesTheRightCommand(t *testing.T) {
 		{"remove", func() (*ocsv1.CommandAccepted, error) {
 			return c.RemoveBucket(ctx, &ocsv1.RemoveBucketRequest{IdempotencyKey: "r-6", SubscriberKey: "acct-1", BucketId: "data", Force: true})
 		}, func(c *command.Command) bool { return c.Type == command.RemoveBucket && c.Force }},
+		{"offering", func() (*ocsv1.CommandAccepted, error) {
+			return c.AttachOffering(ctx, &ocsv1.AttachOfferingRequest{IdempotencyKey: "r-8", SubscriberKey: "acct-1", OfferingId: "gold-offer", Renew: true})
+		}, func(c *command.Command) bool {
+			return c.Type == command.AttachOffering && c.Offering == "gold-offer" && c.Renew && len(c.Allowances) == 1 && c.CatalogVersion == 1
+		}},
 		{"lifecycle", func() (*ocsv1.CommandAccepted, error) {
 			return c.ChangeLifecycle(ctx, &ocsv1.ChangeLifecycleRequest{IdempotencyKey: "r-7", SubscriberKey: "acct-1",
 				Target: ocsv1.LifecycleState_LIFECYCLE_STATE_GRACE_PERIOD, GraceUntil: timestamppb.New(exp), Reason: "low"})
@@ -306,4 +312,17 @@ func TestReads(t *testing.T) {
 	if st.State != ocsv1.CommandState_COMMAND_STATE_APPLIED || st.Balance != 755 || st.Version != 4 || st.CompletedAt == nil {
 		t.Fatalf("%+v", st)
 	}
+}
+
+func testCatalog(t testing.TB) *catalog.Store {
+	t.Helper()
+	d := catalog.Document{EffectiveFrom: time.Now().Add(-time.Hour),
+		Plans: []catalog.PricePlan{{ID: "gold", Rules: []catalog.ChargeRule{{ID: "r", Cash: &catalog.Price{Num: 1, Den: 1}}}}},
+		Offerings: []catalog.ProductOffering{{ID: "gold-offer", PlanID: "gold", Allowances: []catalog.AllowanceBucket{
+			{ID: "data", Class: "bundle", Unit: "bytes", Amount: 1000}}}}}
+	s := catalog.NewStore(0)
+	if _, _, err := s.Publish(d, 0); err != nil {
+		t.Fatal(err)
+	}
+	return s
 }

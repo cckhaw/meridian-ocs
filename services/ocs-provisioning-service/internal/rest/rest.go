@@ -7,6 +7,7 @@
 //	PUT    /v1/subscribers/{key}/buckets/{bucket}       reload an allowance
 //	DELETE /v1/subscribers/{key}/buckets/{bucket}       remove a bucket        (privileged)
 //	POST   /v1/subscribers/{key}/lifecycle              change lifecycle state (privileged)
+//	POST   /v1/subscribers/{key}/offering               put the subscriber on a catalog offering
 //	GET    /v1/commands/{id}                            outcome of a command
 //	GET    /v1/subscribers/{key}                        profile and buckets
 //
@@ -52,6 +53,7 @@ func New(svc *service.Service, az *auth.Authorizer) *Handler {
 	h.mux.HandleFunc("PUT /v1/subscribers/{key}/buckets/{bucket}", handle(h, command.ReloadBucket, true, fillReload))
 	h.mux.HandleFunc("DELETE /v1/subscribers/{key}/buckets/{bucket}", handle(h, command.RemoveBucket, false, fillRemove))
 	h.mux.HandleFunc("POST /v1/subscribers/{key}/lifecycle", handle(h, command.ChangeLifecycle, true, fillLifecycle))
+	h.mux.HandleFunc("POST /v1/subscribers/{key}/offering", handle(h, command.AttachOffering, true, fillOffering))
 	h.mux.HandleFunc("GET /v1/commands/{id}", h.getCommand)
 	h.mux.HandleFunc("GET /v1/subscribers/{key}", h.getSubscriber)
 	return h
@@ -102,6 +104,11 @@ type reloadBody struct {
 }
 
 type removeBody struct{}
+
+type offeringBody struct {
+	Offering string `json:"offering"`
+	Renew    bool   `json:"renew"`
+}
 
 type lifecycleBody struct {
 	Target     string `json:"target"`
@@ -159,6 +166,11 @@ func fillReload(r *http.Request, b *reloadBody, c *command.Command) (err error) 
 
 func fillRemove(r *http.Request, _ *removeBody, c *command.Command) error {
 	c.BucketID, c.Force = r.PathValue("bucket"), r.URL.Query().Get("force") == "true"
+	return nil
+}
+
+func fillOffering(_ *http.Request, b *offeringBody, c *command.Command) error {
+	c.Offering, c.Renew = b.Offering, b.Renew
 	return nil
 }
 
@@ -257,6 +269,8 @@ func (h *Handler) getCommand(w http.ResponseWriter, r *http.Request) {
 			case command.ChangeLifecycle:
 				out["from"], out["to"] = rec.From, rec.To
 			case command.CreateSubscriber:
+			case command.AttachOffering:
+				out["fromOffering"], out["toOffering"], out["buckets"] = rec.From, rec.To, rec.Balance
 			default:
 				out["balance"] = rec.Balance
 				if rec.Type == command.ReloadBucket {
@@ -291,7 +305,7 @@ func (h *Handler) getSubscriber(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"subscriberKey": v.Key, "paymentType": v.Profile.Payment, "status": v.Profile.Status,
 		"version": v.Profile.Version, "createdAt": ts(v.Profile.CreatedAt), "statusAt": ts(v.Profile.StatusAt),
-		"graceUntil": ts(v.Profile.GraceUntil), "buckets": buckets})
+		"graceUntil": ts(v.Profile.GraceUntil), "offering": v.Profile.Offering, "buckets": buckets})
 }
 
 // ---- responses -------------------------------------------------------------
@@ -321,6 +335,9 @@ func fail(w http.ResponseWriter, err error) {
 		status, code, msg = http.StatusNotFound, "not_found", "not found"
 	case errors.Is(err, service.ErrIdempotencyConflict):
 		status, code, msg = http.StatusConflict, "idempotency_conflict", "this Idempotency-Key was already used for a different request"
+	case errors.Is(err, service.ErrNoCatalog):
+		w.Header().Set("Retry-After", "5")
+		status, code, msg = http.StatusServiceUnavailable, "catalog_unavailable", "no tariff catalog is available to resolve the offering; retry later"
 	case errors.Is(err, service.ErrUnavailable):
 		w.Header().Set("Retry-After", "1")
 		status, code, msg = http.StatusServiceUnavailable, "unavailable", "temporarily unavailable, retry with the same Idempotency-Key"

@@ -254,6 +254,9 @@ func (w *Worker) process(ctx context.Context, rec *kgo.Record) {
 func (w *Worker) finish(ctx context.Context, c *command.Command, out Outcome) {
 	res := status.Result{State: out.State, Outcome: out.Code, Message: out.Message,
 		Balance: out.Res.Balance, OldBalance: out.Res.OldBalance, From: out.Res.From, To: out.Res.To, Version: out.Res.Version}
+	if c.Type == command.AttachOffering { // the record's from / to carry the offerings
+		res.From, res.To, res.Balance = out.Res.PrevOffering, out.Res.Offering, int64(out.Res.Buckets)
+	}
 	if w.retry(ctx, "record "+c.ID, func(ctx context.Context) error {
 		_, err := w.status.Complete(ctx, c.ID, res)
 		return err

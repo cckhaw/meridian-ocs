@@ -187,3 +187,45 @@ func TestPrivilegedTypes(t *testing.T) {
 		}
 	}
 }
+
+func TestAttachOfferingValidationAndFingerprint(t *testing.T) {
+	l := DefaultLimits()
+	ok := Command{ID: "o1", Type: AttachOffering, Key: "acct-1", Offering: "gold"}
+	if err := ok.Validate(l); err != nil {
+		t.Fatal(err)
+	}
+	for name, mut := range map[string]func(*Command){
+		"no offering":    func(c *Command) { c.Offering = "" },
+		"bad characters": func(c *Command) { c.Offering = "gold plan" },
+		"dash":           func(c *Command) { c.Offering = "-" },
+		"bad allowance":  func(c *Command) { c.Allowances = []Allowance{{ID: "a b", Class: "bundle", Unit: "bytes", Amount: 1}} },
+		"cash allowance": func(c *Command) { c.Allowances = []Allowance{{ID: "a", Class: "cash", Unit: "bytes", Amount: 1}} },
+		"zero amount":    func(c *Command) { c.Allowances = []Allowance{{ID: "a", Class: "bundle", Unit: "bytes"}} },
+		"duplicate id": func(c *Command) {
+			c.Allowances = []Allowance{{ID: "a", Class: "bundle", Unit: "bytes", Amount: 1}, {ID: "a", Class: "promo", Unit: "events", Amount: 1}}
+		},
+	} {
+		c := ok
+		mut(&c)
+		if !IsValidation(c.Validate(l)) {
+			t.Errorf("%s: not rejected", name)
+		}
+	}
+	// The derived fields do not change what the caller asked for.
+	expanded := ok
+	expanded.Allowances = []Allowance{{ID: "data", Class: "bundle", Unit: "bytes", Amount: 1000, Order: 100}}
+	expanded.CatalogVersion = 7
+	if ok.Fingerprint() != expanded.Fingerprint() {
+		t.Fatal("expanding an offering changed the request fingerprint")
+	}
+	renew := ok
+	renew.Renew = true
+	other := ok
+	other.Offering = "silver"
+	if ok.Fingerprint() == renew.Fingerprint() || ok.Fingerprint() == other.Fingerprint() {
+		t.Fatal("renew and the offering must be part of the fingerprint")
+	}
+	if AttachOffering.Privileged() {
+		t.Fatal("attaching an offering is a routine CRM operation")
+	}
+}

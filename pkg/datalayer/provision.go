@@ -28,6 +28,7 @@ const (
 	ProvAddBundle ProvisionKind = 'B'
 	ProvReload    ProvisionKind = 'R'
 	ProvRemove    ProvisionKind = 'X'
+	ProvOffering  ProvisionKind = 'P'
 )
 
 // ProvisionCode is the outcome of a provisioning step.
@@ -46,6 +47,7 @@ const (
 	ProvOverflow          ProvisionCode = 9
 	ProvBucketNotEmpty    ProvisionCode = 10
 	ProvNotCashBucket     ProvisionCode = 11
+	ProvAllowanceExists   ProvisionCode = 12 // an allowance bucket of the offering exists and renew was not set
 )
 
 func (c ProvisionCode) String() string {
@@ -53,7 +55,7 @@ func (c ProvisionCode) String() string {
 		ProvApplied: "applied", ProvDuplicate: "duplicate", ProvNoSubscriber: "no_such_subscriber",
 		ProvExists: "already_exists", ProvInvalidTransition: "invalid_transition", ProvInsufficient: "insufficient_balance",
 		ProvTokenMismatch: "idempotency_token_reused", ProvNoBucket: "no_such_bucket", ProvTerminated: "subscriber_terminated",
-		ProvOverflow: "balance_overflow", ProvBucketNotEmpty: "bucket_not_empty", ProvNotCashBucket: "not_a_cash_bucket",
+		ProvOverflow: "balance_overflow", ProvBucketNotEmpty: "bucket_not_empty", ProvNotCashBucket: "not_a_cash_bucket", ProvAllowanceExists: "allowance_exists",
 	}
 	if n, ok := names[c]; ok {
 		return n
@@ -92,6 +94,23 @@ type ProvisionOp struct {
 	KeepOrder     bool // ProvReload
 	AllowNegative bool
 	Force         bool // ProvRemove
+
+	Offering   string      // ProvOffering: the offering id
+	Renew      bool        // ProvOffering: reset allowance buckets that already exist
+	Allowances []Allowance // ProvOffering
+}
+
+// MaxAllowances is the most allowances one offering attachment may create.
+const MaxAllowances = 32
+
+// Allowance is a bucket created when an offering is attached.
+type Allowance struct {
+	BucketID  string
+	Class     Class // promo or bundle
+	Unit      canonical.UnitKind
+	Amount    int64
+	ExpiresAt time.Time // zero = never
+	Order     float64
 }
 
 // ProvisionResult is the decoded reply. Fields are filled per kind.
@@ -105,6 +124,11 @@ type ProvisionResult struct {
 	From, To     string
 	Version      int64
 	Replication  Replication
+	// Offering results: the previous offering ("" if none), the new one, the
+	// number of allowance buckets written, and for a failure the bucket id.
+	PrevOffering, Offering string
+	Buckets                int
+	Conflict               string
 }
 
 // Effective returns the outcome that applies: the original one for a duplicate.
@@ -203,6 +227,20 @@ func (o *ProvisionOp) args() ([]any, error) {
 			return nil, err
 		}
 		a = append(a, o.BucketID, flag(o.Force))
+	case ProvOffering:
+		if o.Offering == "" || o.Offering == "-" || len(o.Offering) > 64 || strings.ContainsAny(o.Offering, ",\r\n{}") || len(o.Allowances) > MaxAllowances {
+			return nil, fmt.Errorf("%w: offering", ErrInvalid)
+		}
+		a = append(a, o.Offering, flag(o.Renew), len(o.Allowances))
+		seen := map[string]bool{}
+		for _, al := range o.Allowances {
+			if al.BucketID == "" || len(al.BucketID) > 64 || strings.ContainsAny(al.BucketID, "|;,{}") || seen[al.BucketID] ||
+				(al.Class != ClassBundle && al.Class != ClassPromo) || al.Amount <= 0 || al.Amount > MaxBalance {
+				return nil, fmt.Errorf("%w: allowance %q", ErrInvalid, al.BucketID)
+			}
+			seen[al.BucketID] = true
+			a = append(a, al.BucketID, string(al.Class), al.Unit.String(), al.Amount, ms(al.ExpiresAt), al.Order)
+		}
 	default:
 		return nil, fmt.Errorf("%w: kind", ErrInvalid)
 	}
@@ -261,6 +299,10 @@ func decodeProvision(kind ProvisionKind, raw []any) (ProvisionResult, error) {
 			if len(vals) > 1 {
 				r.From, r.To = vals[0], vals[1]
 			}
+		case ProvAllowanceExists:
+			if len(vals) > 0 {
+				r.Conflict = vals[0]
+			}
 		}
 		return r, nil
 	}
@@ -283,6 +325,14 @@ func decodeProvision(kind ProvisionKind, raw []any) (ProvisionResult, error) {
 		r.Balance, r.Version = num(0), num(1)
 	case ProvReload:
 		r.Balance, r.OldBalance, r.Version = num(0), num(1), num(2)
+	case ProvOffering:
+		if len(vals) < 4 {
+			return r, errors.New("datalayer: malformed offering reply")
+		}
+		r.PrevOffering, r.Offering, r.Buckets, r.Version = vals[0], vals[1], int(num(2)), num(3)
+		if r.PrevOffering == "-" {
+			r.PrevOffering = ""
+		}
 	}
 	return r, nil
 }
@@ -295,6 +345,7 @@ type Profile struct {
 	CreatedAt  time.Time
 	StatusAt   time.Time
 	GraceUntil time.Time // zero unless in grace with a deadline
+	Offering   string    // the product offering the subscriber is on ("" = none)
 }
 
 // ErrNoSubscriber is returned by reads for a subscriber without a profile.
@@ -322,7 +373,7 @@ func (c *Client) GetProfile(ctx context.Context, key string) (Profile, error) {
 	}
 	ver, _ := strconv.ParseInt(m["ver"], 10, 64)
 	return Profile{Payment: m["payment"], Status: m["status"], Version: ver,
-		CreatedAt: unixMilli(m["createdAt"]), StatusAt: unixMilli(m["statusAt"]), GraceUntil: unixMilli(m["graceUntil"])}, nil
+		CreatedAt: unixMilli(m["createdAt"]), StatusAt: unixMilli(m["statusAt"]), GraceUntil: unixMilli(m["graceUntil"]), Offering: m["offering"]}, nil
 }
 
 // BucketInfo is a bucket as stored.
@@ -364,4 +415,23 @@ func (c *Client) ListBuckets(ctx context.Context, key string) ([]BucketInfo, err
 			Balance: bal, ExpiresAt: unixMilli(m["exp"]), Order: z.Score})
 	}
 	return out, nil
+}
+
+// Offering returns the offering id on the subscriber's profile: "" when the
+// subscriber has none, ErrNoSubscriber when there is no profile. It is one
+// HGET, cheap enough for a cache miss on the rating path.
+func (c *Client) Offering(ctx context.Context, key string) (string, error) {
+	if !validID(key) {
+		return "", fmt.Errorf("%w: key", ErrInvalid)
+	}
+	pk := Prefix(key) + ":profile"
+	vals, err := c.rdb.HMGet(ctx, pk, "status", "offering").Result()
+	if err != nil {
+		return "", err
+	}
+	if vals[0] == nil {
+		return "", ErrNoSubscriber
+	}
+	s, _ := vals[1].(string)
+	return s, nil
 }

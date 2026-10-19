@@ -54,6 +54,7 @@ concurrently.
 | adjust balance (signed) | `POST /v1/subscribers/{key}/adjustments` | **yes** |
 | remove bucket | `DELETE /v1/subscribers/{key}/buckets/{bucket}?force=true` | **yes** |
 | change lifecycle | `POST /v1/subscribers/{key}/lifecycle` | **yes** |
+| attach offering | `POST /v1/subscribers/{key}/offering` | no |
 | command status | `GET /v1/commands/{id}` | no |
 | read subscriber | `GET /v1/subscribers/{key}` | no |
 
@@ -71,6 +72,33 @@ Creating a subscriber binds its identifiers (MSISDN, IMSI, NAI) in the
 directory (doc 06). A conflict (an identifier already owned by another
 subscriber) fails the command with `identifier_conflict` and releases only the
 bindings this command had just made, so a retry is clean.
+
+### Offerings (price plan and allowances)
+
+`attach_offering` (`{"offering": "gold-offer", "renew": false}`) puts the
+subscriber on a catalog product offering (doc 09). Two things happen in **one
+atomic script** (`provision.lua`, op `P`): the offering id is stored on the
+subscriber's profile, and the offering's allowance buckets are created. Either
+all of it applies or none: if any allowance bucket already exists (or exists
+with another class) nothing is written and the command fails with
+`allowance_exists`. `renew: true` resets existing allowance buckets to their
+full amount and expiry instead (a monthly renewal) and also switches the
+offering.
+
+The API tier resolves the offering from the catalog version in effect **when the
+command is accepted** and puts the resulting allowances (amount, class, unit,
+order, absolute expiry = acceptance time + validity days) into the command, so
+what is queued is exactly what will be applied, and a redelivery after a catalog
+change applies the same thing. The idempotency fingerprint covers only what the
+caller asked for (subscriber, offering, renew), so a retry after a catalog change
+is the same request, not a conflict. With no catalog in effect the API answers a
+retryable `503 catalog_unavailable` (gRPC `UNAVAILABLE`); an offering that is not
+in the catalog is `400`.
+
+Bucket ids are the allowance ids of the catalog, so two offerings that use the
+same allowance id share a bucket (renewal resets it). Keep ids unique per
+purpose. The offering decides the price plan used to rate the subscriber
+(doc 09), seen by gateways within `OCS_PLAN_CACHE_TTL` (30 s).
 
 ### Lifecycle
 
@@ -99,6 +127,7 @@ Topic `OCS_KAFKA_EVENTS_TOPIC`, key = subscriber, JSON, `v: 1`:
 | `subscriber.provisioned` | create applied | `payment`, `version` |
 | `balance.modified` | top-up, adjustment, bundle, bucket set/remove | `bucket`, `delta`, `balance`, `reason` |
 | `lifecycle.changed` | lifecycle change applied | `from`, `to`, `reason` |
+| `offering.changed` | offering attached or renewed | `from`, `to` (offering ids; `from` empty if none), `buckets` |
 | `command.failed` | business failure (e.g. insufficient balance, conflict) | `outcome`, `message` |
 
 ## Configuration
@@ -115,6 +144,7 @@ Topic `OCS_KAFKA_EVENTS_TOPIC`, key = subscriber, JSON, `v: 1`:
 | `OCS_PROV_WORKERS` | key-hash lanes | 16 |
 | `OCS_PROV_MAX_TOPUP`, `OCS_PROV_MAX_ADJUST` | per-call ceilings | 10,000,000 / 1,000,000 |
 | `OCS_KAFKA_COMMANDS_TOPIC`, `_EVENTS_TOPIC`, `_DLQ_TOPIC`, `_GROUP` | topics and consumer group | built-in names |
+| `OCS_REDIS_ADDR` (catalog) | the catalog is read from the same Redis; the service follows new versions on its own and starts without one | |
 | `OCS_IDENTITY_PREFIX` | identity directory key prefix; must match the gateway | `id:` |
 
 Durability env (replica `WAIT`) is shared with the gateway through
@@ -146,3 +176,4 @@ Durability env (replica `WAIT`) is shared with the gateway through
 - The command status store is advisory (TTL-bound); the idempotency record in
   the hot store is the source of truth.
 - Events are at least once, not exactly once.
+- Offering changes reach gateways after their profile cache expires (no push invalidation), and a subscriber cannot be moved to another offering without also creating that offering's allowances (no 'switch plan only' command).

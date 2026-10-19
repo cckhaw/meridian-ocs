@@ -24,6 +24,10 @@ service ProvisioningService {
   rpc ReloadBucket(ReloadBucketRequest) returns (CommandAccepted);
   rpc RemoveBucket(RemoveBucketRequest) returns (CommandAccepted);
   rpc ChangeLifecycle(ChangeLifecycleRequest) returns (CommandAccepted);
+  // Put the subscriber on a catalog product offering and create its allowance
+  // buckets, all or nothing. The offering decides the price plan used to rate
+  // the subscriber's usage.
+  rpc AttachOffering(AttachOfferingRequest) returns (CommandAccepted);
 
   rpc GetCommand(GetCommandRequest) returns (CommandStatus);
   rpc GetSubscriber(GetSubscriberRequest) returns (Subscriber);
@@ -108,6 +112,15 @@ message AddBundleRequest {
   optional int32 priority = 8;   // lower is consumed first; default 10 (promo) / 100 (bundle)
 }
 
+message AttachOfferingRequest {
+  string idempotency_key = 1;
+  string subscriber_key = 2;
+  string offering_id = 3;        // an offering of the catalog version in effect
+  // Reset allowance buckets that already exist (a renewal) instead of failing
+  // with allowance_exists. A bucket of another class is always a conflict.
+  bool renew = 4;
+}
+
 message ReloadBucketRequest {
   string idempotency_key = 1;
   string subscriber_key = 2;
@@ -155,7 +168,7 @@ message CommandStatus {
   // For APPLIED "applied"; for FAILED the reason: no_such_subscriber,
   // already_exists, invalid_transition, insufficient_balance, no_such_bucket,
   // subscriber_terminated, balance_overflow, bucket_not_empty,
-  // not_a_cash_bucket, identity_conflict.
+  // not_a_cash_bucket, identity_conflict, allowance_exists.
   string outcome = 5;
   string message = 6;
   int64 balance = 7;
@@ -165,6 +178,8 @@ message CommandStatus {
   int64 version = 11;
   google.protobuf.Timestamp accepted_at = 12;
   google.protobuf.Timestamp completed_at = 13;
+  string from_offering = 14;     // attach_offering: the previous offering (empty if none)
+  string to_offering = 15;       // attach_offering: the new offering
 }
 
 message Bucket {
@@ -185,4 +200,5 @@ message Subscriber {
   google.protobuf.Timestamp status_at = 6;
   google.protobuf.Timestamp grace_until = 7;
   repeated Bucket buckets = 8;
+  string offering_id = 9;        // empty = none (priced on the default plan)
 }

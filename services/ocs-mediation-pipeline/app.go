@@ -99,8 +99,9 @@ func NewApp(ctx context.Context, cfg Config, g svcenv.Getenv, logf func(string, 
 		if latest == nil || !latest.HasPlan(cfg.Plan) {
 			return fail(fmt.Errorf("OCS_DEFAULT_PLAN %q is not in the catalog (latest version %d)", cfg.Plan, store.LatestVersion()))
 		}
-		p.Rater = pipeline.CatalogRater{Tariff: &catalog.Tariff{Store: store}, Plan: cfg.Plan}
-		logf("rating with catalog (latest version %d), plan %q", store.LatestVersion(), cfg.Plan)
+		resolver := catalog.NewProfileResolver(datalayer.New(a.rdb), store)
+		p.Rater = pipeline.CatalogRater{Tariff: &catalog.Tariff{Store: store, Resolver: resolver, DefaultPlan: cfg.Plan}}
+		logf("rating with catalog (latest version %d), per-subscriber plans, default plan %q", store.LatestVersion(), cfg.Plan)
 	}
 
 	if cfg.InDir != "" {

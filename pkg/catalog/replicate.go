@@ -137,12 +137,11 @@ func (r *Replicator) Publish(ctx context.Context, doc Document, expect int64) (*
 }
 
 // Run syncs once, then follows the update channel and resyncs periodically
-// until ctx ends. The first Sync error is returned so a node can refuse to
-// start without a catalog; later errors go to OnError.
+// until ctx ends. Errors, including the first sync's, go to OnError and the
+// loop keeps trying: a node that must not start without a catalog calls Sync
+// itself first and decides.
 func (r *Replicator) Run(ctx context.Context) error {
-	if err := r.Sync(ctx); err != nil {
-		return err
-	}
+	r.report(r.Sync(ctx))
 	every := r.Resync
 	if every <= 0 {
 		every = 30 * time.Second

@@ -26,6 +26,7 @@ const (
 	ProvisioningService_ReloadBucket_FullMethodName     = "/ocs.v1.ProvisioningService/ReloadBucket"
 	ProvisioningService_RemoveBucket_FullMethodName     = "/ocs.v1.ProvisioningService/RemoveBucket"
 	ProvisioningService_ChangeLifecycle_FullMethodName  = "/ocs.v1.ProvisioningService/ChangeLifecycle"
+	ProvisioningService_AttachOffering_FullMethodName   = "/ocs.v1.ProvisioningService/AttachOffering"
 	ProvisioningService_GetCommand_FullMethodName       = "/ocs.v1.ProvisioningService/GetCommand"
 	ProvisioningService_GetSubscriber_FullMethodName    = "/ocs.v1.ProvisioningService/GetSubscriber"
 )
@@ -51,6 +52,10 @@ type ProvisioningServiceClient interface {
 	ReloadBucket(ctx context.Context, in *ReloadBucketRequest, opts ...grpc.CallOption) (*CommandAccepted, error)
 	RemoveBucket(ctx context.Context, in *RemoveBucketRequest, opts ...grpc.CallOption) (*CommandAccepted, error)
 	ChangeLifecycle(ctx context.Context, in *ChangeLifecycleRequest, opts ...grpc.CallOption) (*CommandAccepted, error)
+	// Put the subscriber on a catalog product offering and create its allowance
+	// buckets, all or nothing. The offering decides the price plan used to rate
+	// the subscriber's usage.
+	AttachOffering(ctx context.Context, in *AttachOfferingRequest, opts ...grpc.CallOption) (*CommandAccepted, error)
 	GetCommand(ctx context.Context, in *GetCommandRequest, opts ...grpc.CallOption) (*CommandStatus, error)
 	GetSubscriber(ctx context.Context, in *GetSubscriberRequest, opts ...grpc.CallOption) (*Subscriber, error)
 }
@@ -133,6 +138,16 @@ func (c *provisioningServiceClient) ChangeLifecycle(ctx context.Context, in *Cha
 	return out, nil
 }
 
+func (c *provisioningServiceClient) AttachOffering(ctx context.Context, in *AttachOfferingRequest, opts ...grpc.CallOption) (*CommandAccepted, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommandAccepted)
+	err := c.cc.Invoke(ctx, ProvisioningService_AttachOffering_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *provisioningServiceClient) GetCommand(ctx context.Context, in *GetCommandRequest, opts ...grpc.CallOption) (*CommandStatus, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CommandStatus)
@@ -174,6 +189,10 @@ type ProvisioningServiceServer interface {
 	ReloadBucket(context.Context, *ReloadBucketRequest) (*CommandAccepted, error)
 	RemoveBucket(context.Context, *RemoveBucketRequest) (*CommandAccepted, error)
 	ChangeLifecycle(context.Context, *ChangeLifecycleRequest) (*CommandAccepted, error)
+	// Put the subscriber on a catalog product offering and create its allowance
+	// buckets, all or nothing. The offering decides the price plan used to rate
+	// the subscriber's usage.
+	AttachOffering(context.Context, *AttachOfferingRequest) (*CommandAccepted, error)
 	GetCommand(context.Context, *GetCommandRequest) (*CommandStatus, error)
 	GetSubscriber(context.Context, *GetSubscriberRequest) (*Subscriber, error)
 	mustEmbedUnimplementedProvisioningServiceServer()
@@ -203,6 +222,9 @@ func (UnimplementedProvisioningServiceServer) RemoveBucket(context.Context, *Rem
 }
 func (UnimplementedProvisioningServiceServer) ChangeLifecycle(context.Context, *ChangeLifecycleRequest) (*CommandAccepted, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ChangeLifecycle not implemented")
+}
+func (UnimplementedProvisioningServiceServer) AttachOffering(context.Context, *AttachOfferingRequest) (*CommandAccepted, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AttachOffering not implemented")
 }
 func (UnimplementedProvisioningServiceServer) GetCommand(context.Context, *GetCommandRequest) (*CommandStatus, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetCommand not implemented")
@@ -349,6 +371,24 @@ func _ProvisioningService_ChangeLifecycle_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ProvisioningService_AttachOffering_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AttachOfferingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProvisioningServiceServer).AttachOffering(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ProvisioningService_AttachOffering_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProvisioningServiceServer).AttachOffering(ctx, req.(*AttachOfferingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ProvisioningService_GetCommand_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetCommandRequest)
 	if err := dec(in); err != nil {
@@ -419,6 +459,10 @@ var ProvisioningService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ChangeLifecycle",
 			Handler:    _ProvisioningService_ChangeLifecycle_Handler,
+		},
+		{
+			MethodName: "AttachOffering",
+			Handler:    _ProvisioningService_AttachOffering_Handler,
 		},
 		{
 			MethodName: "GetCommand",

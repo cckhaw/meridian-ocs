@@ -28,7 +28,7 @@ import (
 //	OCS_IDENTITY_PREFIX        identity directory key prefix      (default id:)
 //	OCS_CDR_MAPPING            JSON file overriding the PGW BER field mapping
 //	OCS_MED_RATING             "off" (default) or "catalog": add a list-price charge
-//	OCS_DEFAULT_PLAN           price plan used for rating (required with catalog rating)
+//	OCS_DEFAULT_PLAN           plan for subscribers with no offering (required with catalog rating)
 type Config struct {
 	OutDir       string
 	InDir        string
