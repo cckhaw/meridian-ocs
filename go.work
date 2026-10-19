@@ -1,0 +1,12 @@
+go 1.22
+
+use (
+	./pkg
+	./services/ocs-aiops-layer
+	./services/ocs-catalog-service
+	./services/ocs-data-layer
+	./services/ocs-mediation-pipeline
+	./services/ocs-provisioning-service
+	./services/ocs-rating-engine
+	./services/ocs-signaling-gateway
+)

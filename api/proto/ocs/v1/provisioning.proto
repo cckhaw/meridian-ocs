@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package ocs.v1;
+
+option go_package = "github.com/cckhaw/meridian-ocs/pkg/gen/ocs/v1;ocsv1";
+
+service ProvisioningService {
+  rpc TopUp(TopUpRequest) returns (CommandAck);
+  rpc ChangeLifecycle(ChangeLifecycleRequest) returns (CommandAck);
+  rpc AddBundle(AddBundleRequest) returns (CommandAck);
+}
+
+message CommandAck {
+  string idempotency_key = 1;
+  bool duplicate = 2;  // true when the key was already processed
+}
+
+message TopUpRequest {
+  string idempotency_key = 1;  // required
+  string msisdn = 2;
+  int64 amount_minor_units = 3;
+  string currency = 4;
+}
+
+enum LifecycleState {
+  LIFECYCLE_STATE_UNSPECIFIED = 0;
+  LIFECYCLE_STATE_ACTIVE = 1;
+  LIFECYCLE_STATE_GRACE_PERIOD = 2;
+  LIFECYCLE_STATE_SUSPENDED = 3;
+  LIFECYCLE_STATE_TERMINATED = 4;
+}
+
+message ChangeLifecycleRequest {
+  string idempotency_key = 1;
+  string msisdn = 2;
+  LifecycleState target = 3;
+}
+
+message AddBundleRequest {
+  string idempotency_key = 1;
+  string msisdn = 2;
+  string bundle_id = 3;
+}
