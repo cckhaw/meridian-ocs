@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v0.1 — design baseline for scaffolding |
+| **Status** | Design baseline. The gateway (Gy, Nchf), rating engine, identity mapping, durability, provisioning, tariff catalog and offline mediation are implemented; multi-region, AI Ops and Helm are not. See the [README](../../README.md) for what is built and [docs 02–10](.) for each module as built. Sections below describe the *target* design and may be ahead of the code. |
 | **Scope** | Real-time Online (Gy/Ro, Nchf) and Offline (CDR) charging, 50M+ subscribers |
 | **Language** | Go 1.22+ |
 | **Targets** | ≥ 50,000 TPS peak, P99 < 10 ms in-region, 99.999% availability, zero double-spend |
@@ -403,9 +403,9 @@ Every transition emits a notification event; illegal transitions are rejected by
 
 ---
 
-## 10. Next Steps (Deliverable 2 — Repository Scaffolding)
+## 10. Repository layout
 
-Proposed `go.work` layout:
+The `go.work` layout (as proposed; `deploy/helm/` is still empty and `ocs-rating-engine`, `ocs-data-layer`, `ocs-aiops-layer` are scaffolds; shared code lives in `pkg/`):
 
 ```
 meridian-ocs/
