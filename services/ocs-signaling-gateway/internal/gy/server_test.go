@@ -2,6 +2,7 @@ package gy
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/canonical"
 	"github.com/cckhaw/meridian-ocs/pkg/diameter"
 	"github.com/cckhaw/meridian-ocs/pkg/engine"
+	"github.com/cckhaw/meridian-ocs/pkg/identity"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/admission"
 )
 
@@ -376,4 +378,84 @@ func TestConcurrentPeersAndPipelinedRequests(t *testing.T) {
 		}(g)
 	}
 	wg.Wait()
+}
+
+// ---- subscriber identity resolution ---------------------------------------
+
+type fakeDir struct {
+	m   map[identity.Identity]string
+	err error
+}
+
+func (d *fakeDir) Lookup(_ context.Context, id identity.Identity) (string, error) {
+	if d.err != nil {
+		return "", d.err
+	}
+	if k, ok := d.m[id]; ok {
+		return k, nil
+	}
+	return "", identity.ErrUnknown
+}
+
+func TestSubscriberIsResolvedToTheInternalKey(t *testing.T) {
+	dir := &fakeDir{m: map[identity.Identity]string{
+		{Type: identity.MSISDN, Value: "491701234567"}:  "acct-1",
+		{Type: identity.IMSI, Value: "262011234567890"}: "acct-1",
+		{Type: identity.MSISDN, Value: "491709999999"}:  "acct-2",
+	}}
+	var calls atomic.Int64
+	var seen atomic.Value
+	_, addr := startServer(t, raterFunc(func(ctx context.Context, r *canonical.Request, s *canonical.Response) error {
+		calls.Add(1)
+		seen.Store(r.SubscriberID)
+		return grantAll(ctx, r, s)
+	}), nil, func(c *Config) { c.Identity = identity.NewResolver(dir, identity.ConflictReject) })
+	p := openPeer(t, addr)
+
+	units := []msccOpts{{rg: 100, hasRSU: true, rsu: []unitFn{totalOctets(10)}}}
+	resultOf := func(o ccrOpts) (uint32, bool) {
+		p.send(buildCCR(o))
+		h, m := p.mustRecv()
+		return u32(t, m, diameter.AVPResultCode), h.Flags&diameter.FlagError != 0
+	}
+
+	// MSISDN only, IMSI only, and both: the same subscriber key every time.
+	for i, o := range []ccrOpts{
+		{msisdn: "491701234567"},
+		{imsi: "262011234567890"},
+		{msisdn: "+491701234567", imsi: "262011234567890"},
+	} {
+		o.session, o.typ, o.no, o.mscc = "s", ccInitial, uint32(i), units
+		o.session += string(rune('a' + i))
+		if rc, _ := resultOf(o); rc != diameter.ResultSuccess || seen.Load() != "acct-1" {
+			t.Fatalf("case %d: result %d, key %v", i, rc, seen.Load())
+		}
+	}
+
+	before := calls.Load()
+	tests := []struct {
+		name  string
+		o     ccrOpts
+		want  uint32
+		eBit  bool
+		setup func()
+	}{
+		{"unknown subscriber", ccrOpts{msisdn: "491700000000"}, diameter.ResultUserUnknown, false, nil},
+		{"malformed MSISDN", ccrOpts{msisdn: "12ab"}, diameter.ResultInvalidAVPValue, false, nil},
+		{"identities of two subscribers", ccrOpts{msisdn: "491709999999", imsi: "262011234567890"}, diameter.ResultAuthRejected, false, nil},
+		{"directory down", ccrOpts{msisdn: "491701234567"}, diameter.ResultUnableToDeliver, true, func() { dir.err = errors.New("redis down") }},
+	}
+	for i, tc := range tests {
+		if tc.setup != nil {
+			tc.setup()
+		}
+		tc.o.session, tc.o.typ, tc.o.no, tc.o.mscc = "f"+string(rune('a'+i)), ccInitial, 0, units
+		rc, eBit := resultOf(tc.o)
+		if rc != tc.want || eBit != tc.eBit {
+			t.Errorf("%s: result %d (E=%v), want %d (E=%v)", tc.name, rc, eBit, tc.want, tc.eBit)
+		}
+	}
+	if calls.Load() != before {
+		t.Fatalf("%d requests with unresolvable subscribers reached the rating engine", calls.Load()-before)
+	}
 }

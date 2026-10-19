@@ -10,6 +10,7 @@ import (
 
 	"github.com/cckhaw/meridian-ocs/pkg/canonical"
 	"github.com/cckhaw/meridian-ocs/pkg/engine"
+	"github.com/cckhaw/meridian-ocs/pkg/identity"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/admission"
 )
 
@@ -415,32 +416,82 @@ func TestOneTimeEventImmediateCharging(t *testing.T) {
 	}
 }
 
-func TestSubscriberIdentifierHandling(t *testing.T) {
+type fakeDir struct {
+	m   map[identity.Identity]string
+	err error
+}
+
+func (d *fakeDir) Lookup(_ context.Context, id identity.Identity) (string, error) {
+	if d.err != nil {
+		return "", d.err
+	}
+	if k, ok := d.m[id]; ok {
+		return k, nil
+	}
+	return "", identity.ErrUnknown
+}
+
+func TestSubscriberIdentifierIsResolvedToTheInternalKey(t *testing.T) {
+	dir := &fakeDir{m: map[identity.Identity]string{
+		{Type: identity.IMSI, Value: "262011234567890"}: "acct-1",
+		{Type: identity.NAI, Value: "user@example.com"}: "acct-7",
+	}}
 	var c capture
 	h := newHandler(t, c.rater(grantAll), nil, func(cfg *Config) {
-		cfg.ResolveSubscriber = func(k string) (string, bool) {
-			if k == "262011234567890" {
-				return "491701234567", true // IMSI -> MSISDN, as the Gy side keys it
-			}
-			return "", false
-		}
+		cfg.Identity = identity.NewResolver(dir, identity.ConflictReject)
 	})
+
 	w := post(h, prefix+"/chargingdata", baseCreate())
-	if w.Code != 201 || c.req.SubscriberID != "491701234567" {
+	if w.Code != 201 || c.req.SubscriberID != "acct-1" {
 		t.Fatalf("%d %q", w.Code, c.req.SubscriberID)
 	}
 	ref := refFromLocation(t, w.Header().Get("Location"))
-	if w := post(h, prefix+"/chargingdata/"+ref+"/update", baseUpdate(2, 1, 1)); w.Code != 200 || c.req.SubscriberID != "491701234567" {
+	if w := post(h, prefix+"/chargingdata/"+ref+"/update", baseUpdate(2, 1, 1)); w.Code != 200 || c.req.SubscriberID != "acct-1" {
 		t.Fatalf("the resolved key must be what the reference carries: %d %q", w.Code, c.req.SubscriberID)
 	}
-	unknown := with(baseCreate(), func(o obj) { o["subscriberIdentifier"] = "imsi-999" })
-	if w := post(h, prefix+"/chargingdata", unknown); w.Code != 400 {
-		t.Fatalf("unresolvable subscriber: %d", w.Code)
+	// Repeating the SUPI in an update resolves to the same key.
+	again := with(baseUpdate(3, 1, 1), func(o obj) { o["subscriberIdentifier"] = "imsi-262011234567890" })
+	if w := post(h, prefix+"/chargingdata/"+ref+"/update", again); w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	nai := with(baseCreate(), func(o obj) { o["subscriberIdentifier"] = "nai-user@example.com" })
+	if w := post(h, prefix+"/chargingdata", nai); w.Code != 201 || c.req.SubscriberID != "acct-7" {
+		t.Fatalf("%d %q", w.Code, c.req.SubscriberID)
 	}
 
-	h2 := newHandler(t, c.rater(grantAll), nil, nil)
+	before := c.n
+	for name, tc := range map[string]struct {
+		supi string
+		code int
+		set  func()
+	}{
+		"unknown subscriber": {"imsi-262019999999999", 404, nil},
+		"malformed IMSI":     {"imsi-26201abc", 400, nil},
+		"directory failure":  {"imsi-262011234567890", 503, func() { dir.err = errors.New("redis down") }},
+	} {
+		if tc.set != nil {
+			tc.set()
+		}
+		w := post(h, prefix+"/chargingdata", with(baseCreate(), func(o obj) { o["subscriberIdentifier"] = tc.supi }))
+		if w.Code != tc.code {
+			t.Errorf("%s: %d want %d (%s)", name, w.Code, tc.code, w.Body.String())
+			continue
+		}
+		decodeProblem(t, w)
+	}
+	if c.n != before {
+		t.Fatal("requests for unresolvable subscribers reached the rating engine")
+	}
+}
+
+func TestPassthroughKeepsTheRawIdentifier(t *testing.T) {
+	var c capture
+	h := newHandler(t, c.rater(grantAll), nil, nil)
+	if w := post(h, prefix+"/chargingdata", baseCreate()); w.Code != 201 || c.req.SubscriberID != "262011234567890" {
+		t.Fatalf("%d %q", w.Code, c.req.SubscriberID)
+	}
 	nai := with(baseCreate(), func(o obj) { o["subscriberIdentifier"] = "nai-user@example.com" })
-	if w := post(h2, prefix+"/chargingdata", nai); w.Code != 201 || c.req.SubscriberID != "user@example.com" {
+	if w := post(h, prefix+"/chargingdata", nai); w.Code != 201 || c.req.SubscriberID != "user@example.com" {
 		t.Fatalf("%d %q", w.Code, c.req.SubscriberID)
 	}
 }

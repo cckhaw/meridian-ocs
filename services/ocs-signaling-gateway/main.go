@@ -13,6 +13,10 @@
 //	OCS_NCHF_TLS_CERT    server certificate; with OCS_NCHF_TLS_KEY enables TLS
 //	OCS_NCHF_CLIENT_CA   CA file; when set, client certificates are required (mTLS)
 //	OCS_REGION           region embedded in charging references (default r1)
+//	OCS_IDENTITY_MODE    "directory" (default) or "direct" (see below)
+//	OCS_IDENTITY_PREFIX  Redis key prefix of the identity directory (default id:)
+//	OCS_IDENTITY_CACHE_TTL  how long a binding is cached     (default 30s)
+//	OCS_IDENTITY_ON_CONFLICT  reject | prefer-first          (default reject)
 //	OCS_ORIGIN_HOST      Diameter identity, required          (e.g. ocs1.example.net)
 //	OCS_ORIGIN_REALM     Diameter realm, required
 //	OCS_HOST_IP          address advertised in CEA, required
@@ -21,6 +25,13 @@
 //	OCS_MAX_INFLIGHT     concurrent request limit, 0 = off    (default 10000)
 //	OCS_CASH_BYTES_RATE  cash price of data as num/den        (default 1/1024)
 //	OCS_ADMIN_ADDR       /healthz and /readyz                 (default :8080)
+//
+// Identity: in "directory" mode every MSISDN / IMSI / NAI is resolved through
+// the Redis identity directory (keys id:msisdn:<digits>, id:imsi:<digits>,
+// id:nai:<nai>, value = subscriber key) to the one subscriber key balances are
+// stored under, so a subscriber is charged against the same state over Gy and
+// Nchf. Unknown identities are refused. "direct" mode uses the raw identifier
+// as the key and does NOT unify identities; for development only.
 //
 // The cash rate is a placeholder until the catalog service exists.
 package main
@@ -43,6 +54,7 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/canonical"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/engine"
+	"github.com/cckhaw/meridian-ocs/pkg/identity"
 	"github.com/cckhaw/meridian-ocs/pkg/service"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/admission"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/gy"
@@ -81,6 +93,31 @@ func parseRate(s string) (engine.Frac, error) {
 	return engine.Frac{Num: n, Den: d}, nil
 }
 
+func newResolver(rdb *redis.Client) (*identity.Resolver, error) {
+	switch mode := env("OCS_IDENTITY_MODE", "directory"); mode {
+	case "direct":
+		log.Printf("ocs-signaling-gateway: WARNING identity mode \"direct\": MSISDN and IMSI of one subscriber are NOT unified")
+		return identity.NewPassthroughResolver(), nil
+	case "directory":
+		ttl, err := time.ParseDuration(env("OCS_IDENTITY_CACHE_TTL", "30s"))
+		if err != nil || ttl <= 0 {
+			return nil, fmt.Errorf("OCS_IDENTITY_CACHE_TTL: want a positive duration, got %q", os.Getenv("OCS_IDENTITY_CACHE_TTL"))
+		}
+		policy := identity.ConflictReject
+		switch c := env("OCS_IDENTITY_ON_CONFLICT", "reject"); c {
+		case "reject":
+		case "prefer-first":
+			policy = identity.ConflictPreferFirst
+		default:
+			return nil, fmt.Errorf("OCS_IDENTITY_ON_CONFLICT: want reject or prefer-first, got %q", c)
+		}
+		dir := identity.NewRedisDirectory(rdb, env("OCS_IDENTITY_PREFIX", "id:"))
+		return identity.NewResolver(identity.NewCachedDirectory(dir, identity.CacheConfig{TTL: ttl}), policy), nil
+	default:
+		return nil, fmt.Errorf("OCS_IDENTITY_MODE: want directory or direct, got %q", mode)
+	}
+}
+
 func run(ctx context.Context, ready func()) error {
 	host, realm := os.Getenv("OCS_ORIGIN_HOST"), os.Getenv("OCS_ORIGIN_REALM")
 	ip := net.ParseIP(os.Getenv("OCS_HOST_IP"))
@@ -110,6 +147,10 @@ func run(ctx context.Context, ready func()) error {
 	})
 	defer rdb.Close()
 	store := datalayer.New(rdb)
+	resolver, err := newResolver(rdb)
+	if err != nil {
+		return err
+	}
 
 	// No profile cache exists yet, so there is no fail policy engine: if the
 	// data tier is down every request is denied (fail-closed for everyone).
@@ -127,7 +168,7 @@ func run(ctx context.Context, ready func()) error {
 	var stops []func()
 
 	if addr := env("OCS_GY_ADDR", ":3868"); addr != "off" {
-		srv, err := gy.NewServer(gy.Config{OriginHost: host, OriginRealm: realm, HostIP: ip}, eng, adm)
+		srv, err := gy.NewServer(gy.Config{OriginHost: host, OriginRealm: realm, HostIP: ip, Identity: resolver}, eng, adm)
 		if err != nil {
 			return err
 		}
@@ -141,7 +182,7 @@ func run(ctx context.Context, ready func()) error {
 	}
 
 	if addr := env("OCS_NCHF_ADDR", ":8000"); addr != "off" {
-		h, err := nchf.NewHandler(nchf.Config{Region: env("OCS_REGION", "r1")}, eng, adm)
+		h, err := nchf.NewHandler(nchf.Config{Region: env("OCS_REGION", "r1"), Identity: resolver}, eng, adm)
 		if err != nil {
 			return err
 		}

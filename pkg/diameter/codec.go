@@ -77,6 +77,7 @@ const (
 	ResultNoCommonApplication = 5010
 	ResultUnableToComply      = 5012
 	ResultRatingFailed        = 5031
+	ResultUserUnknown         = 5030
 )
 
 var (

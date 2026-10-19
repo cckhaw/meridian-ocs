@@ -21,6 +21,7 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/canonical"
 	"github.com/cckhaw/meridian-ocs/pkg/diameter"
 	"github.com/cckhaw/meridian-ocs/pkg/engine"
+	"github.com/cckhaw/meridian-ocs/pkg/identity"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/admission"
 )
 
@@ -43,6 +44,11 @@ type Config struct {
 	MaxInflightPerConn int           // concurrent CCRs per peer connection, default 256
 	WatchdogInterval   time.Duration // Tw, default 30s; a silent peer is dropped after 3x
 	WriteTimeout       time.Duration // default 5s
+
+	// Identity maps Subscription-Id values to the subscriber key. nil uses
+	// identity.NewPassthroughResolver, which keys balances by the raw
+	// identifier and does NOT unify MSISDN and IMSI.
+	Identity *identity.Resolver
 
 	// Amounts granted when a Requested-Service-Unit is present but empty.
 	DefaultRequestedBytes   int64 // default 10 MiB
@@ -80,6 +86,9 @@ func (c *Config) setDefaults() error {
 	}
 	if c.DefaultRequestedEvents <= 0 {
 		c.DefaultRequestedEvents = 1
+	}
+	if c.Identity == nil {
+		c.Identity = identity.NewPassthroughResolver()
 	}
 	return nil
 }
@@ -405,6 +414,16 @@ func (pc *peerConn) handleCCR(ctx context.Context, h diameter.Header, msg []byte
 		}
 		return
 	}
+
+	key, derr := s.resolveSubscriber(ctx, &info)
+	if derr != nil {
+		s.rejected.Add(1)
+		if out, err := s.encodeCCA(b, &info, req, nil, derr.Result, derr.Msg); err == nil {
+			pc.write(out)
+		}
+		return
+	}
+	req.SubscriberID = key
 
 	result := uint32(diameter.ResultSuccess)
 	errMsg := ""
