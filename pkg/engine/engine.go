@@ -98,6 +98,9 @@ type Stats struct {
 	// Unreplicated counts committed steps that finished with fewer replica
 	// acknowledgements than required (see datalayer.WithDurability).
 	Unreplicated uint64
+	// Unpriced counts units the tariff could not price (barred by a policy
+	// filter, no matching rule, unknown plan). They are sent with no rates.
+	Unpriced uint64
 }
 
 type job struct {
@@ -121,7 +124,7 @@ type Engine struct {
 	closed      atomic.Bool
 	wg          sync.WaitGroup
 
-	requests, degraded, overloaded, auditDropped, unreplicated atomic.Uint64
+	requests, degraded, overloaded, auditDropped, unreplicated, unpriced atomic.Uint64
 }
 
 // New builds and starts an engine.
@@ -171,7 +174,7 @@ func (e *Engine) Close() {
 
 // Stats returns a snapshot of the counters.
 func (e *Engine) Stats() Stats {
-	return Stats{e.requests.Load(), e.degraded.Load(), e.overloaded.Load(), e.auditDropped.Load(), e.unreplicated.Load()}
+	return Stats{e.requests.Load(), e.degraded.Load(), e.overloaded.Load(), e.auditDropped.Load(), e.unreplicated.Load(), e.unpriced.Load()}
 }
 
 // Rate processes one request and fills resp. It blocks until the answer is
@@ -330,6 +333,15 @@ func (w *worker) build(req *canonical.Request, mode datalayer.Mode, now time.Tim
 		w.offs = append(w.offs, len(w.rateBuf))
 		var err error
 		w.rateBuf, err = w.e.deps.Tariff.Rates(req, &req.Units[i], w.rateBuf)
+		if errors.Is(err, ErrNoTariff) {
+			// An unpriceable unit gets no rates rather than failing the whole
+			// request: nothing new can be reserved for it, but usage already
+			// reserved is still settled and any excess is reported as a
+			// shortfall, so a terminate can never lose its settlement.
+			w.rateBuf = w.rateBuf[:w.offs[i]]
+			w.e.unpriced.Add(1)
+			continue
+		}
 		if err != nil {
 			return err
 		}

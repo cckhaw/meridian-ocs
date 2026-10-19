@@ -14,7 +14,8 @@ type Tariff interface {
 	Rates(req *canonical.Request, u *canonical.UnitRequest, dst []datalayer.Rate) ([]datalayer.Rate, error)
 }
 
-// ErrNoTariff is returned when a unit kind cannot be priced.
+// ErrNoTariff is returned (wrapped) by a Tariff when a unit cannot be priced.
+// The engine then sends the unit with no rates instead of failing the request.
 var ErrNoTariff = errors.New("engine: no tariff for unit")
 
 // Frac is a rate expressed as Num/Den cost units per unit.

@@ -34,7 +34,8 @@
 //	OCS_ALLOW_NO_REPLICA "true" starts without the required replicas (development only)
 //	OCS_MAX_TPS          admission rate limit, 0 = unlimited  (default 0; shared by Gy and Nchf)
 //	OCS_MAX_INFLIGHT     concurrent request limit, 0 = off    (default 10000)
-//	OCS_CASH_BYTES_RATE  cash price of data as num/den        (default 1/1024)
+//	OCS_TARIFF           "static" or "catalog"                (default static; see newTariff)
+//	OCS_CASH_BYTES_RATE  static tariff: cash price as num/den (default 1/1024)
 //	OCS_ADMIN_ADDR       /healthz and /readyz                 (default :8080)
 //
 // Nchf authorization: with OCS_NCHF_OAUTH=required every request must carry an
@@ -76,7 +77,6 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/cckhaw/meridian-ocs/pkg/canonical"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/engine"
 	"github.com/cckhaw/meridian-ocs/pkg/identity"
@@ -199,10 +199,6 @@ func run(ctx context.Context, ready func()) error {
 	if err != nil {
 		return err
 	}
-	cash, err := parseRate(env("OCS_CASH_BYTES_RATE", "1/1024"))
-	if err != nil {
-		return err
-	}
 
 	rdb := redis.NewClient(&redis.Options{
 		Addr:         env("OCS_REDIS_ADDR", "127.0.0.1:6379"),
@@ -222,11 +218,17 @@ func run(ctx context.Context, ready func()) error {
 		return err
 	}
 
+	tariff, stopTariff, err := newTariff(ctx, env, rdb)
+	if err != nil {
+		return err
+	}
+	defer stopTariff()
+
 	// No profile cache exists yet, so there is no fail policy engine: if the
 	// data tier is down every request is denied (fail-closed for everyone).
 	eng, err := engine.New(engine.Config{}, engine.Deps{
 		Store:  store,
-		Tariff: engine.StaticTariff{Cash: map[canonical.UnitKind]engine.Frac{canonical.UnitBytes: cash}},
+		Tariff: tariff,
 	})
 	if err != nil {
 		return err
