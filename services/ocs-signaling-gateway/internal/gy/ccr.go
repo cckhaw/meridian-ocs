@@ -1,12 +1,15 @@
 package gy
 
 import (
+	"context"
+	"errors"
 	"strconv"
 	"time"
 
 	"github.com/cckhaw/meridian-ocs/pkg/canonical"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/diameter"
+	"github.com/cckhaw/meridian-ocs/pkg/identity"
 )
 
 // Credit-Control AVP codes (RFC 4006) and the 3GPP ones used by Gy.
@@ -47,10 +50,11 @@ const (
 // Requested-Action values (RFC 4006 §8.41).
 const actionDirectDebiting = 0
 
-// Subscription-Id-Type values.
+// Subscription-Id-Type values (RFC 4006 §8.47).
 const (
 	subE164 = 0
 	subIMSI = 1
+	subNAI  = 3
 )
 
 const ntpToUnix = 2208988800
@@ -74,6 +78,10 @@ var (
 	errBadLength      = &DecodeError{diameter.ResultInvalidAVPLength, "invalid AVP length"}
 	errBadUnits       = &DecodeError{diameter.ResultInvalidAVPValue, "invalid or mixed service units"}
 	errTooManyMSCC    = &DecodeError{diameter.ResultInvalidAVPValue, "too many MSCC"}
+	errUserUnknown    = &DecodeError{diameter.ResultUserUnknown, "subscriber unknown"}
+	errBadIdentity    = &DecodeError{diameter.ResultInvalidAVPValue, "invalid Subscription-Id"}
+	errIdentityClash  = &DecodeError{diameter.ResultAuthRejected, "Subscription-Id values belong to different subscribers"}
+	errIdentityDown   = &DecodeError{diameter.ResultUnableToDeliver, "subscriber lookup unavailable"}
 	errBadApp         = &DecodeError{diameter.ResultApplicationUnsup, "not the Credit-Control application"}
 	errMissingAction  = &DecodeError{diameter.ResultMissingAVP, "Requested-Action missing"}
 	errBadAction      = &DecodeError{diameter.ResultUnableToComply, "only DIRECT_DEBITING events are supported"}
@@ -90,6 +98,10 @@ type ccrInfo struct {
 	haveNo    bool
 	action    uint32
 	haveAct   bool
+
+	// Subscriber identifiers as presented; resolved to the subscriber key by
+	// the identity resolver after decoding.
+	msisdn, imsi, nai []byte
 }
 
 var ratNames [256]string
@@ -280,7 +292,6 @@ func decodeCCR(msg []byte, h diameter.Header, cfg *Config, req *canonical.Reques
 	if h.AppID != diameter.AppCreditControl {
 		return errBadApp
 	}
-	var e164, imsi, other []byte
 	data := msg[diameter.HeaderLen:]
 	for len(data) > 0 {
 		a, rest, err := diameter.NextAVP(data)
@@ -340,13 +351,11 @@ func decodeCCR(msg []byte, h diameter.Header, cfg *Config, req *canonical.Reques
 			}
 			switch typ {
 			case subE164:
-				e164 = val
+				info.msisdn = val
 			case subIMSI:
-				imsi = val
-			default:
-				if other == nil {
-					other = val
-				}
+				info.imsi = val
+			case subNAI:
+				info.nai = val
 			}
 		case avpMSCC:
 			if len(req.Units) >= cfg.MaxMSCC {
@@ -379,14 +388,7 @@ func decodeCCR(msg []byte, h diameter.Header, cfg *Config, req *canonical.Reques
 	default:
 		return errBadType
 	}
-	switch {
-	case len(e164) > 0:
-		req.SubscriberID = string(e164)
-	case len(imsi) > 0:
-		req.SubscriberID = string(imsi)
-	case len(other) > 0:
-		req.SubscriberID = string(other)
-	default:
+	if len(info.msisdn) == 0 && len(info.imsi) == 0 && len(info.nai) == 0 {
 		return errMissingSub
 	}
 	if req.Type == canonical.TypeEvent {
@@ -435,4 +437,35 @@ func decodeServiceInformation(data []byte, req *canonical.Request) {
 			}
 		}
 	}
+}
+
+// resolveSubscriber maps the presented Subscription-Id values to the
+// subscriber key, in the order MSISDN, IMSI, NAI.
+func (s *Server) resolveSubscriber(ctx context.Context, info *ccrInfo) (string, *DecodeError) {
+	var ids [3]identity.Identity
+	n := 0
+	if len(info.msisdn) > 0 {
+		ids[n] = identity.Identity{Type: identity.MSISDN, Value: string(info.msisdn)}
+		n++
+	}
+	if len(info.imsi) > 0 {
+		ids[n] = identity.Identity{Type: identity.IMSI, Value: string(info.imsi)}
+		n++
+	}
+	if len(info.nai) > 0 {
+		ids[n] = identity.Identity{Type: identity.NAI, Value: string(info.nai)}
+		n++
+	}
+	key, err := s.cfg.Identity.Resolve(ctx, ids[:n])
+	switch {
+	case err == nil:
+		return key, nil
+	case errors.Is(err, identity.ErrUnknown):
+		return "", errUserUnknown
+	case errors.Is(err, identity.ErrInvalid), errors.Is(err, identity.ErrNoIdentity):
+		return "", errBadIdentity
+	case errors.Is(err, identity.ErrConflict):
+		return "", errIdentityClash
+	}
+	return "", errIdentityDown
 }

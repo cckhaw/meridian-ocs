@@ -23,7 +23,7 @@ The gateway terminates Diameter over TCP, decodes CCRs into `canonical.Request`,
 | Session-Id | `SessionID` |
 | CC-Request-Type 1/2/3/4 | Initial / Update / Terminate / Event |
 | CC-Request-Number | `RequestNumber` (the idempotency key in the charge script) |
-| Subscription-Id | `SubscriberID`: END_USER_E164 (MSISDN), else IMSI, else the first other type |
+| Subscription-Id (END_USER_E164, END_USER_IMSI, END_USER_NAI) | resolved to the subscriber key through the identity resolver (doc 06); SIP_URI and PRIVATE types are ignored |
 | Event-Timestamp | `EventTime` (NTP → Unix); now if absent |
 | Service-Information > PS-Information > 3GPP-RAT-Type | `RATType` (decimal string) |
 | MSCC: Rating-Group, Service-Identifier | `RatingGroup`, `ServiceID` |
@@ -32,6 +32,8 @@ The gateway terminates Diameter over TCP, decodes CCRs into `canonical.Request`,
 | Empty RSU | server default (`DefaultRequestedBytes/Seconds/Events`: 10 MiB / 300 s / 1) |
 | USU (several are summed) | `Used` |
 | MSCC without RSU | `Requested = 0` (usage report only; never refused) |
+
+Subscriber resolution failures, answered before rating: unknown subscriber → 5030; malformed identifier → 5004; the presented identifiers belong to different subscribers → 5003; identity directory unavailable → 3002.
 
 Rejected with a protocol answer (the connection stays up): missing Session-Id / CC-Request-Type / CC-Request-Number / subscriber / (non-terminate) MSCC → 5005; bad type or mixed unit kinds → 5004; bad AVP length → 5014; more than 16 MSCC → 5004; other application id → 3007. **Events must carry `Requested-Action = DIRECT_DEBITING`**; refunds, balance checks and price enquiries are refused with 5012 rather than being rated as a debit.
 
@@ -63,7 +65,7 @@ Gateway + engine + Redis client in one process. Configuration is by environment 
 
 ## Measured (this sandbox, not a benchmark environment)
 
-Decode + encode of a two-MSCC CCR-Update (excluding socket I/O and rating): ~660 ns, 2 allocations per request (the subscriber-id and session-id strings). The codec itself parses without allocating (asserted by a test). The decoder was fuzzed for 10 s (1.2 M inputs) without a panic; the fuzz target is `FuzzParse` in `pkg/diameter`.
+Decode + encode of a two-MSCC CCR-Update (excluding socket I/O and rating): ~610 ns, 1 allocation (the session-id string). Subscriber resolution with both identifiers cached adds ~225 ns and 2 allocations (the identifier strings), so about 3 allocations per CCR in total. The codec itself parses without allocating (asserted by a test). The decoder was fuzzed for 10 s (1.2 M inputs) without a panic; the fuzz target is `FuzzParse` in `pkg/diameter`.
 
 Verified with an independent client: the built binary against a real Redis, driven by a separate Python Diameter client (CER, CCR-I/U/T → 2001, balance changed by exactly the used units).
 

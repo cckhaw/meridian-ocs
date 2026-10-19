@@ -1,10 +1,12 @@
 package gy
 
 import (
+	"context"
 	"testing"
 
 	"github.com/cckhaw/meridian-ocs/pkg/canonical"
 	"github.com/cckhaw/meridian-ocs/pkg/diameter"
+	"github.com/cckhaw/meridian-ocs/pkg/identity"
 )
 
 // Decode a CCR-Update with two MSCC, fake a grant, encode the CCA: everything
@@ -38,5 +40,28 @@ func BenchmarkDecodeEncode(b *testing.B) {
 		}
 		canonical.ReleaseRequest(req)
 		canonical.ReleaseResponse(resp)
+	}
+}
+
+// Subscriber resolution per CCR with both identifiers cached.
+func BenchmarkResolveSubscriber(b *testing.B) {
+	dir := &fakeDir{m: map[identity.Identity]string{
+		{Type: identity.MSISDN, Value: "491701234567"}:  "acct-1",
+		{Type: identity.IMSI, Value: "262011234567890"}: "acct-1",
+	}}
+	cfg := *testCfg()
+	cfg.Identity = identity.NewResolver(identity.NewCachedDirectory(dir, identity.CacheConfig{}), identity.ConflictReject)
+	s, _ := NewServer(cfg, raterFunc(nil), nil)
+	info := &ccrInfo{msisdn: []byte("491701234567"), imsi: []byte("262011234567890")}
+	ctx := context.Background()
+	if _, derr := s.resolveSubscriber(ctx, info); derr != nil {
+		b.Fatal(derr)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, derr := s.resolveSubscriber(ctx, info); derr != nil {
+			b.Fatal(derr)
+		}
 	}
 }

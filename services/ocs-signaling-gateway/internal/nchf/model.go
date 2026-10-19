@@ -5,6 +5,7 @@ import (
 
 	"github.com/cckhaw/meridian-ocs/pkg/canonical"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
+	"github.com/cckhaw/meridian-ocs/pkg/identity"
 )
 
 // Request model: only the TS 32.291 ChargingDataRequest fields the adapter
@@ -126,14 +127,14 @@ func units(time *uint32, total, up, down, sse *uint64) (u unitValue, ok bool) {
 	return u, kinds <= 1
 }
 
-// parseSUPI turns a TS 29.571 Supi into the charging key. Only IMSI and NAI
-// based SUPIs are accepted.
-func parseSUPI(s string) (string, bool) {
+// parseSUPI turns a TS 29.571 Supi into an identity. Only IMSI and NAI based
+// SUPIs are accepted.
+func parseSUPI(s string) (identity.Identity, bool) {
 	switch {
 	case strings.HasPrefix(s, "imsi-") && len(s) > 5:
-		return s[5:], true
+		return identity.Identity{Type: identity.IMSI, Value: s[5:]}, true
 	case strings.HasPrefix(s, "nai-") && len(s) > 4:
-		return s[4:], true
+		return identity.Identity{Type: identity.NAI, Value: s[4:]}, true
 	}
-	return "", false
+	return identity.Identity{}, false
 }

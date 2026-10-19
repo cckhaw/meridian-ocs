@@ -41,12 +41,15 @@ func TestDecodeInitial(t *testing.T) {
 		t.Fatal(derr)
 	}
 	if req.Source != canonical.SourceDiameterGy || req.Type != canonical.TypeInitial ||
-		req.SubscriberID != "491701234567" || req.SessionID != "pgw;1;2" || req.RequestNumber != 0 || req.RATType != "6" {
+		req.SessionID != "pgw;1;2" || req.RequestNumber != 0 || req.RATType != "6" {
 		t.Fatalf("%+v", req)
 	}
 	u := req.Units[0]
 	if u.RatingGroup != 100 || u.ServiceID != 7 || u.Kind != canonical.UnitBytes || u.Requested != 1_000_000 || u.Used != 0 {
 		t.Fatalf("%+v", u)
+	}
+	if string(info.msisdn) != "491701234567" || string(info.imsi) != "262011234567890" || len(info.nai) != 0 {
+		t.Fatalf("identifiers: %q %q %q", info.msisdn, info.imsi, info.nai)
 	}
 	if string(info.sessionID) != "pgw;1;2" || info.reqType != ccInitial {
 		t.Fatalf("%+v", info)
@@ -120,15 +123,15 @@ func TestDecodeRejects(t *testing.T) {
 	}
 }
 
-func TestDecodeSubscriberSelection(t *testing.T) {
+func TestDecodeCollectsEveryPresentedIdentifier(t *testing.T) {
 	ok := []msccOpts{{rg: 1, hasRSU: true, rsu: []unitFn{totalOctets(1)}}}
-	req, _, _ := decode(t, ccrOpts{session: "s", typ: ccInitial, imsi: "262011111", mscc: ok})
-	if req.SubscriberID != "262011111" {
-		t.Fatalf("IMSI fallback: %q", req.SubscriberID)
+	_, info, derr := decode(t, ccrOpts{session: "s", typ: ccInitial, imsi: "262011111", mscc: ok})
+	if derr != nil || string(info.imsi) != "262011111" || len(info.msisdn) != 0 {
+		t.Fatalf("%v %+v", derr, info)
 	}
-	req, _, _ = decode(t, ccrOpts{session: "s", typ: ccInitial, imsi: "262011111", msisdn: "4917", mscc: ok})
-	if req.SubscriberID != "4917" {
-		t.Fatalf("MSISDN must win: %q", req.SubscriberID)
+	_, info, derr = decode(t, ccrOpts{session: "s", typ: ccInitial, imsi: "262011111", msisdn: "4917", mscc: ok})
+	if derr != nil || string(info.imsi) != "262011111" || string(info.msisdn) != "4917" {
+		t.Fatalf("%v %+v", derr, info)
 	}
 }
 

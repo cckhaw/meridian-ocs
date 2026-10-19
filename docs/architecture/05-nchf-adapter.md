@@ -30,7 +30,7 @@ The OpenAPI file declares no `Location` header on the 201. It is sent anyway bec
 
 | TS 32.291 | Canonical |
 |---|---|
-| `subscriberIdentifier` (SUPI `imsi-…` or `nai-…`) | `SubscriberID` after stripping the prefix and applying `ResolveSubscriber`. Other types (e.g. `msisdn-`) → 400 |
+| `subscriberIdentifier` (SUPI `imsi-…` or `nai-…`) | `SubscriberID`: the IMSI / NAI is resolved to the subscriber key through the identity resolver (doc 06). Unknown → 404 (`USER_UNKNOWN`), malformed → 400, directory unavailable → 503. Other types (e.g. `msisdn-`) → 400 |
 | `invocationTimeStamp` (required) | `EventTime` (RFC 3339) |
 | `invocationSequenceNumber` (required) | `RequestNumber` |
 | `oneTimeEvent` + `oneTimeEventType: IEC` | `TypeEvent`. `PEC` → 501; missing type → 400 |
@@ -81,7 +81,7 @@ The charge script accepted an update with a higher request number **after** the 
 
 ## Not implemented / known gaps
 
-1. **Subscriber identity mapping.** Gy keys balances by MSISDN (falling back to IMSI) and Nchf by the IMSI/NAI from the SUPI. A subscriber charged on both interfaces gets two different keys unless `ResolveSubscriber` (Nchf) and an equivalent in the Gy adapter map them to one. Neither is wired to a real resolver; the Gy side has no hook yet.
+1. **Identity directory contents.** Subscribers resolve through the identity directory (doc 06), but nothing populates it yet: bindings are written with `RedisDirectory.Bind` or by hand (`SET id:imsi:<digits> <key>`) until the provisioning service exists.
 2. **PEC (pending event charging)** and the reservation/confirmation flow it needs.
 3. **`retransmissionIndicator`**, `notifyUri` / charging notifications (the callback), `triggers`, `quotaHoldingTime`, thresholds, `announcementInformation`, `invocationResult.failureHandling`, `sessionFailover`.
 4. Only `pduSessionInformation.ratType`, `pduSessionID` and S-NSSAI are read from the PDU session charging information; other 5G charging information blocks (SMS, MMTel, NEF, …) are ignored. No monetary units.

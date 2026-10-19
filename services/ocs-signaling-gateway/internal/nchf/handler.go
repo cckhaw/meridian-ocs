@@ -36,6 +36,7 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/canonical"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/engine"
+	"github.com/cckhaw/meridian-ocs/pkg/identity"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/admission"
 )
 
@@ -64,11 +65,11 @@ type Config struct {
 	DefaultRequestedSeconds int64 // default 300
 	DefaultRequestedEvents  int64 // default 1
 
-	// ResolveSubscriber maps a SUPI-derived key (IMSI digits or NAI) to the
-	// key the balances are stored under. nil keeps the key as is. It must be
-	// the same mapping the Gy adapter uses, or one subscriber gets two
-	// balances.
-	ResolveSubscriber func(key string) (string, bool)
+	// Identity maps the SUPI (IMSI or NAI) to the subscriber key balances are
+	// stored under. It must be the same resolver the Gy adapter uses, or one
+	// subscriber gets two balances. nil uses identity.NewPassthroughResolver,
+	// which keys balances by the raw IMSI/NAI.
+	Identity *identity.Resolver
 
 	Now func() time.Time
 }
@@ -94,6 +95,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.DefaultRequestedEvents <= 0 {
 		c.DefaultRequestedEvents = 1
+	}
+	if c.Identity == nil {
+		c.Identity = identity.NewPassthroughResolver()
 	}
 	if c.Now == nil {
 		c.Now = time.Now
@@ -169,6 +173,7 @@ var (
 	errNoSeq        = &problem{400, "MANDATORY_IE_MISSING", "invocationSequenceNumber is required"}
 	errNoSub        = &problem{400, "MANDATORY_IE_MISSING", "subscriberIdentifier is required"}
 	errBadSub       = &problem{400, "MANDATORY_IE_INCORRECT", "subscriberIdentifier must be an imsi- or nai- SUPI"}
+	errUserUnknown  = &problem{404, "USER_UNKNOWN", "subscriber unknown"}
 	errSubMismatch  = &problem{400, "MANDATORY_IE_INCORRECT", "subscriberIdentifier does not match the charging data reference"}
 	errNoUnits      = &problem{400, "MANDATORY_IE_MISSING", "multipleUnitUsage is required"}
 	errNoRG         = &problem{400, "MANDATORY_IE_MISSING", "multipleUnitUsage.ratingGroup is required"}
@@ -289,15 +294,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer canonical.ReleaseRequest(req)
 	defer canonical.ReleaseResponse(resp)
 
-	if p := h.fill(op, sub, ref, in, req); p != nil {
+	// The identity lookup and the data-tier call must not be abandoned because
+	// the consumer hung up: the charge may already have been applied and the
+	// retransmission would replay it. Redis client timeouts bound them instead.
+	ctx := context.WithoutCancel(r.Context())
+	if p := h.fill(ctx, op, sub, ref, in, req); p != nil {
 		h.fail(w, p)
 		return
 	}
 
-	// The data-tier call must not be abandoned because the consumer hung up:
-	// the charge may already have been applied and the retransmission would
-	// replay it. Redis client timeouts bound it instead.
-	ctx := context.WithoutCancel(r.Context())
 	switch err := h.rater.Rate(ctx, req, resp); {
 	case err == nil:
 	case errors.Is(err, engine.ErrOverloaded):
@@ -427,11 +432,20 @@ func mintRef(region, sub string, in *chargingDataRequest) string {
 	return sb.String()
 }
 
-func (h *Handler) resolve(key string) (string, bool) {
-	if h.cfg.ResolveSubscriber == nil {
-		return key, true
+// resolve maps a SUPI identity to the subscriber key.
+func (h *Handler) resolve(ctx context.Context, id identity.Identity) (string, *problem) {
+	var ids [1]identity.Identity
+	ids[0] = id
+	key, err := h.cfg.Identity.Resolve(ctx, ids[:])
+	switch {
+	case err == nil:
+		return key, nil
+	case errors.Is(err, identity.ErrUnknown):
+		return "", errUserUnknown
+	case errors.Is(err, identity.ErrInvalid), errors.Is(err, identity.ErrConflict), errors.Is(err, identity.ErrNoIdentity):
+		return "", errBadSub
 	}
-	return h.cfg.ResolveSubscriber(key)
+	return "", errUnavailable
 }
 
 func (h *Handler) defaultRequested(k canonical.UnitKind) int64 {
@@ -445,7 +459,7 @@ func (h *Handler) defaultRequested(k canonical.UnitKind) int64 {
 }
 
 // fill validates the request and maps it onto the canonical model.
-func (h *Handler) fill(op operation, refSub, ref string, in *chargingDataRequest, out *canonical.Request) *problem {
+func (h *Handler) fill(ctx context.Context, op operation, refSub, ref string, in *chargingDataRequest, out *canonical.Request) *problem {
 	switch {
 	case in.NFConsumer == nil || in.NFConsumer.NodeFunctionality == "":
 		return errNoNF
@@ -465,12 +479,13 @@ func (h *Handler) fill(op operation, refSub, ref string, in *chargingDataRequest
 		if in.SubscriberIdentifier == "" {
 			return errNoSub
 		}
-		key, ok := parseSUPI(in.SubscriberIdentifier)
+		sid, ok := parseSUPI(in.SubscriberIdentifier)
 		if !ok {
 			return errBadSub
 		}
-		if key, ok = h.resolve(key); !ok {
-			return errBadSub
+		key, perr := h.resolve(ctx, sid)
+		if perr != nil {
+			return perr
 		}
 		if op == opCreate {
 			refSub = key
