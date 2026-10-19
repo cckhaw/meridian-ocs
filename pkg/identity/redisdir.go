@@ -20,15 +20,22 @@ type RedisDirectory struct {
 	rdb    redis.UniversalClient
 	prefix string
 	bind   *redis.Script
+	unbind *redis.Script
 }
 
 // bindLua binds ARGV[1] to KEYS[1] unless it is bound to a different key
-// (then only if ARGV[2] == "1"). Returns 1 bound/unchanged, 2 rebound, 0 conflict.
+// (then only if ARGV[2] == "1"). Returns 1 newly bound, 3 already bound to the
+// same key, 2 rebound from another key, 0 conflict.
 const bindLua = `
 local cur = redis.call('GET', KEYS[1])
 if cur == false then redis.call('SET', KEYS[1], ARGV[1]) return 1 end
-if cur == ARGV[1] then return 1 end
+if cur == ARGV[1] then return 3 end
 if ARGV[2] == '1' then redis.call('SET', KEYS[1], ARGV[1]) return 2 end
+return 0`
+
+// unbindIfLua deletes KEYS[1] only if it is still bound to ARGV[1].
+const unbindIfLua = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
 return 0`
 
 // NewRedisDirectory builds a directory. prefix defaults to "id:".
@@ -36,7 +43,7 @@ func NewRedisDirectory(rdb redis.UniversalClient, prefix string) *RedisDirectory
 	if prefix == "" {
 		prefix = "id:"
 	}
-	return &RedisDirectory{rdb: rdb, prefix: prefix, bind: redis.NewScript(bindLua)}
+	return &RedisDirectory{rdb: rdb, prefix: prefix, bind: redis.NewScript(bindLua), unbind: redis.NewScript(unbindIfLua)}
 }
 
 func (d *RedisDirectory) redisKey(id Identity) (string, error) {
@@ -66,24 +73,33 @@ func (d *RedisDirectory) Lookup(ctx context.Context, id Identity) (string, error
 // Bind attaches an identity to a subscriber key. It is idempotent for the same
 // key and fails with ErrConflict if the identity belongs to another subscriber.
 func (d *RedisDirectory) Bind(ctx context.Context, id Identity, key string) error {
-	_, err := d.doBind(ctx, id, key, false)
+	_, err := d.BindNew(ctx, id, key)
 	return err
+}
+
+// BindNew is Bind that also reports whether the binding was created by this
+// call (false: it already existed for the same key). Callers that bind several
+// identities as one step use it to undo exactly what they added.
+func (d *RedisDirectory) BindNew(ctx context.Context, id Identity, key string) (created bool, err error) {
+	n, err := d.doBind(ctx, id, key, false)
+	return n == 1, err
 }
 
 // Rebind moves an identity to another subscriber (SIM swap, number
 // reassignment) and reports whether it was previously bound elsewhere. Callers
 // holding a CachedDirectory see the change after at most its TTL.
 func (d *RedisDirectory) Rebind(ctx context.Context, id Identity, key string) (moved bool, err error) {
-	return d.doBind(ctx, id, key, true)
+	n, err := d.doBind(ctx, id, key, true)
+	return n == 2, err
 }
 
-func (d *RedisDirectory) doBind(ctx context.Context, id Identity, key string, force bool) (bool, error) {
+func (d *RedisDirectory) doBind(ctx context.Context, id Identity, key string, force bool) (int, error) {
 	if !ValidKey(key) {
-		return false, fmt.Errorf("%w: subscriber key", ErrInvalid)
+		return 0, fmt.Errorf("%w: subscriber key", ErrInvalid)
 	}
 	k, err := d.redisKey(id)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	f := "0"
 	if force {
@@ -91,12 +107,23 @@ func (d *RedisDirectory) doBind(ctx context.Context, id Identity, key string, fo
 	}
 	n, err := d.bind.Run(ctx, d.rdb, []string{k}, key, f).Int()
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	if n == 0 {
-		return false, ErrConflict
+		return 0, ErrConflict
 	}
-	return n == 2, nil
+	return n, nil
+}
+
+// UnbindIf removes an identity only if it is still bound to key, and reports
+// whether it did. It never removes another subscriber's binding.
+func (d *RedisDirectory) UnbindIf(ctx context.Context, id Identity, key string) (bool, error) {
+	k, err := d.redisKey(id)
+	if err != nil {
+		return false, err
+	}
+	n, err := d.unbind.Run(ctx, d.rdb, []string{k}, key).Int()
+	return n == 1, err
 }
 
 // Unbind removes an identity.

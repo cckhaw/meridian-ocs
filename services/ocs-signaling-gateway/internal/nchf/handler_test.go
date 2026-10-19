@@ -461,21 +461,23 @@ func TestSubscriberIdentifierIsResolvedToTheInternalKey(t *testing.T) {
 	}
 
 	before := c.n
-	for name, tc := range map[string]struct {
+	// Ordered cases: the last one leaves the directory failing.
+	for _, tc := range []struct {
+		name string
 		supi string
 		code int
 		set  func()
 	}{
-		"unknown subscriber": {"imsi-262019999999999", 404, nil},
-		"malformed IMSI":     {"imsi-26201abc", 400, nil},
-		"directory failure":  {"imsi-262011234567890", 503, func() { dir.err = errors.New("redis down") }},
+		{"unknown subscriber", "imsi-262019999999999", 404, nil},
+		{"malformed IMSI", "imsi-26201abc", 400, nil},
+		{"directory failure", "imsi-262011234567890", 503, func() { dir.err = errors.New("redis down") }},
 	} {
 		if tc.set != nil {
 			tc.set()
 		}
 		w := post(h, prefix+"/chargingdata", with(baseCreate(), func(o obj) { o["subscriberIdentifier"] = tc.supi }))
 		if w.Code != tc.code {
-			t.Errorf("%s: %d want %d (%s)", name, w.Code, tc.code, w.Body.String())
+			t.Errorf("%s: %d want %d (%s)", tc.name, w.Code, tc.code, w.Body.String())
 			continue
 		}
 		decodeProblem(t, w)

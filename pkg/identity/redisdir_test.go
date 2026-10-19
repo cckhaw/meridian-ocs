@@ -91,3 +91,35 @@ func TestResolverOverCachedRedisDirectory(t *testing.T) {
 		t.Fatalf("%q %v", k, err)
 	}
 }
+
+func TestBindNewAndUnbindIf(t *testing.T) {
+	d := identity.NewRedisDirectory(redistest.Start(t), "")
+	ctx := context.Background()
+	id := identity.Identity{Type: identity.IMSI, Value: "262011234567890"}
+
+	if created, err := d.BindNew(ctx, id, "acct-1"); err != nil || !created {
+		t.Fatalf("%v %v", created, err)
+	}
+	if created, err := d.BindNew(ctx, id, "acct-1"); err != nil || created {
+		t.Fatalf("binding the same key again must not claim to have created it: %v %v", created, err)
+	}
+	if _, err := d.BindNew(ctx, id, "acct-2"); !errors.Is(err, identity.ErrConflict) {
+		t.Fatal(err)
+	}
+	// Undo is conditional: it never removes someone else's binding.
+	if removed, err := d.UnbindIf(ctx, id, "acct-2"); err != nil || removed {
+		t.Fatalf("%v %v", removed, err)
+	}
+	if k, _ := d.Lookup(ctx, id); k != "acct-1" {
+		t.Fatalf("%q", k)
+	}
+	if removed, err := d.UnbindIf(ctx, id, "acct-1"); err != nil || !removed {
+		t.Fatalf("%v %v", removed, err)
+	}
+	if _, err := d.Lookup(ctx, id); !errors.Is(err, identity.ErrUnknown) {
+		t.Fatal(err)
+	}
+	if removed, _ := d.UnbindIf(ctx, id, "acct-1"); removed {
+		t.Fatal("nothing left to remove")
+	}
+}
