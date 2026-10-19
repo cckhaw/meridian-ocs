@@ -74,18 +74,28 @@ func TestAReplicaThatStopsAnsweringIsReported(t *testing.T) {
 	r := rates(cash2)
 	charge(t, c, req("d5", "x", datalayer.ModeInitial, 0, t0, 1000, 0, r))
 
-	if resp := charge(t, c, req("d5", "x", datalayer.ModeUpdate, 1, t0, 1000, 100, r)); resp.Replication != datalayer.ReplicationAcked {
-		t.Fatalf("healthy replica: %v", resp.Replication)
+	// A freshly started replica may still be finishing its initial sync (slow
+	// CI runners), so allow it a few seconds to acknowledge before the freeze.
+	next := uint32(1)
+	for warm := time.Now().Add(5 * time.Second); ; next++ {
+		resp := charge(t, c, req("d5", "x", datalayer.ModeUpdate, next, t0, 1000, 100, r))
+		if resp.Replication == datalayer.ReplicationAcked {
+			next++
+			break
+		}
+		if time.Now().After(warm) {
+			t.Fatalf("healthy replica never acknowledged: %v", resp.Replication)
+		}
 	}
 	rep.Pause()
 	start := time.Now()
-	resp := charge(t, c, req("d5", "x", datalayer.ModeUpdate, 2, t0, 1000, 100, r))
+	resp := charge(t, c, req("d5", "x", datalayer.ModeUpdate, next, t0, 1000, 100, r))
 	if resp.Replication != datalayer.ReplicationShort || time.Since(start) < 55*time.Millisecond {
 		t.Fatalf("frozen replica: %v after %v", resp.Replication, time.Since(start))
 	}
 	rep.Resume()
 	deadline := time.Now().Add(5 * time.Second)
-	for n := uint32(3); ; n++ {
+	for n := next + 1; ; n++ {
 		if resp := charge(t, c, req("d5", "x", datalayer.ModeUpdate, n, t0, 1000, 100, r)); resp.Replication == datalayer.ReplicationAcked {
 			break
 		}
