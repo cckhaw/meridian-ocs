@@ -46,7 +46,7 @@ Each granted reservation is registered in the worker's timing wheel (1 s slots) 
 
 ## Fail policy integration
 
-The engine wraps the data-tier call in `failpolicy.Breaker`. When the call fails or the breaker is open, requests go to `failpolicy.Engine` (see doc 02): prepaid are denied (`ResultUnavailable`), postpaid / high-value get a capped, journalled, short grant (`Degraded=true`). A terminate during an outage is acknowledged and emits `AuditUnsettledUsage`; the reservation expires and is refunded, so **usage reported only in that terminate is not charged until reconciliation consumes the audit event**. That reconciler does not exist yet.
+The engine wraps the data-tier call in `failpolicy.Breaker`. When the call fails or the breaker is open, requests go to `failpolicy.Engine` (see doc 02): prepaid are denied (`ResultUnavailable`), postpaid get a capped, journalled, short grant (`Degraded=true`). A terminate during an outage is acknowledged and emits `AuditUnsettledUsage`; the reservation expires and is refunded, so **usage reported only in that terminate is not charged until reconciliation consumes the audit event**. That reconciler does not exist yet.
 
 ## Measured numbers (this sandbox, not a benchmark environment)
 

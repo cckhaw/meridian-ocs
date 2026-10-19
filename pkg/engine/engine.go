@@ -419,7 +419,7 @@ func policyKind(k canonical.UnitKind) failpolicy.UnitKind {
 }
 
 // degrade answers a request without the data tier, via the hybrid fail policy:
-// prepaid fail closed; postpaid / high-value get a capped, journalled grant.
+// prepaid (all of it) fails closed; postpaid gets a capped, journalled grant.
 func (w *worker) degrade(req *canonical.Request, resp *canonical.Response, now time.Time) {
 	e := w.e
 	e.degraded.Add(1)
