@@ -187,7 +187,7 @@ sequenceDiagram
 | Retransmitted CCR (same Session-Id + CC-Request-Number) | Lua returns the **stored previous answer**; no second debit |
 | Lost CCA, PGW retries | Same as above — safe by construction |
 | PGW silently drops session | Reservation TTL (`Validity-Time` + grace) expires; wheel-timer sweeper + Redis key expiry event refund unused reservation |
-| Redis shard unreachable | Gateway returns `3002 UNABLE_TO_DELIVER`/`4010 END_USER_SERVICE_DENIED` per configured *fail policy* (`fail-closed` default for prepaid; `fail-open-with-cap` available for postpaid/hybrid) |
+| Redis shard unreachable | Hybrid fail policy (see [02-decisions-and-failure-policy.md](02-decisions-and-failure-policy.md)): prepaid → `4010 END_USER_SERVICE_DENIED`; postpaid / high-value → capped, journalled, short-validity grant |
 | Late CCR-Update after TTL refund | Treated as a fresh reservation attempt; used units beyond refund are charged via a **rated-late adjustment** (may drive balance negative within an overdraft bound) |
 
 ---
@@ -425,9 +425,4 @@ meridian-ocs/
 └── docs/architecture/
 ```
 
-**Decisions requested before scaffolding** (defaults in bold will be used if unanswered):
-
-1. Hot store: **Redis Cluster + Lua** vs. ScyllaDB/VoltDB (see R1).
-2. Diameter stack: **in-house minimal Gy codec** (zero-alloc, scoped to CCR/CCA/CER/CEA/DWR/DWA) vs. integrating `fiorix/go-diameter`.
-3. Message bus: **Kafka (franz-go client)** vs. Pulsar. (`sarama` is in maintenance mode; `franz-go` is recommended.)
-4. Fail policy default on data-tier outage: **fail-closed**.
+**Decisions** are recorded in [02-decisions-and-failure-policy.md](02-decisions-and-failure-policy.md): Redis Cluster + Lua, in-house Gy codec, Kafka (`franz-go`), and a hybrid failure policy (prepaid fail-closed; postpaid / high-value fail-open with a cap).

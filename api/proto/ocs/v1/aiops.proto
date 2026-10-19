@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package ocs.v1;
+
+option go_package = "github.com/cckhaw/meridian-ocs/pkg/gen/ocs/v1;ocsv1";
+
+// Guarded control plane for AI Ops agents. Every parameter is allow-listed and
+// clamped server-side; changes auto-revert after ttl_seconds unless confirmed.
+service ControlService {
+  rpc SetParameter(SetParameterRequest) returns (SetParameterResponse);
+  rpc ConfirmChange(ConfirmChangeRequest) returns (ConfirmChangeResponse);
+}
+
+message SetParameterRequest {
+  string service = 1;
+  string parameter = 2;   // e.g. "worker_pool_size", "failopen.enabled"
+  string value = 3;
+  uint32 ttl_seconds = 4;
+  string reason = 5;
+}
+
+message SetParameterResponse {
+  string change_id = 1;
+  string applied_value = 2;  // after clamping
+}
+
+message ConfirmChangeRequest { string change_id = 1; }
+message ConfirmChangeResponse {}

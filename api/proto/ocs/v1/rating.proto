@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package ocs.v1;
+
+import "ocs/v1/canonical.proto";
+
+option go_package = "github.com/cckhaw/meridian-ocs/pkg/gen/ocs/v1;ocsv1";
+
+service RatingService {
+  // Bidirectional stream; responses carry the session_id of their request.
+  rpc Rate(stream CanonicalChargingRequest) returns (stream CanonicalChargingResponse);
+}

@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package ocs.v1;
+
+option go_package = "github.com/cckhaw/meridian-ocs/pkg/gen/ocs/v1;ocsv1";
+
+// Protocol-agnostic charging event produced by the signaling gateway.
+message CanonicalChargingRequest {
+  enum Source {
+    SOURCE_UNSPECIFIED = 0;
+    SOURCE_DIAMETER_GY = 1;
+    SOURCE_NCHF = 2;
+    SOURCE_REST = 3;
+  }
+  enum RequestType {
+    REQUEST_TYPE_UNSPECIFIED = 0;
+    REQUEST_TYPE_INITIAL = 1;
+    REQUEST_TYPE_UPDATE = 2;
+    REQUEST_TYPE_TERMINATE = 3;
+    REQUEST_TYPE_EVENT = 4;
+  }
+
+  Source source = 1;
+  RequestType request_type = 2;
+  string subscriber_id = 3;      // MSISDN or SUPI; shard key
+  string session_id = 4;         // Diameter Session-Id or Nchf chargingSessionId
+  uint32 request_number = 5;     // CC-Request-Number / invocationSequenceNumber (idempotency)
+  int64 event_time_unix_ms = 6;
+  string rat_type = 7;
+  string cell_id = 8;
+  string network_slice = 9;
+  repeated UnitRequest units = 10;
+}
+
+message UnitRequest {
+  uint32 rating_group = 1;
+  uint32 service_id = 2;
+  UnitKind kind = 3;
+  int64 requested = 4;
+  int64 used = 5;
+}
+
+enum UnitKind {
+  UNIT_KIND_UNSPECIFIED = 0;
+  UNIT_KIND_BYTES = 1;
+  UNIT_KIND_SECONDS = 2;
+  UNIT_KIND_EVENTS = 3;
+}
+
+message CanonicalChargingResponse {
+  enum Result {
+    RESULT_UNSPECIFIED = 0;
+    RESULT_GRANTED = 1;
+    RESULT_PARTIAL_FINAL = 2;     // granted with Final-Unit-Indication
+    RESULT_CREDIT_LIMIT_REACHED = 3;
+    RESULT_UNKNOWN_SESSION = 4;
+    RESULT_UNAVAILABLE = 5;       // fail-closed outcome
+    RESULT_TOO_BUSY = 6;
+  }
+  Result result = 1;
+  repeated UnitGrant grants = 2;
+  string session_id = 3;
+}
+
+message UnitGrant {
+  uint32 rating_group = 1;
+  int64 granted = 2;
+  uint32 validity_seconds = 3;
+  bool final_unit = 4;
+  bool degraded = 5;  // issued by the fail-open policy without an authoritative balance
+}
