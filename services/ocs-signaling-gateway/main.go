@@ -81,30 +81,16 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/engine"
 	"github.com/cckhaw/meridian-ocs/pkg/identity"
 	"github.com/cckhaw/meridian-ocs/pkg/service"
+	"github.com/cckhaw/meridian-ocs/pkg/svcenv"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/admission"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/gy"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/nchf"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/oauth"
 )
 
-func env(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
+func env(key, def string) string { return svcenv.OS.String(key, def) }
 
-func envInt(key string, def int) (int, error) {
-	v := os.Getenv(key)
-	if v == "" {
-		return def, nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 0 {
-		return 0, fmt.Errorf("%s: want a non-negative integer, got %q", key, v)
-	}
-	return n, nil
-}
+func envInt(key string, def int) (int, error) { return svcenv.OS.Int(key, def) }
 
 func parseRate(s string) (engine.Frac, error) {
 	num, den, ok := strings.Cut(s, "/")
@@ -117,37 +103,6 @@ func parseRate(s string) (engine.Frac, error) {
 		return engine.Frac{}, fmt.Errorf("OCS_CASH_BYTES_RATE: %q out of range (num <= %d, den <= %d)", s, datalayer.MaxNum, datalayer.MaxDen)
 	}
 	return engine.Frac{Num: n, Den: d}, nil
-}
-
-func configureDurability(ctx context.Context, store *datalayer.Client) error {
-	replicas, err := envInt("OCS_REDIS_REPLICAS", 1)
-	if err != nil {
-		return err
-	}
-	timeout, err := time.ParseDuration(env("OCS_REDIS_WAIT_TIMEOUT", "25ms"))
-	if err != nil || timeout <= 0 {
-		return fmt.Errorf("OCS_REDIS_WAIT_TIMEOUT: want a positive duration, got %q", os.Getenv("OCS_REDIS_WAIT_TIMEOUT"))
-	}
-	if replicas == 0 {
-		log.Printf("ocs-signaling-gateway: WARNING commits do not wait for replicas (OCS_REDIS_REPLICAS=0)")
-		return nil
-	}
-	if _, err := store.WithDurability(datalayer.Durability{Replicas: replicas, Timeout: timeout}); err != nil {
-		return err
-	}
-	have, err := store.ConnectedReplicas(ctx)
-	if err != nil {
-		return fmt.Errorf("cannot check the Redis replicas: %w", err)
-	}
-	if have < replicas {
-		if env("OCS_ALLOW_NO_REPLICA", "") == "true" {
-			log.Printf("ocs-signaling-gateway: WARNING %d replica(s) connected, %d required: commits are not durable", have, replicas)
-			return nil
-		}
-		return fmt.Errorf("Redis has %d connected replica(s) but OCS_REDIS_REPLICAS=%d; connect them or set OCS_ALLOW_NO_REPLICA=true for development", have, replicas)
-	}
-	log.Printf("ocs-signaling-gateway: commits wait for %d replica(s), timeout %s", replicas, timeout)
-	return nil
 }
 
 // newAuthenticator builds the Nchf access-token verifier. There is no default:
@@ -259,7 +214,7 @@ func run(ctx context.Context, ready func()) error {
 	})
 	defer rdb.Close()
 	store := datalayer.New(rdb)
-	if err := configureDurability(ctx, store); err != nil {
+	if err := svcenv.ConfigureDurability(ctx, svcenv.OS, store, func(f string, a ...any) { log.Printf("ocs-signaling-gateway: "+f, a...) }); err != nil {
 		return err
 	}
 	resolver, err := newResolver(rdb)
