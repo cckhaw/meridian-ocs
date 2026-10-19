@@ -38,6 +38,7 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/engine"
 	"github.com/cckhaw/meridian-ocs/pkg/identity"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/admission"
+	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/oauth"
 )
 
 // Rater is the rating engine as seen by the adapter (*engine.Engine).
@@ -64,6 +65,13 @@ type Config struct {
 	DefaultRequestedBytes   int64 // default 10 MiB
 	DefaultRequestedSeconds int64 // default 300
 	DefaultRequestedEvents  int64 // default 1
+
+	// Auth validates the OAuth2 access token of every request (TS 33.501
+	// §13.4). It is required unless AllowUnauthenticated is set.
+	Auth Authenticator
+	// AllowUnauthenticated serves requests without checking an access token.
+	// For development and tests only.
+	AllowUnauthenticated bool
 
 	// Identity maps the SUPI (IMSI or NAI) to the subscriber key balances are
 	// stored under. It must be the same resolver the Gy adapter uses, or one
@@ -104,11 +112,18 @@ func (c *Config) setDefaults() {
 	}
 }
 
+// Authenticator validates a bearer access token (*oauth.Verifier).
+type Authenticator interface {
+	Verify(token string) (*oauth.Claims, error)
+}
+
 // Stats are cumulative counters.
 type Stats struct {
-	Requests uint64
-	Shed     uint64 // answered 429
-	Rejected uint64 // answered 4xx for malformed or unsupported input
+	Requests     uint64
+	Shed         uint64 // answered 429
+	Rejected     uint64 // answered 4xx for malformed or unsupported input
+	Unauthorized uint64 // answered 401
+	Forbidden    uint64 // answered 403
 }
 
 // Handler serves the Nchf_ConvergedCharging API.
@@ -117,7 +132,7 @@ type Handler struct {
 	rater Rater
 	adm   *admission.Admission
 
-	requests, shed, rejected atomic.Uint64
+	requests, shed, rejected, unauthorized, forbidden atomic.Uint64
 }
 
 // NewHandler builds a Handler. adm may be nil (no admission control).
@@ -126,6 +141,9 @@ func NewHandler(cfg Config, rater Rater, adm *admission.Admission) (*Handler, er
 		return nil, errors.New("nchf: rater is required")
 	}
 	cfg.setDefaults()
+	if cfg.Auth == nil && !cfg.AllowUnauthenticated {
+		return nil, errors.New("nchf: an Authenticator is required (set AllowUnauthenticated only for development)")
+	}
 	if strings.ContainsAny(cfg.Region, ".") || cfg.Region == "" {
 		return nil, errors.New("nchf: Region must not contain '.'")
 	}
@@ -137,7 +155,7 @@ func NewHandler(cfg Config, rater Rater, adm *admission.Admission) (*Handler, er
 
 // Stats returns a snapshot of the counters.
 func (h *Handler) Stats() Stats {
-	return Stats{h.requests.Load(), h.shed.Load(), h.rejected.Load()}
+	return Stats{h.requests.Load(), h.shed.Load(), h.rejected.Load(), h.unauthorized.Load(), h.forbidden.Load()}
 }
 
 // Admission returns the admission controller (for runtime tuning).
@@ -182,6 +200,8 @@ var (
 	errNoEventType  = &problem{400, "MANDATORY_IE_MISSING", "oneTimeEventType is required when oneTimeEvent is true"}
 	errPEC          = &problem{501, "", "only immediate event charging (IEC) is supported"}
 	errStale        = &problem{400, "MANDATORY_IE_INCORRECT", "invocationSequenceNumber is older than the last processed request"}
+	errUnauthorized = &problem{401, "", "access token missing or invalid"}
+	errForbidden    = &problem{403, "", "the access token does not grant access to this service"}
 	errBusy         = &problem{429, "", "overloaded"}
 	errUnavailable  = &problem{503, "SYSTEM_FAILURE", "charging is temporarily unavailable"}
 )
@@ -240,6 +260,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if ct := r.Header.Get("Content-Type"); len(ct) < 16 || !strings.EqualFold(ct[:16], "application/json") {
 		h.fail(w, errMediaType)
 		return
+	}
+
+	if h.cfg.Auth != nil {
+		if p := h.authenticate(w, r); p != nil {
+			h.fail(w, p)
+			return
+		}
 	}
 
 	// A reference minted in another region is that region's business.
@@ -354,9 +381,40 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	outPool.Put(op2)
 }
 
+const realm = `Bearer realm="nchf-convergedcharging"`
+
+// authenticate checks the bearer token. On failure it sets WWW-Authenticate
+// (RFC 6750) and returns the problem to answer with. The client is told
+// nothing about which check failed.
+func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request) *problem {
+	vals := r.Header["Authorization"]
+	if len(vals) == 0 {
+		h.unauthorized.Add(1)
+		w.Header().Set("WWW-Authenticate", realm)
+		return errUnauthorized
+	}
+	var token string
+	if len(vals) == 1 && len(vals[0]) > 7 && strings.EqualFold(vals[0][:7], "Bearer ") {
+		token = strings.TrimSpace(vals[0][7:])
+	}
+	_, err := h.cfg.Auth.Verify(token)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, oauth.ErrForbidden):
+		h.forbidden.Add(1)
+		w.Header().Set("WWW-Authenticate", realm+`, error="insufficient_scope", scope="`+oauth.DefaultScope+`"`)
+		return errForbidden
+	}
+	h.unauthorized.Add(1)
+	w.Header().Set("WWW-Authenticate", realm+`, error="invalid_token"`)
+	return errUnauthorized
+}
+
 // fail writes a ProblemDetails answer.
 func (h *Handler) fail(w http.ResponseWriter, p *problem) {
-	if p.status >= 400 && p.status < 500 && p.status != http.StatusTooManyRequests {
+	if p.status >= 400 && p.status < 500 && p.status != http.StatusTooManyRequests &&
+		p.status != http.StatusUnauthorized && p.status != http.StatusForbidden {
 		h.rejected.Add(1)
 	}
 	hdr := w.Header()

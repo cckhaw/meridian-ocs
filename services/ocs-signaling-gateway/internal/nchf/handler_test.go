@@ -515,7 +515,7 @@ func TestForeignRegionReferences(t *testing.T) {
 	if !strings.Contains(loc, "/chargingdata/eu1.") {
 		t.Fatal(loc)
 	}
-	if _, err := NewHandler(Config{Region: "a.b"}, raterFunc(grantAll), nil); err == nil {
+	if _, err := NewHandler(Config{Region: "a.b", AllowUnauthenticated: true}, raterFunc(grantAll), nil); err == nil {
 		t.Fatal("a region containing '.' would break reference parsing")
 	}
 }

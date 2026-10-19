@@ -25,6 +25,7 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer/redistest"
 	"github.com/cckhaw/meridian-ocs/pkg/engine"
+	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/oauth/oauthtest"
 )
 
 var e2eTariff = engine.StaticTariff{Cash: map[canonical.UnitKind]engine.Frac{canonical.UnitBytes: {Num: 2, Den: 1}}}
@@ -78,7 +79,7 @@ func TestSessionOverHTTP2EndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer e.Close()
-	h, _ := NewHandler(Config{}, e, nil)
+	h, _ := NewHandler(Config{AllowUnauthenticated: true}, e, nil)
 	addr := serveOn(t, NewServer("", h, nil), false)
 	base := "http://" + addr + prefix
 	c := h2cClient()
@@ -164,7 +165,7 @@ func TestPartialGrantAndQuotaLimitOverHTTP(t *testing.T) {
 	_ = store.PutBucket(ctx, "262019999999999", datalayer.Bucket{ID: "bundle", Class: datalayer.ClassBundle, Kind: canonical.UnitBytes, Balance: 300, Order: 1})
 	e, _ := engine.New(engine.Config{Workers: 1}, engine.Deps{Store: store, Tariff: e2eTariff})
 	defer e.Close()
-	h, _ := NewHandler(Config{}, e, nil)
+	h, _ := NewHandler(Config{AllowUnauthenticated: true}, e, nil)
 	addr := serveOn(t, NewServer("", h, nil), false)
 	c := h2cClient()
 	mk := func(pdu int) obj {
@@ -247,7 +248,7 @@ func (p *testPKI) client(withCert bool) *http.Client {
 
 func TestTLSWithAndWithoutClientCertificates(t *testing.T) {
 	pki := newPKI(t)
-	h, _ := NewHandler(Config{}, raterFunc(grantAll), nil)
+	h, _ := NewHandler(Config{AllowUnauthenticated: true}, raterFunc(grantAll), nil)
 
 	// Server TLS only.
 	cfg, err := TLSConfig(pki.serverCert, pki.serverKey, "")
@@ -283,5 +284,56 @@ func TestTLSWithAndWithoutClientCertificates(t *testing.T) {
 	_ = os.WriteFile(bad, []byte("not pem"), 0o600)
 	if _, err := TLSConfig(pki.serverCert, pki.serverKey, bad); err == nil {
 		t.Fatal("a CA file without certificates must be an error")
+	}
+}
+
+// TLS 1.2+, a verified client certificate AND a valid access token, over HTTP/2,
+// through the real engine and Redis.
+func TestTokenOverMutualTLSEndToEnd(t *testing.T) {
+	pki := newPKI(t)
+	iss := oauthtest.NewIssuer(t)
+	store := datalayer.New(redistest.Start(t))
+	ctx := context.Background()
+	_ = store.PutBucket(ctx, "262011234567890", datalayer.Bucket{ID: "bundle", Class: datalayer.ClassBundle, Kind: canonical.UnitBytes, Balance: 5000, Order: 1})
+	e, _ := engine.New(engine.Config{Workers: 1}, engine.Deps{Store: store, Tariff: e2eTariff})
+	defer e.Close()
+	h, err := NewHandler(Config{Auth: newVerifier(t, iss)}, e, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsCfg, err := TLSConfig(pki.serverCert, pki.serverKey, pki.caFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := serveOn(t, NewServer("", h, tlsCfg), true)
+	c := pki.client(true)
+	url := "https://" + addr + prefix + "/chargingdata"
+
+	post := func(client *http.Client, token string) (*http.Response, error) {
+		req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader([]byte(mustJSON(baseCreate()))))
+		req.Header.Set("Content-Type", "application/json")
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		return client.Do(req)
+	}
+
+	resp, err := post(c, iss.Token(t))
+	if err != nil || resp.StatusCode != 201 || resp.ProtoMajor != 2 {
+		t.Fatalf("authorised request: %v %v", resp, err)
+	}
+	resp, err = post(c, "")
+	if err != nil || resp.StatusCode != 401 || resp.Header.Get("WWW-Authenticate") == "" {
+		t.Fatalf("no token: %v %v", resp, err)
+	}
+	if resp, err = post(c, oauthtest.NewIssuer(t).Token(t)); err != nil || resp.StatusCode != 401 {
+		t.Fatalf("token from an unknown issuer: %v %v", resp, err)
+	}
+	// A valid token is not enough without the client certificate.
+	if _, err := post(pki.client(false), iss.Token(t)); err == nil {
+		t.Fatal("a client without a certificate must not get through, whatever token it holds")
+	}
+	if bal, _ := store.Balance(ctx, "262011234567890", "bundle"); bal != 4000 {
+		t.Fatalf("only the authorised request may have reserved quota: balance %d", bal)
 	}
 }

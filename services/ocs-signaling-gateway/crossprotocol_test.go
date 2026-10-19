@@ -178,7 +178,7 @@ func TestOneSubscriberOneBalanceAcrossGyAndNchf(t *testing.T) {
 	go func() { _ = gySrv.Serve(gyLn) }()
 	defer gySrv.Close()
 
-	h, err := nchf.NewHandler(nchf.Config{Identity: resolver}, eng, nil)
+	h, err := nchf.NewHandler(nchf.Config{Identity: resolver, AllowUnauthenticated: true}, eng, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

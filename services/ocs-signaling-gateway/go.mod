@@ -4,6 +4,7 @@ go 1.22
 
 require (
 	github.com/cckhaw/meridian-ocs/pkg v0.0.0
+	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/redis/go-redis/v9 v9.7.3
 	golang.org/x/net v0.33.0
 )
