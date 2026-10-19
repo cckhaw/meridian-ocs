@@ -2,24 +2,37 @@ syntax = "proto3";
 
 package ocs.v1;
 
+import "google/protobuf/timestamp.proto";
+import "ocs/v1/canonical.proto";
+
 option go_package = "github.com/cckhaw/meridian-ocs/pkg/gen/ocs/v1;ocsv1";
 
+// ProvisioningService is the command interface for CRM / care systems.
+//
+// Every mutating call is asynchronous and idempotent. It validates the request
+// and queues a command (Kafka, keyed by subscriber so commands for one
+// subscriber are applied in order), then returns CommandAccepted. The outcome
+// is read with GetCommand. The caller-chosen idempotency_key identifies the
+// business operation: repeating a call with the same key and the same content
+// returns the original command; the same key with different content is refused
+// (ALREADY_EXISTS). Keys are remembered for 7 days.
 service ProvisioningService {
-  rpc TopUp(TopUpRequest) returns (CommandAck);
-  rpc ChangeLifecycle(ChangeLifecycleRequest) returns (CommandAck);
-  rpc AddBundle(AddBundleRequest) returns (CommandAck);
+  rpc CreateSubscriber(CreateSubscriberRequest) returns (CommandAccepted);
+  rpc TopUp(TopUpRequest) returns (CommandAccepted);
+  rpc AdjustBalance(AdjustBalanceRequest) returns (CommandAccepted);
+  rpc AddBundle(AddBundleRequest) returns (CommandAccepted);
+  rpc ReloadBucket(ReloadBucketRequest) returns (CommandAccepted);
+  rpc RemoveBucket(RemoveBucketRequest) returns (CommandAccepted);
+  rpc ChangeLifecycle(ChangeLifecycleRequest) returns (CommandAccepted);
+
+  rpc GetCommand(GetCommandRequest) returns (CommandStatus);
+  rpc GetSubscriber(GetSubscriberRequest) returns (Subscriber);
 }
 
-message CommandAck {
-  string idempotency_key = 1;
-  bool duplicate = 2;  // true when the key was already processed
-}
-
-message TopUpRequest {
-  string idempotency_key = 1;  // required
-  string msisdn = 2;
-  int64 amount_minor_units = 3;
-  string currency = 4;
+enum PaymentType {
+  PAYMENT_TYPE_UNSPECIFIED = 0;
+  PAYMENT_TYPE_PREPAID = 1;
+  PAYMENT_TYPE_POSTPAID = 2;
 }
 
 enum LifecycleState {
@@ -30,14 +43,146 @@ enum LifecycleState {
   LIFECYCLE_STATE_TERMINATED = 4;
 }
 
-message ChangeLifecycleRequest {
+enum BucketClass {
+  BUCKET_CLASS_UNSPECIFIED = 0;
+  BUCKET_CLASS_PROMO = 1;   // consumed first
+  BUCKET_CLASS_BUNDLE = 2;  // then bundles
+  BUCKET_CLASS_CASH = 3;    // money, last
+}
+
+enum IdentifierType {
+  IDENTIFIER_TYPE_UNSPECIFIED = 0;
+  IDENTIFIER_TYPE_MSISDN = 1;  // E.164 digits, no '+'
+  IDENTIFIER_TYPE_IMSI = 2;
+  IDENTIFIER_TYPE_NAI = 3;
+}
+
+enum CommandState {
+  COMMAND_STATE_UNSPECIFIED = 0;
+  COMMAND_STATE_ACCEPTED = 1;  // queued, not yet applied
+  COMMAND_STATE_APPLIED = 2;
+  COMMAND_STATE_FAILED = 3;    // a final business failure, see CommandStatus.outcome
+}
+
+message Identifier {
+  IdentifierType type = 1;
+  string value = 2;
+}
+
+message CreateSubscriberRequest {
   string idempotency_key = 1;
-  string msisdn = 2;
-  LifecycleState target = 3;
+  // Opaque subscriber key chosen by the caller (1-128 printable ASCII
+  // characters, no spaces or braces). Balances and sessions live under it.
+  string subscriber_key = 2;
+  PaymentType payment_type = 3;
+  // Identities bound to the subscriber key so Gy and Nchf traffic finds it.
+  repeated Identifier identifiers = 4;
+}
+
+message TopUpRequest {
+  string idempotency_key = 1;
+  string subscriber_key = 2;
+  int64 amount_minor_units = 3;  // > 0
+  string currency = 4;           // must equal the deployment currency
+  string bucket_id = 5;          // default "cash"; must be a cash bucket
+}
+
+message AdjustBalanceRequest {
+  string idempotency_key = 1;
+  string subscriber_key = 2;
+  string bucket_id = 3;          // default "cash"
+  int64 delta = 4;               // signed; money for cash buckets, units otherwise
+  string currency = 5;           // required for cash buckets
+  string reason = 6;             // required, kept in the ledger
+  bool allow_negative = 7;
 }
 
 message AddBundleRequest {
   string idempotency_key = 1;
-  string msisdn = 2;
-  string bundle_id = 3;
+  string subscriber_key = 2;
+  string bucket_id = 3;
+  BucketClass bucket_class = 4;  // PROMO or BUNDLE
+  UnitKind unit_kind = 5;
+  int64 amount = 6;              // > 0
+  google.protobuf.Timestamp expires_at = 7;  // unset = never
+  optional int32 priority = 8;   // lower is consumed first; default 10 (promo) / 100 (bundle)
+}
+
+message ReloadBucketRequest {
+  string idempotency_key = 1;
+  string subscriber_key = 2;
+  string bucket_id = 3;
+  int64 amount = 4;              // the new remaining allowance (not an increment)
+  google.protobuf.Timestamp expires_at = 5;
+  bool keep_expiry = 6;          // ignore expires_at and keep the current one
+  optional int32 priority = 7;   // unset keeps the current order
+}
+
+message RemoveBucketRequest {
+  string idempotency_key = 1;
+  string subscriber_key = 2;
+  string bucket_id = 3;
+  bool force = 4;                // required to remove a bucket that still holds a balance
+}
+
+message ChangeLifecycleRequest {
+  string idempotency_key = 1;
+  string subscriber_key = 2;
+  LifecycleState target = 3;
+  google.protobuf.Timestamp grace_until = 4;  // only for GRACE_PERIOD
+  string reason = 5;
+}
+
+message GetCommandRequest {
+  string command_id = 1;
+}
+
+message GetSubscriberRequest {
+  string subscriber_key = 1;
+}
+
+message CommandAccepted {
+  string command_id = 1;         // equals the idempotency key
+  CommandState state = 2;        // the current state, which may already be final for a repeat
+  bool duplicate = 3;            // true when this call repeated an earlier one
+}
+
+message CommandStatus {
+  string command_id = 1;
+  string type = 2;               // create_subscriber, top_up, ...
+  string subscriber_key = 3;
+  CommandState state = 4;
+  // For APPLIED "applied"; for FAILED the reason: no_such_subscriber,
+  // already_exists, invalid_transition, insufficient_balance, no_such_bucket,
+  // subscriber_terminated, balance_overflow, bucket_not_empty,
+  // not_a_cash_bucket, identity_conflict.
+  string outcome = 5;
+  string message = 6;
+  int64 balance = 7;
+  int64 old_balance = 8;
+  string from_state = 9;
+  string to_state = 10;
+  int64 version = 11;
+  google.protobuf.Timestamp accepted_at = 12;
+  google.protobuf.Timestamp completed_at = 13;
+}
+
+message Bucket {
+  string id = 1;
+  BucketClass bucket_class = 2;
+  string kind = 3;               // bytes, seconds, events or any
+  int64 balance = 4;
+  google.protobuf.Timestamp expires_at = 5;
+  double priority = 6;
+}
+
+message Subscriber {
+  string subscriber_key = 1;
+  PaymentType payment_type = 2;
+  LifecycleState status = 3;
+  int64 version = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp status_at = 6;
+  google.protobuf.Timestamp grace_until = 7;
+  repeated Bucket buckets = 8;
 }
