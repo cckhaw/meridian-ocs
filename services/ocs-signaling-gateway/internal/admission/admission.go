@@ -1,4 +1,5 @@
-package gy
+// Package admission is lock-free admission control shared by the protocol adapters.
+package admission
 
 import (
 	"sync/atomic"
@@ -17,9 +18,9 @@ type Admission struct {
 	now         func() int64
 }
 
-// NewAdmission creates an Admission. perSecond == 0 or maxInflight == 0
+// New creates an Admission. perSecond == 0 or maxInflight == 0
 // disable the respective limit.
-func NewAdmission(perSecond float64, burst int, maxInflight int) *Admission {
+func New(perSecond float64, burst int, maxInflight int) *Admission {
 	a := &Admission{now: func() int64 { return time.Now().UnixNano() }}
 	a.SetRate(perSecond, burst)
 	a.SetMaxInflight(maxInflight)
