@@ -10,6 +10,7 @@
 --       rg, result, granted, validityS, final, shortfall
 --   code:   0 ok | 1 ok (replayed stored answer) | 2 unknown or terminated session | 3 stale request
 --   result: 0 granted | 1 granted-partial + final | 2 limit reached | 3 no eligible bucket
+--           | 4 subscriber barred (suspended or terminated)
 
 local P = KEYS[1]
 local mode, sid = ARGV[1], ARGV[2]
@@ -44,6 +45,15 @@ else
   if reqNo < l then return { 3 } end
   -- A terminated session is gone: nothing may reserve quota on it again.
   if redis.call('HEXISTS', sk, 'closed') == 1 then return { 2 } end
+end
+
+-- A suspended or terminated subscriber gets no new quota or events charged.
+-- Usage already consumed is still settled. A subscriber with no profile
+-- (provisioned before profiles existed) is served.
+local barred = false
+if mode ~= 'T' then
+  local st = redis.call('HGET', P .. ':profile', 'status')
+  barred = (st == 'suspended' or st == 'terminated')
 end
 
 local expMs = now + validity * 1000 + grace
@@ -109,7 +119,9 @@ for _ = 1, nItems do
 
   -- 2. Reserve the next slice (or charge an event outright).
   local granted, result, final = 0, 0, 0
-  if mode == 'I' or mode == 'U' then
+  if barred and mode ~= 'T' then
+    result = 4
+  elseif mode == 'I' or mode == 'U' then
     local got, nd, eligible = allocate(P, kind, requested, rates, now)
     granted = got
     if got <= 0 then

@@ -58,6 +58,7 @@ message CanonicalChargingResponse {
     RESULT_TOO_BUSY = 6;
     RESULT_NO_BUCKET = 7;         // nothing eligible to charge
     RESULT_STALE_REQUEST = 8;     // request number older than the last processed
+    RESULT_BARRED = 9;            // subscriber suspended or terminated
   }
   Result result = 1;
   repeated UnitGrant grants = 2;

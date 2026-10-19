@@ -101,6 +101,7 @@ const (
 	ItemPartialFinal
 	ItemLimitReached
 	ItemNoBucket
+	ItemBarred // the subscriber is suspended or terminated
 )
 
 // ItemResult is the answer for one Item.
@@ -124,18 +125,20 @@ type Response struct {
 
 // Client talks to Redis (standalone, sentinel or cluster).
 type Client struct {
-	rdb    redis.UniversalClient
-	charge *redis.Script
-	sweep  *redis.Script
-	dur    *durabilityState
+	rdb       redis.UniversalClient
+	charge    *redis.Script
+	sweep     *redis.Script
+	provision *redis.Script
+	dur       *durabilityState
 }
 
 // New wraps an existing go-redis client.
 func New(rdb redis.UniversalClient) *Client {
 	return &Client{
-		rdb:    rdb,
-		charge: redis.NewScript(commonLua + "\n" + chargeLua),
-		sweep:  redis.NewScript(commonLua + "\n" + sweepLua),
+		rdb:       rdb,
+		charge:    redis.NewScript(commonLua + "\n" + chargeLua),
+		sweep:     redis.NewScript(commonLua + "\n" + sweepLua),
+		provision: redis.NewScript(commonLua + "\n" + provisionLua),
 	}
 }
 

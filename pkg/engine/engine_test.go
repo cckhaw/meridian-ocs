@@ -113,6 +113,7 @@ type stubStore struct {
 	started chan struct{}
 	sweeps  atomic.Int64
 	result  func(*datalayer.Request, *datalayer.Response)
+	replace bool // result builds the whole answer instead of adding to the default one
 }
 
 func (s *stubStore) Charge(_ context.Context, req *datalayer.Request, resp *datalayer.Response) error {
@@ -134,10 +135,14 @@ func (s *stubStore) Charge(_ context.Context, req *datalayer.Request, resp *data
 	}
 	resp.Code = datalayer.CodeOK
 	resp.Replication = datalayer.ReplicationNotRequested
-	if s.result != nil {
+	if s.result != nil && !s.replace {
 		s.result(req, resp)
 	}
 	resp.Items = resp.Items[:0]
+	if s.replace && s.result != nil {
+		s.result(req, resp)
+		return nil
+	}
 	for i := range req.Items {
 		resp.Items = append(resp.Items, datalayer.ItemResult{RatingGroup: req.Items[i].RatingGroup, Granted: req.Items[i].Requested, ValidityS: 30})
 	}
@@ -416,5 +421,26 @@ func TestUnreplicatedCommitsAreCounted(t *testing.T) {
 	rate(t, e, newReq(canonical.TypeUpdate, "u", "s", 2, 10, 10))
 	if got := e.Stats().Unreplicated; got != 2 {
 		t.Fatalf("%d", got)
+	}
+}
+
+func TestBarredSubscribersAreReportedAsSuch(t *testing.T) {
+	st := &stubStore{}
+	st.result = func(req *datalayer.Request, resp *datalayer.Response) {
+		for i := range req.Items {
+			resp.Items = append(resp.Items, datalayer.ItemResult{RatingGroup: req.Items[i].RatingGroup, Code: datalayer.ItemBarred})
+		}
+	}
+	// The stub appends the barred items after its default ones; use only ours.
+	st.replace = true
+	e, _ := New(Config{Workers: 1}, Deps{Store: st, Tariff: tariff})
+	defer e.Close()
+	r := rate(t, e, newReq(canonical.TypeInitial, "u", "s", 0, 100, 0))
+	if r.Result != canonical.ResultBarred || r.Grants[0].Result != canonical.ResultBarred || r.Grants[0].Granted != 0 {
+		t.Fatalf("%+v", r)
+	}
+	// Terminating is still acknowledged.
+	if r = rate(t, e, newReq(canonical.TypeTerminate, "u", "s", 1, 0, 50)); r.Result != canonical.ResultGranted {
+		t.Fatalf("%+v", r)
 	}
 }

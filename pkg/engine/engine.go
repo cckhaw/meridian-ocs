@@ -357,6 +357,7 @@ var itemResult = [...]canonical.Result{
 	datalayer.ItemPartialFinal: canonical.ResultPartialFinal,
 	datalayer.ItemLimitReached: canonical.ResultCreditLimitReached,
 	datalayer.ItemNoBucket:     canonical.ResultNoBucket,
+	datalayer.ItemBarred:       canonical.ResultBarred,
 }
 
 // fill maps the data-layer answer onto the canonical response.

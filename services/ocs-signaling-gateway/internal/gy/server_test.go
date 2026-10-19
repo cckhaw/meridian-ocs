@@ -166,6 +166,7 @@ func TestResultMappingToDiameter(t *testing.T) {
 		{canonical.ResultUnknownSession, diameter.ResultUnknownSessionID, false},
 		{canonical.ResultStaleRequest, diameter.ResultUnableToComply, false},
 		{canonical.ResultUnavailable, diameter.ResultEndUserDenied, false},
+		{canonical.ResultBarred, diameter.ResultEndUserDenied, false},
 		{canonical.ResultTooBusy, diameter.ResultTooBusy, true},
 	}
 	var current atomic.Uint32

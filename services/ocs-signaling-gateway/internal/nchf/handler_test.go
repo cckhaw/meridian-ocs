@@ -145,6 +145,7 @@ func TestPerUnitResultCodes(t *testing.T) {
 		{canonical.ResultCreditLimitReached, "QUOTA_LIMIT_REACHED", 0, false, false},
 		{canonical.ResultNoBucket, "RATING_FAILED", 0, false, false},
 		{canonical.ResultUnavailable, "END_USER_SERVICE_DENIED", 0, false, false},
+		{canonical.ResultBarred, "END_USER_SERVICE_DENIED", 0, false, false},
 	}
 	var cur canonical.UnitGrant
 	h := newHandler(t, raterFunc(func(_ context.Context, r *canonical.Request, s *canonical.Response) error {

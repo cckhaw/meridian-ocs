@@ -17,7 +17,7 @@ func unitResultCode(r canonical.Result) string {
 		return "QUOTA_LIMIT_REACHED"
 	case canonical.ResultNoBucket:
 		return "RATING_FAILED"
-	case canonical.ResultUnavailable:
+	case canonical.ResultUnavailable, canonical.ResultBarred:
 		return "END_USER_SERVICE_DENIED"
 	}
 	return "END_USER_SERVICE_REJECTED"
