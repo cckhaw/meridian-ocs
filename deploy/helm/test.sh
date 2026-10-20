@@ -123,6 +123,9 @@ grep -q 'OCS_UNSETTLED_SPOOL, value: "/var/spool/ocs"' <<<"$secure" && grep -q '
   && ok "the gateway gets the unsettled-usage spool (env and volume)" || bad "the gateway has no unsettled-usage spool"
 dev=$(helm template t . -f ci/dev.yaml --set gateway.unsettledSpool.mode=off 2>&1)
 grep -q 'OCS_UNSETTLED_SPOOL, value: "off"' <<<"$dev" && ! grep -q 'mountPath: /var/spool/ocs' <<<"$dev" && ok "mode=off renders OCS_UNSETTLED_SPOOL=off and no volume (development only)" || bad "spool off rendering"
+grep -q 'OCS_UNSETTLED_PEER_REPEATS' <<<"$secure" && bad "peer-repeats is set without being asked for" || ok "OCS_UNSETTLED_PEER_REPEATS is absent unless gateway.unsettledSpool.peerMayRepeat is true"
+rep=$(helm template t . -f ci/secure.yaml --set gateway.unsettledSpool.peerMayRepeat=true 2>&1)
+grep -q 'OCS_UNSETTLED_PEER_REPEATS, value: "true"' <<<"$rep" && ok "peerMayRepeat renders OCS_UNSETTLED_PEER_REPEATS=true" || bad "peerMayRepeat rendering"
 grep -q 'kind: StatefulSet' <<<"$secure" && grep -A3 'kind: StatefulSet' <<<"$secure" | grep -q . && ok "mediation is a StatefulSet" || bad "mediation StatefulSet"
 st=$(awk 'BEGIN{RS="---\n"} /kind: StatefulSet/' <<<"$secure")
 grep -qE '^  replicas: 1$' <<<"$st" && ok "mediation runs exactly one pod (its ledger is per output directory)" || bad "mediation replicas"

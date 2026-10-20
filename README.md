@@ -10,7 +10,7 @@ with web consoles, metrics, alert rules, a Helm chart and a one-command local st
 99.999 % availability, zero double-spend. None of these has been demonstrated yet; see
 [What is not built yet](#what-is-not-built-yet).
 
-*Last updated: 2026-10-20, after the automatic Grace → Suspended timer was added. This README is kept current with every
+*Last updated: 2026-10-20, after the refused-usage assumption was checked against RFC 4006 and made configurable. This README is kept current with every
 change: see [Keeping this up to date](#keeping-this-up-to-date).*
 
 ## Try it
@@ -73,7 +73,7 @@ mean production-ready). The list of what does not exist yet is [further down](#w
 | Helm chart | gateway, provisioning (api and worker), catalog, mediation, AI Ops; autoscaling, disruption budgets, spread, optional NetworkPolicy, ServiceMonitor, alert rules, dashboard; refuses insecure choices; values schema; checked in CI | [12](docs/architecture/12-deployment.md) |
 | Local stack | `docker-compose.yml` plus a smoke test that runs in CI | [13](docs/architecture/13-local-stack.md) |
 | Load test and reconciliation | `tools/ocs-loadgen`: seeds subscribers, drives Nchf sessions at a constant arrival rate (open loop, latency counted from when the arrival was due), then checks every balance against the usage it reported, so lost or created money fails the run; a short run is part of CI; `dev/chaos.sh` repeats it while the Redis replica or primary or the gateway is frozen, stopped or killed (development stack only, not in CI) | [14](docs/architecture/14-load-test.md) |
-| Unsettled-usage reconciler | usage reported while Redis is down (in a terminate that is still acknowledged, or in an update that is refused) is first saved to a local fsynced log and charged when Redis returns, idempotently; a refused update whose outcome was unknown and whose session has moved on is deliberately NOT charged (it could be charged twice) and left to a person; metrics, four alerts, dead letters kept; found and measured by the failure injection | [03](docs/architecture/03-rating-engine.md#usage-released-while-the-data-tier-is-down-and-its-reconciler) |
+| Unsettled-usage reconciler | usage reported while Redis is down (in a terminate that is still acknowledged, or in an update that is refused) is first saved to a local fsynced log and charged when Redis returns, idempotently; a refused update whose outcome was unknown and whose session has moved on is deliberately NOT charged (it could be charged twice) and left to a person; metrics, four alerts, dead letters kept; found and measured by the failure injection; `OCS_UNSETTLED_PEER_REPEATS` switches to the cautious rule if a peer may repeat refused usage | [03](docs/architecture/03-rating-engine.md#usage-released-while-the-data-tier-is-down-and-its-reconciler) |
 
 Architecture and decisions: [01](docs/architecture/01-system-architecture.md),
 [02](docs/architecture/02-decisions-and-failure-policy.md).
@@ -89,7 +89,7 @@ one I would build first.
   1,800 charging requests/s before shedding load. 50k TPS and P99 < 10 ms are untested on real infrastructure; the generator has no
   Diameter Gy mode and no soak, and fault injection covers five faults on the local stack only (no failover, partition or Kafka outage). **(next candidate: a run on dedicated hardware or a cluster)**
 - **Unsettled-usage reconciler gaps**: a refused update whose outcome was unknown and whose session moved on is left uncharged for a person (4 in 5
-  real-stack runs); the "never sent" rule assumes the network element does not report refused usage again under a new request number (unverified against real peers);
+  real-stack runs); the "never sent" rule assumes the network element does not report refused usage again under a new request number: supported for conforming Gy clients by RFC 4006 §9.1 and its client state machine, but 3GPP TS 32.299, Nchf and real peers were not checked, so `OCS_UNSETTLED_PEER_REPEATS=true` gives the cautious behaviour;
   the spool is node-local (an `emptyDir`: lost with the pod or node, no persistent-volume option); a replay is rated at the tariff in effect then;
   dead letters need a human; with `OCS_UNSETTLED_SPOOL=off` the usage is lost (alerted on). See [03](docs/architecture/03-rating-engine.md).
 - **No Redis Cluster support** (`WAIT` is not available on Cluster) and no Sentinel/operator integration (the address is a single endpoint).

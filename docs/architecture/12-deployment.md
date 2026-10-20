@@ -98,7 +98,7 @@ the aggregate alerts.
 
 - **Losing revenue is a stated choice too.** `gateway.unsettledSpool.mode` is required: `emptyDir` gives each gateway
   pod a volume for the usage it released while Redis was down (charged when Redis returns, [03](03-rating-engine.md#usage-released-while-the-data-tier-is-down-and-its-reconciler)),
-  `off` discards that usage and is refused unless `allowInsecure`. An `emptyDir` survives a container restart, not the loss of the pod or node.
+  `off` discards that usage and is refused unless `allowInsecure`. An `emptyDir` survives a container restart, not the loss of the pod or node. `gateway.unsettledSpool.peerMayRepeat: true` sets `OCS_UNSETTLED_PEER_REPEATS` (the cautious rule for refused updates, doc 03); it was added without rendering the chart locally (no `helm` in the sandbox), CI's `helm` job is what checks it.
 
 1. Redis (primary plus the replicas you configure) and Kafka exist, and the
    Secrets are created.

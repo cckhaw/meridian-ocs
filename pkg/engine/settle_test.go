@@ -38,6 +38,10 @@ type settleRig struct {
 }
 
 func newSettleRig(t *testing.T, balance int64) *settleRig {
+	return newSettleRigWith(t, balance, Config{})
+}
+
+func newSettleRigWith(t *testing.T, balance int64, cfg Config) *settleRig {
 	t.Helper()
 	client := datalayer.New(redistest.Start(t))
 	ctx := context.Background()
@@ -51,7 +55,8 @@ func newSettleRig(t *testing.T, balance int64) *settleRig {
 	t.Cleanup(func() { _ = spool.Close() })
 	st := &outage{Client: client}
 	br := failpolicy.NewBreaker(1, 10*time.Millisecond, nil, nil)
-	e, err := New(Config{Workers: 2}, Deps{Store: st, Tariff: tariff, Breaker: br, Unsettled: spool})
+	cfg.Workers = 2
+	e, err := New(cfg, Deps{Store: st, Tariff: tariff, Breaker: br, Unsettled: spool})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,5 +402,50 @@ func TestRefusedUpdatesWithNoUsageAreNotRecorded(t *testing.T) {
 	r.refusedUpdate(1, 0)
 	if st := r.eng.Stats(); st.UnsettledUpdates != 0 || r.spool.Stats().Pending != 0 {
 		t.Fatalf("an update that reported nothing loses nothing: %+v", st)
+	}
+}
+
+// With PeerMayRepeatUsage an update that provably never reached the data tier gets the same care as one whose
+// outcome is unknown: if the session moved past it the usage may have been reported again, so nothing is charged.
+func TestWhenPeersMayRepeatUsageANeverSentUpdateTheSessionMovedPastIsLeftToAPerson(t *testing.T) {
+	r := newSettleRigWith(t, 1_000_000, Config{PeerMayRepeatUsage: true})
+	r.rate(newReq(canonical.TypeInitial, "r1", "s", 0, 1000, 0))
+	r.store.down.Store(true)
+	r.openBreaker()
+	r.refusedUpdate(1, 700)
+	if recs := r.spool.Pending(0); len(recs) != 1 || !recs[0].Unapplied {
+		t.Fatalf("recorded as never sent, as before: %+v", recs)
+	}
+	r.store.down.Store(false)
+	r.recoverWait()
+	r.rate(newReq(canonical.TypeTerminate, "r1", "s", 2, 0, 0)) // the session carried on and ended
+	if n, err := r.pass(); err != nil || n != 0 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	recs, why := r.spool.DeadLetters()
+	if len(recs) != 1 || !containsFold(why[0], "twice") {
+		t.Fatalf("kept for a person, with the reason: %+v %v", recs, why)
+	}
+	if st := r.rec.Stats(); st.Ambiguous != 1 || st.Settled != 0 {
+		t.Fatalf("%+v", st)
+	}
+	if got := r.balance(); got != 1_000_000 {
+		t.Fatalf("nothing may be charged when the peer may have repeated it: %d", got)
+	}
+}
+
+// ... and when the session has not moved past it, nothing could have been repeated yet: it is charged.
+func TestWhenPeersMayRepeatUsageANeverSentUpdateOfASessionThatStoodStillIsStillCharged(t *testing.T) {
+	r := newSettleRigWith(t, 1_000_000, Config{PeerMayRepeatUsage: true})
+	r.rate(newReq(canonical.TypeInitial, "r1", "s", 0, 1000, 0))
+	r.store.down.Store(true)
+	r.openBreaker()
+	r.refusedUpdate(1, 700)
+	r.store.down.Store(false)
+	if n, err := r.pass(); err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if got := r.balance(); got != 1_000_000-700 {
+		t.Fatalf("balance %d, want %d", got, 1_000_000-700)
 	}
 }

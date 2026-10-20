@@ -86,6 +86,13 @@ type Config struct {
 	Validity   time.Duration // grant validity, whole seconds, default 30s
 	Grace      time.Duration // extra reservation lifetime beyond validity, default 5s
 	Now        func() time.Time
+	// PeerMayRepeatUsage says the network elements may report the usage of an update they were refused again
+	// (in a later request of the same session, under a new request number). The reconciler then treats an
+	// update that never reached the data tier like one whose outcome is unknown: it is charged only if the
+	// session has not moved past it, and otherwise kept for a person, so usage that was repeated is never charged
+	// twice at the price of sometimes not charging usage that was not. False (the default) charges it whatever
+	// the session did since; RFC 4006 §9.1 and its client state machine support that for Gy (doc 03).
+	PeerMayRepeatUsage bool
 }
 
 // Deps are the engine's collaborators. Breaker, Policy and Audit are optional.
@@ -355,7 +362,7 @@ func (w *worker) handle(j *job) {
 	mode, ok := modeOf(req.Type)
 	if j.replay && req.Type == canonical.TypeUpdate {
 		mode = datalayer.ModeLate
-		if req.Unapplied {
+		if req.Unapplied && !e.cfg.PeerMayRepeatUsage {
 			mode = datalayer.ModeLateUnapplied
 		}
 	}

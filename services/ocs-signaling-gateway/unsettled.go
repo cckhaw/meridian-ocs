@@ -33,6 +33,19 @@ func openUnsettledSpool() (*unsettled.Spool, error) {
 	}
 }
 
+// peerRepeatsUsage applies OCS_UNSETTLED_PEER_REPEATS (see engine.Config.PeerMayRepeatUsage).
+func peerRepeatsUsage() (bool, error) {
+	switch v := os.Getenv("OCS_UNSETTLED_PEER_REPEATS"); v {
+	case "", "false":
+		return false, nil
+	case "true":
+		log.Printf("ocs-signaling-gateway: OCS_UNSETTLED_PEER_REPEATS=true: usage of a refused update is not charged once its session has moved on (kept for a person instead)")
+		return true, nil
+	default:
+		return false, fmt.Errorf(`OCS_UNSETTLED_PEER_REPEATS must be "true" or "false", got %q`, v)
+	}
+}
+
 // startReconciler replays the spool against the engine until ctx is done.
 func startReconciler(ctx context.Context, s *unsettled.Spool, eng *engine.Engine, logf func(string, ...any)) *unsettled.Reconciler {
 	if s == nil {
