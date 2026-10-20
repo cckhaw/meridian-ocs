@@ -403,8 +403,17 @@ func (h *Handler) getMeta(w http.ResponseWriter, r *http.Request) {
 	for _, o := range m.Offerings {
 		offerings = append(offerings, map[string]any{"id": o.ID, "name": o.Name, "planId": o.PlanID, "allowances": len(o.Allowances)})
 	}
+	// What this caller may do, so the console shows only actions that can
+	// succeed. The server still decides every request.
+	can := map[string]bool{}
+	for name, typ := range map[string]command.Type{
+		"topUp": command.TopUp, "attachOffering": command.AttachOffering,
+		"adjustBalance": command.AdjustBalance, "changeLifecycle": command.ChangeLifecycle,
+	} {
+		can[name] = h.az.Allow(principal, typ) == nil
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"principal": principal, "currency": m.Currency, "maxTopUp": m.MaxTopUp,
-		"catalogVersion": m.CatalogVersion, "offerings": offerings})
+		"maxAdjust": h.svc.Limits().MaxAdjust, "can": can, "catalogVersion": m.CatalogVersion, "offerings": offerings})
 }
 
 // ---- responses -------------------------------------------------------------

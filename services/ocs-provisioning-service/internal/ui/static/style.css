@@ -53,3 +53,11 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .pill.active { color: var(--ok); } .pill.grace { color: var(--warn); } .pill.suspended, .pill.terminated { color: var(--bad); }
 footer { max-width: 56rem; margin: 0 auto; padding: 0 1rem 2rem; font-size: .8rem; }
 @media (max-width: 36rem) { .top { flex-direction: column; } .field.narrow { flex-basis: 100%; } }
+
+form.action { border-top: 1px solid var(--line); padding-top: .6rem; margin-top: .8rem; }
+form.action h3 { font-size: .95rem; margin: 0; }
+.action-status { min-height: 1.2rem; }
+.ok-text { color: var(--ok); font-weight: 600; }
+.checks { display: flex; gap: .5rem; align-items: center; font-weight: 400; padding: .4rem 0; }
+.checks input { width: auto; }
+button.danger { color: var(--bad); border-color: var(--bad); }

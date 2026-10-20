@@ -85,7 +85,7 @@
 
   // ---- meta (who am I, currency, offerings) -------------------------------
 
-  let meta = { currency: '', maxTopUp: 0, offerings: [] };
+  let meta = { currency: '', maxTopUp: 0, maxAdjust: 0, can: {}, offerings: [] };
 
   async function loadMeta() {
     try {
@@ -164,6 +164,192 @@
       table.append(body);
       card.append(table);
     }
+    into.append(card);
+    renderManage(into, s);
+  }
+
+  // ---- manage -------------------------------------------------------------
+
+  // Allowed lifecycle moves (the server enforces them; this only offers valid ones).
+  const NEXT = { active: ['grace', 'suspended', 'terminated'], grace: ['active', 'suspended', 'terminated'], suspended: ['active', 'terminated'], terminated: [] };
+  const attempts = new Map(); // action -> idempotency key of the attempt in progress
+  let flash = null;           // one message shown after the card refreshes
+
+  function attemptKey(name) {
+    if (!attempts.has(name)) attempts.set(name, 'ui-' + (crypto.randomUUID ? crypto.randomUUID() : rand(16)));
+    return attempts.get(name);
+  }
+
+  // perform sends one command and follows it to its outcome. The idempotency
+  // key survives only an unknown outcome (timeout, network, 5xx), so a retry
+  // cannot apply the change twice; a definite answer, or an edit to the form,
+  // starts a new attempt.
+  async function perform(name, form, method, path, body, describe) {
+    const status = $('.action-status', form);
+    const buttons = form.querySelectorAll('button');
+    buttons.forEach((b) => { b.disabled = true; });
+    status.className = 'action-status hint';
+    status.textContent = 'Working...';
+    try {
+      const acc = await api(method, path, body, attemptKey(name));
+      const rec = await waitForOutcome(acc.commandId);
+      if (!rec) {
+        status.className = 'action-status error';
+        status.textContent = 'Still being processed after 30 seconds. Press the button again to keep waiting; it will not be applied twice.';
+      } else if (rec.state === 'failed') {
+        attempts.delete(name);
+        status.className = 'action-status error';
+        status.textContent = `${rec.message || 'The request was refused.'} (${rec.outcome})`;
+      } else {
+        attempts.delete(name);
+        flash = describe(rec);
+        await viewByKey(currentKey);
+        return;
+      }
+    } catch (e) {
+      if (e.status >= 400 && e.status < 500) attempts.delete(name);
+      status.className = 'action-status error';
+      status.textContent = e.message;
+    }
+    buttons.forEach((b) => { b.disabled = false; });
+  }
+
+  let currentKey = '';
+
+  function actionForm(id, title, ...kids) {
+    const f = el('form', { class: 'action', id, novalidate: '' }, el('h3', { text: title }), ...kids,
+      el('p', { class: 'action-status hint', role: 'status', 'aria-live': 'polite' }));
+    f.addEventListener('input', () => attempts.delete(id));
+    return f;
+  }
+
+  function renderManage(into, s) {
+    currentKey = s.subscriberKey;
+    const card = el('div', { class: 'card', id: 'manage' }, el('h2', { text: 'Manage' }));
+    if (flash) {
+      card.append(el('p', { class: 'ok-text', id: 'action-flash', role: 'status', text: flash }));
+      flash = null;
+    }
+    const can = meta.can || {};
+    const key = encodeURIComponent(s.subscriberKey);
+    const base = `/v1/subscribers/${key}`;
+    if (s.status === 'terminated') {
+      card.append(el('p', { class: 'hint', text: 'This subscriber is terminated; nothing can be changed.' }));
+      into.append(card);
+      return;
+    }
+    let any = false;
+
+    if (can.topUp) {
+      any = true;
+      const amount = el('input', { id: 'act-topup-amount', inputmode: 'numeric', autocomplete: 'off', placeholder: `minor units, up to ${meta.maxTopUp}` });
+      const go = el('button', { class: 'primary', type: 'submit', id: 'act-topup', text: 'Top up' });
+      const f = actionForm('topup', 'Top up the cash balance',
+        el('div', { class: 'row' }, el('label', { class: 'field grow' }, `Amount (${meta.currency}, minor units)`, amount), go));
+      f.addEventListener('submit', (ev) => {
+        ev.preventDefault();
+        const v = amount.value.trim();
+        const st = $('.action-status', f);
+        if (!/^[0-9]{1,15}$/.test(v) || Number(v) < 1 || (meta.maxTopUp && Number(v) > meta.maxTopUp)) {
+          st.className = 'action-status error';
+          st.textContent = `Enter a whole number between 1 and ${meta.maxTopUp}.`;
+          return;
+        }
+        perform('topup', f, 'POST', `${base}/top-ups`, { amountMinorUnits: Number(v), currency: meta.currency },
+          (rec) => `Topped up ${v} ${meta.currency} (minor units). Cash balance is now ${rec.balance}.`);
+      });
+      card.append(f);
+    }
+
+    if (can.attachOffering && meta.offerings.length) {
+      any = true;
+      const sel = el('select', { id: 'act-offering' });
+      for (const o of meta.offerings) {
+        sel.append(el('option', { value: o.id, text: (o.name ? `${o.name} (${o.id})` : o.id) + (o.id === s.offering ? ' - current' : '') }));
+      }
+      if (s.offering) sel.value = s.offering;
+      const renew = el('input', { type: 'checkbox', id: 'act-offering-renew' });
+      const go = el('button', { class: 'primary', type: 'submit', id: 'act-offering-go', text: 'Change offering' });
+      const f = actionForm('offering', 'Change the product offering',
+        el('div', { class: 'row' }, el('label', { class: 'field grow' }, 'Offering', sel), go),
+        el('label', { class: 'checks' }, renew, el('span', { text: 'Top up allowances that already exist to the offering\'s amount' })),
+        el('p', { class: 'hint', text: 'Sets the price plan and creates the offering\'s allowance buckets. Existing buckets are kept.' }));
+      f.addEventListener('submit', (ev) => {
+        ev.preventDefault();
+        perform('offering', f, 'POST', `${base}/offering`, { offering: sel.value, renew: renew.checked },
+          () => `Offering is now ${sel.value}.`);
+      });
+      card.append(f);
+    }
+
+    if (can.adjustBalance) {
+      any = true;
+      const bucket = el('select', { id: 'act-adjust-bucket' });
+      for (const b of s.buckets) bucket.append(el('option', { value: b.id, text: `${b.id} (${b.kind === 'any' ? 'money' : b.kind})` }));
+      if (s.buckets.some((b) => b.id === 'cash')) bucket.value = 'cash'; // the common correction
+      const delta = el('input', { id: 'act-adjust-delta', inputmode: 'numeric', autocomplete: 'off', placeholder: 'e.g. -250 or 500' });
+      const reason = el('input', { id: 'act-adjust-reason', autocomplete: 'off', maxlength: '256', placeholder: 'why this correction is needed' });
+      const go = el('button', { type: 'submit', id: 'act-adjust', text: 'Apply correction' });
+      const f = actionForm('adjust', 'Correct a balance',
+        el('div', { class: 'row' }, el('label', { class: 'field narrow' }, 'Bucket', bucket),
+          el('label', { class: 'field narrow' }, 'Change (+ adds, - removes)', delta)),
+        el('div', { class: 'row' }, el('label', { class: 'field grow' }, 'Reason (kept in the audit trail)', reason), go),
+        el('p', { class: 'hint', text: `Corrections of up to ${meta.maxAdjust} units. Money is in minor units.` }));
+      f.addEventListener('submit', (ev) => {
+        ev.preventDefault();
+        const st = $('.action-status', f);
+        const d = delta.value.trim();
+        let msg = '';
+        if (!s.buckets.length) msg = 'This subscriber has no buckets.';
+        else if (!/^[+-]?[0-9]{1,15}$/.test(d) || Number(d) === 0) msg = 'Enter a non-zero whole number.';
+        else if (meta.maxAdjust && Math.abs(Number(d)) > meta.maxAdjust) msg = `The largest correction is ${meta.maxAdjust}.`;
+        else if (!reason.value.trim()) msg = 'A reason is required.';
+        if (msg) { st.className = 'action-status error'; st.textContent = msg; return; }
+        perform('adjust', f, 'POST', `${base}/adjustments`,
+          { bucketId: bucket.value, delta: Number(d), currency: meta.currency, reason: reason.value.trim() },
+          (rec) => `Bucket ${bucket.value} changed by ${Number(d)}; balance is now ${rec.balance}.`);
+      });
+      card.append(f);
+    }
+
+    if (can.changeLifecycle && NEXT[s.status] && NEXT[s.status].length) {
+      any = true;
+      const target = el('select', { id: 'act-lifecycle-target' });
+      for (const t of NEXT[s.status]) target.append(el('option', { value: t, text: t }));
+      const graceUntil = el('input', { id: 'act-lifecycle-grace', type: 'datetime-local' });
+      const graceField = el('label', { class: 'field narrow', hidden: true }, 'Grace until (optional)', graceUntil);
+      const reason = el('input', { id: 'act-lifecycle-reason', autocomplete: 'off', maxlength: '256' });
+      const confirm = el('input', { id: 'act-lifecycle-confirm', autocomplete: 'off', placeholder: s.subscriberKey });
+      const confirmField = el('label', { class: 'field grow', hidden: true }, 'Type the subscriber key to confirm termination. This cannot be undone.', confirm);
+      const go = el('button', { type: 'submit', id: 'act-lifecycle-go', text: 'Change status' });
+      const sync = () => {
+        graceField.hidden = target.value !== 'grace';
+        confirmField.hidden = target.value !== 'terminated';
+        go.className = target.value === 'terminated' ? 'danger' : '';
+      };
+      target.addEventListener('change', sync);
+      sync();
+      const f = actionForm('lifecycle', `Change status (now ${s.status})`,
+        el('div', { class: 'row' }, el('label', { class: 'field narrow' }, 'New status', target), graceField,
+          el('label', { class: 'field grow' }, 'Reason (optional)', reason)),
+        el('div', { class: 'row' }, confirmField, go),
+        el('p', { class: 'hint', text: 'Suspended and terminated subscribers get no new quota; termination is final.' }));
+      f.addEventListener('submit', (ev) => {
+        ev.preventDefault();
+        const st = $('.action-status', f);
+        if (target.value === 'terminated' && confirm.value.trim() !== s.subscriberKey) {
+          st.className = 'action-status error';
+          st.textContent = 'Type the subscriber key exactly to confirm termination.';
+          return;
+        }
+        const body = { target: target.value, reason: reason.value.trim() };
+        if (target.value === 'grace' && graceUntil.value) body.graceUntil = new Date(graceUntil.value).toISOString();
+        perform('lifecycle', f, 'POST', `${base}/lifecycle`, body, (rec) => `Status changed from ${rec.from} to ${rec.to}.`);
+      });
+      card.append(f);
+    }
+
+    if (!any) card.append(el('p', { class: 'hint', text: 'Your certificate allows looking subscribers up only; it does not allow changes.' }));
     into.append(card);
   }
 

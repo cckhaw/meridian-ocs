@@ -72,6 +72,55 @@ await page.click('#find-submit');
 await page.waitForSelector('#find-result .card');
 check((await page.textContent('#find-result')).includes('IMSI ' + imsi), 'find by IMSI');
 
+// ---- manage the subscriber: top up, correct, change offering, lifecycle
+const posts = [];
+page.on('request', (r) => { if (r.method() === 'POST') posts.push(new URL(r.url()).pathname); });
+const cashLine = async () => (await page.textContent('#find-result table')).replace(/\s+/g, ' ');
+check(await page.locator('#manage form.action').count() === 4, 'the manage card offers top-up, offering, correction and lifecycle');
+const before = posts.length;
+await page.fill('#act-topup-amount', 'abc');
+await page.click('#act-topup');
+check((await page.textContent('#topup .action-status')).includes('whole number') && posts.length === before, 'a bad top-up amount is refused in the page and nothing is sent');
+await page.fill('#act-topup-amount', '250');
+await page.click('#act-topup');
+await page.waitForSelector('#action-flash');
+check((await page.textContent('#action-flash')).includes('Cash balance is now 1750'), 'top-up reports the new cash balance');
+check((await cashLine()).includes('1750'), 'the card shows the new balance');
+await page.screenshot({ path: `${shots}/console-manage.png` });
+
+await page.fill('#act-adjust-delta', '-50');
+await page.click('#act-adjust');
+check((await page.textContent('#adjust .action-status')).includes('reason'), 'a correction without a reason is refused in the page');
+await page.fill('#act-adjust-reason', 'goodwill reversal');
+await page.click('#act-adjust');
+await page.waitForFunction(() => document.querySelector('#action-flash') && document.querySelector('#action-flash').textContent.includes('1700'));
+check((await cashLine()).includes('1700'), 'a correction changes the balance and is shown');
+
+await page.selectOption('#act-offering', 'basic-offer');
+await page.click('#act-offering-go');
+await page.waitForFunction(() => document.querySelector('#action-flash') && document.querySelector('#action-flash').textContent.includes('Offering is now'), null, { timeout: 8000 }).catch(async () => { console.log('OFFERING STATUS:', await page.textContent('#offering .action-status')); });
+check((await page.textContent('#find-result')).includes('Offering is now basic-offer'), 'changing the offering is confirmed and shown on the card');
+
+await page.selectOption('#act-lifecycle-target', 'suspended');
+await page.fill('#act-lifecycle-reason', 'fraud check');
+await page.click('#act-lifecycle-go');
+await page.waitForFunction(() => document.querySelector('#find-result .pill.suspended'));
+check((await page.textContent('#action-flash')).includes('from active to suspended'), 'suspending is confirmed');
+check((await page.locator('#act-lifecycle-target option').allTextContents()).join() === 'active,terminated', 'only the valid next states are offered from suspended');
+
+await page.selectOption('#act-lifecycle-target', 'terminated');
+check(await page.locator('#act-lifecycle-confirm').isVisible(), 'termination asks for the subscriber key');
+const sentBefore = posts.length;
+await page.fill('#act-lifecycle-confirm', 'wrong');
+await page.click('#act-lifecycle-go');
+check((await page.textContent('#lifecycle .action-status')).includes('exactly') && posts.length === sentBefore, 'termination with the wrong key sends nothing');
+const key = (await page.textContent('#find-result h2')).split(' ')[0];
+await page.fill('#act-lifecycle-confirm', key);
+await page.click('#act-lifecycle-go');
+await page.waitForFunction(() => document.querySelector('#find-result .pill.terminated'));
+check((await page.textContent('#manage')).includes('terminated; nothing can be changed') && (await page.locator('#manage form').count()) === 0, 'a terminated subscriber offers no actions');
+await page.screenshot({ path: `${shots}/console-terminated.png` });
+
 // ---- not found
 await page.selectOption('#find-type', 'msisdn');
 await page.fill('#find-value', '49179999999999');
