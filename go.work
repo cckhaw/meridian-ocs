@@ -9,4 +9,5 @@ use (
 	./services/ocs-provisioning-service
 	./services/ocs-rating-engine
 	./services/ocs-signaling-gateway
+	./tools/ocs-loadgen
 )

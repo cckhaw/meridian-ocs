@@ -21,7 +21,7 @@ state the code is not in. With **every** pull request that adds, changes or remo
 - Delivery is one module per pull request, on the designated branch, with CI green before merge.
 - Run `make fmt vet build test` (with `OCS_REQUIRE_REDIS=1` and a local `redis-server`) before pushing;
   `deploy/helm/test.sh` when the chart, rules or dashboard change; `dev/smoke.sh` against
-  `docker compose up` when the stack changes.
+  `docker compose up` when the stack changes, and `make loadtest` (balances must reconcile) when the charging path changes.
 - No silent security defaults: an authentication mode must be chosen explicitly; `off` is for development.
 - Prove guarantees with a test that fails when the guarantee is broken (mutation check), not only with a
   test that passes.
