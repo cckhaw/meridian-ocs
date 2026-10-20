@@ -19,7 +19,7 @@ versioned tariff catalog, provisions subscribers asynchronously, and mediates of
 | 5G Nchf adapter + OAuth2 | done | `services/ocs-signaling-gateway/internal/nchf`, `internal/oauth` | [05](docs/architecture/05-nchf-adapter.md) |
 | Subscriber identity mapping | done | `pkg/identity` | [06](docs/architecture/06-identity-mapping.md) |
 | Durability (replica-acknowledged commits) | done | `pkg/datalayer/durability.go` | [07](docs/architecture/07-durability.md) |
-| Provisioning & lifecycle, subscriber lookup by MSISDN/IMSI/NAI, web console (find, create) | done | `services/ocs-provisioning-service` | [08](docs/architecture/08-provisioning.md) |
+| Provisioning & lifecycle, subscriber lookup by MSISDN/IMSI/NAI, web console (find, create, top-up, offering, correction, lifecycle) | done | `services/ocs-provisioning-service` | [08](docs/architecture/08-provisioning.md) |
 | Tariff catalog + per-subscriber plans (offerings), catalog editor web UI | done | `pkg/catalog`, `services/ocs-catalog-service`, `attach_offering` in provisioning | [09](docs/architecture/09-catalog.md), [08](docs/architecture/08-provisioning.md) |
 | Offline CDR mediation | done (BER mapping unverified) | `services/ocs-mediation-pipeline` | [10](docs/architecture/10-mediation.md) |
 | Multi-region active-active | design only | doc 01 §6 | |
@@ -166,9 +166,9 @@ Honest list; each module doc has the detail.
   no OpenTelemetry/traces, and provisioning and catalog expose no metrics.
 - **BER CDR field mapping** (PGW-CDR) comes from the specification as recalled and must be verified
   against real network files before use; no SMF-CDR mapping.
-- **The web console** covers finding a subscriber and creating one (with offering and top-up). It has no login
-  of its own (browser client certificates), and no screens yet for top-ups, lifecycle changes, offering
-  changes or usage history. The catalog editor is separate (on the catalog service) and has no approval workflow.
+- **The web console** covers finding and creating subscribers, top-up, offering change, balance correction and
+  lifecycle change. It has no login of its own (browser client certificates), no bundle/bucket screens, no
+  approval step for corrections or termination, and no usage history. The catalog editor is separate (on the catalog service) and has no approval workflow.
 - **Kafka connections are plaintext** (no TLS/SASL), no SFTP pull for CDR files, no ClickHouse/S3 sink.
 - **No automatic Grace → Suspended timer**, no reconciler for usage that could not be settled during
   an outage, and no profile cache feeding the postpaid fail-open path.

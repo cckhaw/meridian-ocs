@@ -102,7 +102,8 @@ Because a lookup by phone number reads personal data, two rules apply:
 ### Web console
 
 `/ui/` serves a single-page console (plain HTML, CSS and JavaScript embedded in
-the binary; no build step, no third-party code) with two sections:
+the binary; no build step, no third-party code) with two sections, and a **Manage**
+card under every subscriber found:
 
 - **Find subscriber**: search by MSISDN, IMSI or NAI; shows status, payment
   type, offering, identifiers and buckets with readable units.
@@ -113,6 +114,20 @@ the binary; no build step, no third-party code) with two sections:
   offering, top up), follows each to its outcome, shows the server's reason when
   one fails, and offers **Retry**. Each submission has one idempotency key base,
   so a retry never applies a step twice.
+
+- **Manage** (shown only for actions the caller's certificate may perform;
+  `GET /v1/meta` returns `can` and the limits, and the server still decides each
+  request): *Top up* the cash balance; *Change the product offering* (with the
+  option to renew existing allowances); *Correct a balance* (privileged: any
+  bucket, signed amount, mandatory reason kept in the audit trail, bounded by the
+  adjustment limit); *Change status* (privileged: only the valid next states are
+  offered; grace takes an optional deadline; **termination is final and needs the
+  subscriber key typed in**). A terminated subscriber shows no actions. Each action
+  sends one command and follows it to its outcome. Its idempotency key is kept only
+  while the outcome is unknown (timeout, network error, 5xx), so pressing the button
+  again cannot apply it twice, and is dropped after a definite answer or an edit of
+  the form (a new decision is a new request). The card refreshes from the hot store
+  after each change and says what happened.
 
 How it is secured: it is served by the same listener as the API, so it sits
 behind the same mTLS client-certificate authentication and the same
@@ -135,7 +150,9 @@ The console is checked in a real Chromium with Playwright:
 `OCS_UI_DEV_ADDR=127.0.0.1:8443 go test -run ServeConsoleForManualTesting
 -timeout 1h ./services/ocs-provisioning-service`, which serves the console on an
 in-memory stack with authentication off). It checks validation, a full create
-with offering and top-up, find by MSISDN (typed with `+` and a space) and by
+with offering and top-up, every Manage action (bad input refused in the page with
+nothing sent, top-up, correction needing a reason, offering change, suspend, the
+wrong key refused for termination, termination leaving no actions), find by MSISDN (typed with `+` and a space) and by
 IMSI, not-found, a duplicate MSISDN refused with the reason, markup shown as
 text, no console errors or CSP violations, and no horizontal scrolling at phone
 width. Light, dark and phone layouts were looked at.
@@ -245,7 +262,9 @@ Durability env (replica `WAIT`) is shared with the gateway through
 - Events are at least once, not exactly once.
 - Offering changes reach gateways after their profile cache expires (no push invalidation), and a subscriber cannot be moved to another offering without also creating that offering's allowances (no 'switch plan only' command).
 - The console has no login of its own (it relies on browser client certificates; a production deployment
-  would normally put SSO/OIDC in front), and covers only find and create: no top-up, lifecycle change or
-  offering change screens, no list or search by name, and no transaction or usage history.
+  would normally put SSO/OIDC in front). It covers find, create, top-up, offering change, balance
+  correction and lifecycle change, but not bundles or removing/reloading single buckets, no list or
+  search by name, no bulk actions, no two-person approval for corrections or termination, and no
+  transaction or usage history.
 - Lookup by identifier shows balances and identifiers but not sessions, usage or ledger entries.
 - Reads by key are not logged (lookups by identifier are).

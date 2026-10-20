@@ -488,6 +488,27 @@ func TestMetaDescribesTheDeployment(t *testing.T) {
 	}
 }
 
+// The console shows only the actions the caller can perform; the server still
+// decides each request (TestAuthorisationPerOperation).
+func TestMetaSaysWhatTheCallerMayDo(t *testing.T) {
+	g := newRig(t, auth.New([]string{"crm"}, []string{"care"}))
+	can := func(who string) map[string]any {
+		w := g.do("GET", "/v1/meta", "", "", who)
+		m := obj(t, w)
+		c, _ := m["can"].(map[string]any)
+		if w.Code != 200 || c == nil || m["maxAdjust"] != float64(5000) {
+			t.Fatalf("%s: %d %v", who, w.Code, m)
+		}
+		return c
+	}
+	if c := can("crm"); c["topUp"] != true || c["attachOffering"] != true || c["adjustBalance"] != false || c["changeLifecycle"] != false {
+		t.Fatalf("crm: %v", c)
+	}
+	if c := can("care"); c["topUp"] != true || c["adjustBalance"] != true || c["changeLifecycle"] != true {
+		t.Fatalf("care: %v", c)
+	}
+}
+
 func TestStateChangesFromAnotherOriginAreRefused(t *testing.T) {
 	g := newRig(t, auth.Off())
 	body := `{"subscriberKey":"acct-1","paymentType":"prepaid","identifiers":[{"type":"msisdn","value":"491701234567"}]}`
