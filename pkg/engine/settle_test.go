@@ -221,7 +221,181 @@ func TestSettleNeverUsesTheFailPolicyAndRespectsTheBreaker(t *testing.T) {
 	if _, err := e.Settle(context.Background(), req); err == nil || st.calls.Load() != calls {
 		t.Fatal("an open breaker must stop replays from hitting the data tier")
 	}
-	if _, err := e.Settle(context.Background(), newReq(canonical.TypeUpdate, "u", "s", 1, 10, 10)); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("only terminates can be replayed: %v", err)
+	for _, typ := range []canonical.RequestType{canonical.TypeInitial, canonical.TypeEvent} {
+		if _, err := e.Settle(context.Background(), newReq(typ, "u", "s", 1, 10, 10)); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("only a terminate or a refused update can be replayed (type %d): %v", typ, err)
+		}
+	}
+}
+
+// ---- refused updates ---------------------------------------------------------------------------
+
+// recoverWait lets the circuit breaker's probe interval pass after the data tier comes back.
+func (r *settleRig) recoverWait() { time.Sleep(30 * time.Millisecond) }
+
+// openBreaker makes a failing call so the breaker opens: later calls are known never to have been sent.
+func (r *settleRig) openBreaker() {
+	r.t.Helper()
+	r.rate(newReq(canonical.TypeInitial, "r1", "prime", 0, 10, 0))
+	if !r.eng.deps.Breaker.Open() {
+		r.t.Fatal("the breaker should be open")
+	}
+}
+
+func (r *settleRig) refusedUpdate(no uint32, used int64) {
+	r.t.Helper()
+	resp := r.rate(newReq(canonical.TypeUpdate, "r1", "s", no, 1000, used))
+	if resp.Result == canonical.ResultGranted && resp.Grants[0].Granted > 0 {
+		r.t.Fatalf("the update should have been refused: %+v", resp)
+	}
+}
+
+func TestUsageOfAnUpdateRefusedBeforeItWasSentIsChargedEvenIfTheSessionMovedOn(t *testing.T) {
+	r := newSettleRig(t, 1_000_000)
+	r.rate(newReq(canonical.TypeInitial, "r1", "s", 0, 1000, 0))
+	r.store.down.Store(true)
+	r.openBreaker()
+	r.refusedUpdate(1, 700) // the breaker is open: it never reached Redis
+	st := r.eng.Stats()
+	if st.UnsettledUpdates != 1 || st.UnsettledRecorded != 1 || st.UnsettledUnrecorded != 0 {
+		t.Fatalf("the refused update's usage must be on record: %+v", st)
+	}
+	if recs := r.spool.Pending(0); len(recs) != 1 || !recs[0].IsUpdate() || !recs[0].Unapplied || recs[0].Units[0].Used != 700 {
+		t.Fatalf("recorded as a never-sent update: %+v", recs)
+	}
+
+	// Redis returns. The network element, refused, ends the session without re-reporting what it measured.
+	r.store.down.Store(false)
+	r.recoverWait()
+	r.rate(newReq(canonical.TypeTerminate, "r1", "s", 2, 0, 0))
+	if got := r.balance(); got != 1_000_000 {
+		t.Fatalf("setup: the unreported 700 has been refunded with the reservation: %d", got)
+	}
+	if n, err := r.pass(); err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if got := r.balance(); got != 1_000_000-700 {
+		t.Fatalf("the usage must be charged: balance %d, want %d", got, 1_000_000-700)
+	}
+	// The reconciler restarting and submitting it again charges nothing more.
+	_ = r.spool.Record(reqFor(canonical.TypeUpdate, 1, 700, true))
+	if _, err := r.pass(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.balance(); got != 1_000_000-700 {
+		t.Fatalf("a second submission charged again: %d", got)
+	}
+}
+
+func reqFor(typ canonical.RequestType, no uint32, used int64, unapplied bool) *canonical.Request {
+	q := newReq(typ, "r1", "s", no, 1000, used)
+	q.Unapplied = unapplied
+	return q
+}
+
+func TestUsageOfAnUpdateWhoseOutcomeIsUnknownIsChargedWhenTheSessionHasNotMovedOn(t *testing.T) {
+	r := newSettleRig(t, 1_000_000)
+	r.rate(newReq(canonical.TypeInitial, "r1", "s", 0, 1000, 0))
+	r.store.down.Store(true)
+	r.refusedUpdate(1, 700) // a call was made and failed: it may or may not have been applied
+	if recs := r.spool.Pending(0); len(recs) != 1 || recs[0].Unapplied {
+		t.Fatalf("an attempted call is recorded as unknown, not as never sent: %+v", recs)
+	}
+	r.store.down.Store(false)
+	if n, err := r.pass(); err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if got := r.balance(); got != 1_000_000-700 {
+		t.Fatalf("700 used of the 1000 reserved: balance %d, want %d", got, 1_000_000-700)
+	}
+	// The network element retries the very request that was refused. It must not charge the usage again: it is
+	// answered with the refusal it first got.
+	resp := r.rate(newReq(canonical.TypeUpdate, "r1", "s", 1, 1000, 700))
+	if resp.Grants[0].Granted != 0 {
+		t.Fatalf("a retry of a request already settled late is answered with its refusal: %+v", resp)
+	}
+	if got := r.balance(); got != 1_000_000-700 {
+		t.Fatalf("the retry charged again: %d", got)
+	}
+}
+
+func TestAnUpdateThatDidReachRedisIsNotChargedTwice(t *testing.T) {
+	r := newSettleRig(t, 1_000_000)
+	r.rate(newReq(canonical.TypeInitial, "r1", "s", 0, 1000, 0))
+	r.rate(newReq(canonical.TypeUpdate, "r1", "s", 1, 1000, 700)) // applied for real; its answer is "lost"
+	want := r.balance()                                           // 700 charged, a new 1000 reserved
+	if want != 1_000_000-700-1000 {
+		t.Fatalf("setup: %d", want)
+	}
+	if err := r.spool.Record(reqFor(canonical.TypeUpdate, 1, 700, false)); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := r.pass(); err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if got := r.balance(); got != want {
+		t.Fatalf("an update the data tier had already applied was charged again: %d, want %d", got, want)
+	}
+}
+
+func TestAnAmbiguousUpdateTheSessionHasMovedPastIsLeftToAPerson(t *testing.T) {
+	r := newSettleRig(t, 1_000_000)
+	r.rate(newReq(canonical.TypeInitial, "r1", "s", 0, 1000, 0))
+	r.store.down.Store(true)
+	r.refusedUpdate(1, 700) // outcome unknown
+	r.store.down.Store(false)
+	r.recoverWait()
+	r.rate(newReq(canonical.TypeTerminate, "r1", "s", 2, 0, 0)) // the session carried on and ended
+	if n, err := r.pass(); err != nil || n != 0 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	recs, why := r.spool.DeadLetters()
+	if len(recs) != 1 || !recs[0].IsUpdate() || !containsFold(why[0], "twice") {
+		t.Fatalf("it must be kept, with the reason: %+v %v", recs, why)
+	}
+	if st := r.rec.Stats(); st.Ambiguous != 1 || st.Dead != 0 || st.Settled != 0 {
+		t.Fatalf("%+v", st)
+	}
+	if got := r.balance(); got != 1_000_000 {
+		t.Fatalf("nothing may be charged when it could be charged twice: %d", got)
+	}
+}
+
+func containsFold(s, sub string) bool {
+	return len(s) >= len(sub) && (func() bool {
+		for i := 0; i+len(sub) <= len(s); i++ {
+			if s[i:i+len(sub)] == sub {
+				return true
+			}
+		}
+		return false
+	})()
+}
+
+func TestAnUpdateOfASessionThatIsGoneIsADeadLetter(t *testing.T) {
+	r := newSettleRig(t, 1_000_000)
+	r.store.down.Store(true)
+	r.openBreaker()
+	resp := r.rate(newReq(canonical.TypeUpdate, "r1", "ghost", 3, 1000, 300))
+	_ = resp
+	r.store.down.Store(false)
+	if _, err := r.pass(); err != nil {
+		t.Fatal(err)
+	}
+	if st := r.rec.Stats(); st.Dead != 1 || st.Ambiguous != 0 || r.spool.Stats().Pending != 0 {
+		t.Fatalf("%+v", st)
+	}
+	if got := r.balance(); got != 1_000_000 {
+		t.Fatalf("%d", got)
+	}
+}
+
+func TestRefusedUpdatesWithNoUsageAreNotRecorded(t *testing.T) {
+	r := newSettleRig(t, 1_000_000)
+	r.rate(newReq(canonical.TypeInitial, "r1", "s", 0, 1000, 0))
+	r.store.down.Store(true)
+	r.refusedUpdate(1, 0)
+	if st := r.eng.Stats(); st.UnsettledUpdates != 0 || r.spool.Stats().Pending != 0 {
+		t.Fatalf("an update that reported nothing loses nothing: %+v", st)
 	}
 }

@@ -56,7 +56,7 @@ func TestUnsettledMetricsAreExposed(t *testing.T) {
 	_, _ = reg.WriteTo(&out)
 	for _, want := range []string{
 		"ocs_unsettled_pending 1", "ocs_unsettled_oldest_age_seconds ", "ocs_unsettled_dead_letters 0", "ocs_unsettled_settled_total 0",
-		"ocs_unsettled_dead_total 0", "ocs_unsettled_deferred_total 0", "ocs_engine_unsettled_recorded_total 0", "ocs_engine_unsettled_unrecorded_total 0",
+		"ocs_unsettled_dead_total 0", "ocs_unsettled_ambiguous_total 0", "ocs_engine_unsettled_updates_total 0", "ocs_unsettled_deferred_total 0", "ocs_engine_unsettled_recorded_total 0", "ocs_engine_unsettled_unrecorded_total 0",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("missing %q in:\n%s", want, out.String())

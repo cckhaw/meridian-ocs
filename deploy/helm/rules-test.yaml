@@ -30,9 +30,24 @@ tests:
         exp_alerts:
           - exp_labels: {severity: warning}
             exp_annotations:
-              summary: "Sessions were released while the data tier was down; their last usage awaits charging"
-              description: "A terminate arrived while Redis was unavailable and was acknowledged. Its usage is kept in the gateway's spool and is charged when Redis returns; OcsUnsettledUsageBacklog and OcsUnsettledUsageLost say if that is not happening."
+              summary: "Usage was reported while the data tier was down; it awaits charging"
+              description: "A terminate or an update arrived while Redis was unavailable and was acknowledged or refused. Its usage is kept in the gateway's spool and is charged when Redis returns; OcsUnsettledUsageBacklog and OcsUnsettledUsageLost say if that is not happening."
       - {eval_time: 20m, alertname: OcsUsageNotSettled, exp_alerts: []}
+
+  - name: usage in refused updates alone raises the same alert
+    interval: 1m
+    input_series:
+      - series: 'ocs_engine_unsettled_updates_total{pod="g0"}'
+        values: '0+0x5 0+1x3 3+0x10'
+    alert_rule_test:
+      - {eval_time: 4m, alertname: OcsUsageNotSettled, exp_alerts: []}
+      - eval_time: 7m
+        alertname: OcsUsageNotSettled
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Usage was reported while the data tier was down; it awaits charging"
+              description: "A terminate or an update arrived while Redis was unavailable and was acknowledged or refused. Its usage is kept in the gateway's spool and is charged when Redis returns; OcsUnsettledUsageBacklog and OcsUnsettledUsageLost say if that is not happening."
 
   - name: unsettled usage is not draining
     interval: 1m
@@ -49,6 +64,22 @@ tests:
             exp_annotations:
               summary: "Usage released without being charged has been waiting for over 10 minutes"
               description: "The reconciler is not draining the gateway's spool: Redis is still unavailable, the circuit breaker is held open, or replays are failing. The usage is on disk and will be charged once it can be."
+
+  - name: a refused update's usage left to a person
+    interval: 1m
+    input_series:
+      - series: 'ocs_unsettled_ambiguous_total{pod="g0"}'
+        values: '0+0x3 0+1x2 2+0x15'
+    alert_rule_test:
+      - {eval_time: 2m, alertname: OcsUnsettledUsageAmbiguous, exp_alerts: []}
+      - eval_time: 6m
+        alertname: OcsUnsettledUsageAmbiguous
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Usage in a refused update was left uncharged because charging it could charge twice"
+              description: "An update was refused while the data tier was down and its outcome was unknown; the session has since moved on, and the network element may have reported that usage again. The record is kept as a dead letter in the gateway's spool; a person decides."
+      - {eval_time: 19m, alertname: OcsUnsettledUsageAmbiguous, exp_alerts: []}
 
   - name: unsettled usage that can no longer be recovered
     interval: 1m

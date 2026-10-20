@@ -3,12 +3,23 @@
 -- session state and the answer, all in one script.
 --
 -- KEYS[1] = subscriber prefix
--- ARGV: mode (I|U|T|E), sid, reqNo, nowMs, validityS, graceMs, nItems,
+-- ARGV: mode (I|U|T|E|L|N), sid, reqNo, nowMs, validityS, graceMs, nItems,
 --       then per item: rg, kind, requested, used, nRates, (cls, num, den) * nRates
 --
 -- Reply (flat integers): code, nItems, then per item
 --       rg, result, granted, validityS, final, shortfall
 --   code:   0 ok | 1 ok (replayed stored answer) | 2 unknown or terminated session | 3 stale request
+--
+-- Modes L and N settle the usage of an UPDATE that was refused while the data tier was down, after the fact. They
+-- settle the open reservation of the rating group against the reported usage (charging what exceeds it, as an
+-- update does) but reserve nothing; the answer stored for the request is a refusal. Both are idempotent: a marker
+-- key (P:late:<sid>:<reqNo>) makes a second submission a no-op.
+--   N  the request never reached the data tier (circuit breaker open, connection never made). Applied whatever
+--      request number the session has reached since: the usage was reported once, to us, and nowhere else.
+--   L  the outcome of the original call is unknown (it may have been applied). Applied only if no request with
+--      that number or a later one has been processed (reqNo > last); if the session is already at that number the
+--      original was applied (nothing to charge); if it moved past it the usage may have been reported again, so
+--      nothing is charged (code 3) and a person decides.
 --   result: 0 granted | 1 granted-partial + final | 2 limit reached | 3 no eligible bucket
 --           | 4 subscriber barred (suspended or terminated)
 
@@ -33,11 +44,16 @@ end
 
 -- Idempotency: (session, request number) mutates state at most once.
 local last = redis.call('HGET', sk, 'last')
+local late = (mode == 'L' or mode == 'N')
+local marker = P .. ':late:' .. sid .. ':' .. fmt(reqNo)
+if late and redis.call('EXISTS', marker) == 1 then return { 1, 0 } end
 if mode == 'I' or mode == 'E' then
   if last then
     if tonumber(last) == reqNo then return replay() end
     return { 3 }
   end
+elseif mode == 'N' then
+  if not last then return { 2 } end
 else
   if not last then return { 2 } end
   local l = tonumber(last)
@@ -91,7 +107,7 @@ for _ = 1, nItems do
   local reserved = 0
 
   -- 1. Settle the previous reservation for this rating group.
-  if mode == 'U' or mode == 'T' then
+  if mode == 'U' or mode == 'T' or late then
     local debits = {}
     local resId = redis.call('HGET', sk, 'r:' .. rg)
     if resId then
@@ -134,6 +150,8 @@ for _ = 1, nItems do
       redis.call('ZADD', P .. ':rx', expMs, resId)
       redis.call('HSET', sk, 'r:' .. rg, resId)
     end
+  elseif late then
+    result = 2 -- nothing is reserved: a retransmission of this request is answered with the refusal it first got
   elseif mode == 'E' then
     local got, nd, eligible = allocate(P, kind, requested, rates, now)
     if got < requested then
@@ -145,7 +163,7 @@ for _ = 1, nItems do
   end
 
   if committed then
-    ledger(P, 'type', (mode == 'E') and 'event' or 'settle', 'sid', sid, 'rg', rg,
+    ledger(P, 'type', (mode == 'E') and 'event' or (late and 'late' or 'settle'), 'sid', sid, 'rg', rg,
            'used', fmt(mode == 'E' and granted or used), 'reserved', fmt(reserved),
            'shortfall', fmt(shortfall), 'dbt', enc_debits(committed), 'at', fmt(now))
   end
@@ -162,9 +180,12 @@ end
 -- 3. Persist session state and the stored answer.
 local packed = {}
 for i = 1, #out do packed[i] = fmt(out[i]) end
-redis.call('HSET', sk, 'last', fmt(reqNo), 'ans', table.concat(packed, ','))
+if mode ~= 'N' or reqNo > tonumber(last) then
+  redis.call('HSET', sk, 'last', fmt(reqNo), 'ans', table.concat(packed, ','))
+end
 if mode == 'T' then redis.call('HSET', sk, 'closed', '1') end
 local ttl = (mode == 'T' or mode == 'E') and 3600000 or (validity * 1000 + grace + 3600000)
 redis.call('PEXPIRE', sk, ttl)
+if late then redis.call('SET', marker, '1', 'PX', ttl) end
 
 return out

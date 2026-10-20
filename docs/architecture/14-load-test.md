@@ -56,13 +56,17 @@ Two cases the client cannot see are handled explicitly rather than assumed away:
 
 - An **update answered "denied"** (`END_USER_SERVICE_DENIED`): with the data tier down nothing was settled and
   the previous reservation stays; for a barred subscriber the usage was settled. The answer does not say which,
-  so the usage goes to `unsure` and the grant to `held`, never to `used`.
+  so until the gateway's backlog has drained the usage goes to `unsure` and the grant to `held`. Against a gateway
+  with the reconciler ([03](03-rating-engine.md)), the refused update's usage is **expected to be charged
+  afterwards**, so after the drain it counts as used: a refused update whose usage was never charged then shows
+  up as a balance above its bounds, not as "unknown". (Mutation-checked with fakes: one that charges refused
+  updates afterwards reconciles with a zero budget; one that says it does and does not is caught.)
 - A **release answered `204`** carries no body, so the client cannot tell a settled release from a terminate
   the gateway acknowledged while the data tier was down ([03](03-rating-engine.md)). With `--gateway-admin` it
   reads the gateway's counters before and after the run. If the gateway has the reconciler
   (`ocs_unsettled_*`), it waits up to `--drain-timeout` (90 s) for `ocs_unsettled_pending` to reach zero, then
   allows a deviation only for what the gateway reports **lost** (no spool, a failed write, a dead letter) or
-  **still waiting**; usage the reconciler charged is no deviation at all. Anything lost or still waiting also
+  **still waiting**, or has left **ambiguous** on purpose; usage the reconciler charged is no deviation at all. Anything lost or still waiting also
   **fails the run**, even when it explains the deviation. With an older gateway, every terminate it admitted to
   leaving unsettled is allowed as a deviation. Any other deviation is a violation. (Mutation-checked with
   fakes: a reconciler that repairs everything passes with a zero budget, one that never drains fails, one that
@@ -70,9 +74,10 @@ Two cases the client cannot see are handled explicitly rather than assumed away:
 
 The check is limited, and says so: it covers the one bucket named by `--bucket`; a subscriber who spends the
 whole bundle is reported separately because usage beyond it is charged to other buckets, which are not
-checked. It does not check the cash bucket, events, or the Kafka event trail. It is **blind to usage in a refused
-update** (settled or not is unknowable to the client, so both are accepted), which is exactly the loss the
-reconciler does not cover yet ([03](03-rating-engine.md)).
+checked. It does not check the cash bucket, events, or the Kafka event trail. Its knowledge of what a gateway
+did with a refused update rests on that gateway's own counters (how many it left ambiguous), so it can confirm
+"everything recorded was charged and nothing else is missing", not that the *policy* of leaving an ambiguous one
+uncharged is right.
 
 ### Look-alike sessions
 
@@ -139,8 +144,15 @@ across a restart is shown by that one run and by the spool's own tests, not by a
    With it on, the same fault left 150 terminates saved, 150 charged afterwards, 0 lost, and every balance
    reconciled with a **zero** deviation budget (the generator now waits for the backlog to drain, and
    fails the run for anything lost or still waiting).
+   **Refused updates carried lost usage too**, and the load test could not see it at first (a refused update
+   was "settled or not, unknowable"). They are now recorded and settled after the fact as well: in a Redis stop
+   with sessions in flight, 151 terminates and 150 refused updates were saved and all 301 charged afterwards.
+   Across these 5 runs (Redis stopped twice, killed twice, and stopped with a gateway restart) every balance
+   reconciled with nothing lost. **4 refused updates in all were left ambiguous** (2 in each of two runs: the call
+   had been made and failed, and the session had moved on before the reconciler ran), so they were deliberately
+   **not** charged and are waiting for a person. That is the policy working as designed, and also a cost: those subscribers were not charged for that usage.
 2. **The first version of the check blamed the system for a gap in its own model**: it assumed a `204` meant
-   settled. It now states what it cannot know (refused updates) and takes the rest from the gateway's counters.
+   settled. It now states what it cannot know and takes the rest from the gateway's counters.
 3. **Behaviour during a Redis outage is not uniform** (hanging until the client times out versus an
    immediate refusal), probably depending on whether the breaker has opened by the time a request arrives. Not
    investigated.
@@ -179,7 +191,9 @@ Redis persistence, or replica acknowledgement, and none was tested. The measured
    **Redis failover** (there is no Sentinel or operator, so a killed primary is simply restarted: a promoted
    replica that lacks an acknowledged write is untested). Whether a SIGKILLed primary can lose commits the
    replica acknowledged depends on AOF settings and was exercised only a handful of times. The reconciler
-   covers terminates, not refused updates, and the gateway's spool is node-local ([03](03-rating-engine.md)).
+   covers terminates and refused updates, leaves ambiguous refused updates to a person, assumes the network
+   element does not report refused usage again under a new request number (unverified against real peers), and the
+   gateway's spool is node-local ([03](03-rating-engine.md)).
 4. **Seeding goes through the provisioning API**, about 250 subscribers per second here, and at most 99,999
    per run; nothing exercises a large subscriber population or a skewed (hot-subscriber) distribution
    beyond choosing a small `--subscribers`.

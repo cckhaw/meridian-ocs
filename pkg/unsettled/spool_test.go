@@ -314,3 +314,45 @@ func TestRunDrainsOnceTheDataTierReturns(t *testing.T) {
 		t.Fatal("not drained after the data tier came back")
 	}
 }
+
+func TestAnUpdateRecordKeepsItsTypeAndWhetherItWasEverSent(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir)
+	u := term("u1", "s1", 4, 900)
+	u.Type, u.Unapplied = canonical.TypeUpdate, true
+	u.Units[0].Requested = 123456 // an update asked for more; the late settlement reserves nothing
+	if err := s.Record(u); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+	s, _ = Open(dir)
+	defer s.Close()
+	rec := s.Pending(0)[0]
+	if !rec.IsUpdate() || !rec.Unapplied {
+		t.Fatalf("%+v", rec)
+	}
+	q := rec.Request()
+	defer canonical.ReleaseRequest(q)
+	if q.Type != canonical.TypeUpdate || !q.Unapplied || q.Units[0].Used != 900 || q.Units[0].Requested != 0 || q.RequestNumber != 4 {
+		t.Fatalf("a refused update is replayed asking for nothing, and remembers it was never sent: %+v", q)
+	}
+}
+
+func TestRecordsWrittenBeforeUpdatesWereRecordedAreTerminates(t *testing.T) {
+	dir := t.TempDir()
+	legacy := `{"op":"add","rec":{"id":"u1|s1|3","at":"2026-10-20T12:00:00Z","sub":"u1","ses":"s1","no":3,"units":[{"rg":100,"kind":0,"used":700}]}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, logName), []byte(legacy), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	rec := s.Pending(0)[0]
+	q := rec.Request()
+	defer canonical.ReleaseRequest(q)
+	if rec.IsUpdate() || q.Type != canonical.TypeTerminate || q.Unapplied {
+		t.Fatalf("a record without a type is a terminate: %+v", q)
+	}
+}

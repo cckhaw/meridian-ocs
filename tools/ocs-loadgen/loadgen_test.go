@@ -47,6 +47,7 @@ type fakeSystem struct {
 type pendItem struct {
 	s    *fakeSession
 	used int64
+	late bool // a refused update whose usage is charged afterwards (not a terminate left unsettled)
 }
 
 type fakeSession struct {
@@ -187,7 +188,13 @@ func (f *fakeSystem) nchf() http.Handler {
 	mux.HandleFunc("POST /nchf-convergedcharging/v3/chargingdata/{ref}/update", func(w http.ResponseWriter, r *http.Request) {
 		f.reqs.Add(1)
 		_, want, used := parse(r)
-		if f.mode == "deniedupdate" && f.upd.Add(1)%4 == 0 {
+		if (f.mode == "deniedupdate" || f.mode == "deniedrepaired" || f.mode == "deniedsilent") && f.upd.Add(1)%4 == 0 {
+			if f.mode == "deniedrepaired" {
+				f.mu.Lock()
+				f.pend = append(f.pend, pendItem{f.held[r.PathValue("ref")], used, true})
+				f.mu.Unlock()
+				f.unset.Add(1)
+			}
 			// Data tier down: nothing is settled, the reservation stays, the answer is a refusal.
 			answer := `{"multipleUnitInformation":[{"ratingGroup":100,"resultCode":"END_USER_SERVICE_DENIED"}]}`
 			w.WriteHeader(http.StatusOK)
@@ -205,7 +212,7 @@ func (f *fakeSystem) nchf() http.Handler {
 	mux.HandleFunc("POST /nchf-convergedcharging/v3/chargingdata/{ref}/release", func(w http.ResponseWriter, r *http.Request) {
 		f.reqs.Add(1)
 		_, _, used := parse(r)
-		if (f.mode == "unsettled" || f.mode == "unsettledsilent" || f.reconciler()) && f.rel.Add(1)%5 == 0 {
+		if (f.mode == "unsettled" || f.mode == "unsettledsilent" || f.mode == "repaired" || f.mode == "stuck" || f.mode == "lost") && f.rel.Add(1)%5 == 0 {
 			// Data tier down: the terminate is acknowledged but nothing is settled (the reservation stays).
 			if f.mode != "unsettledsilent" {
 				f.unset.Add(1)
@@ -213,7 +220,7 @@ func (f *fakeSystem) nchf() http.Handler {
 			switch f.mode {
 			case "repaired", "stuck":
 				f.mu.Lock()
-				f.pend = append(f.pend, pendItem{f.held[r.PathValue("ref")], used})
+				f.pend = append(f.pend, pendItem{f.held[r.PathValue("ref")], used, false})
 				f.mu.Unlock()
 			case "lost":
 				f.unrec.Add(1)
@@ -235,17 +242,21 @@ func (f *fakeSystem) nchf() http.Handler {
 }
 
 func (f *fakeSystem) reconciler() bool {
-	return f.mode == "repaired" || f.mode == "stuck" || f.mode == "lost"
+	return f.mode == "repaired" || f.mode == "stuck" || f.mode == "lost" || f.mode == "deniedrepaired" || f.mode == "deniedsilent"
 }
 
 func (f *fakeSystem) admin() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := f.scrapes.Add(1)
-		if f.mode == "repaired" && n >= 3 { // the reconciler catches up a moment after the load ends
+		if (f.mode == "repaired" || f.mode == "deniedrepaired") && n >= 3 { // the reconciler catches up a moment after the load ends
 			f.mu.Lock()
 			for _, p := range f.pend {
-				f.bal[p.s.key] += p.s.held - p.used
-				p.s.held = 0
+				if p.late {
+					f.bal[p.s.key] -= p.used // charged afterwards; the reservation was already returned by the release
+				} else {
+					f.bal[p.s.key] += p.s.held - p.used
+					p.s.held = 0
+				}
 				f.settled.Add(1)
 			}
 			f.pend = nil
@@ -475,7 +486,7 @@ func TestUsageTheReconcilerChargedAfterwardsLeavesNoDeviation(t *testing.T) {
 	if v.Verdicts[verdictOverspend]+v.Verdicts[verdictCreated]+v.Verdicts[verdictUnsettled] != 0 {
 		t.Fatalf("after the drain every balance must be inside the bounds, none outside:\n%s", out)
 	}
-	if !strings.Contains(out, "charged afterwards by its reconciler") {
+	if !strings.Contains(out, "charged afterwards by the gateway's reconciler") {
 		t.Fatalf("the report must say what the reconciler did:\n%s", out)
 	}
 }
@@ -494,5 +505,21 @@ func TestUsageTheGatewayCouldNotRecordFailsTheRun(t *testing.T) {
 	}
 	if rp.Verification.Verdicts[verdictOverspend]+rp.Verification.Verdicts[verdictCreated] != 0 && rp.Verification.Explained == 0 {
 		t.Fatalf("the deviation itself is explained by the lost terminates:\n%s", out)
+	}
+}
+
+func TestAGatewayThatChargesRefusedUpdatesAfterwardsLeavesNothingUnexplained(t *testing.T) {
+	rp, out := exercise(t, newFake("deniedrepaired"), nil)
+	v := rp.Verification
+	if !rp.Pass || !v.Reconciler || v.Settled == 0 || v.Budget != 0 || v.Verdicts[verdictExact]+v.Verdicts[verdictWithin] != 20 {
+		t.Fatalf("usage in refused updates, charged afterwards, must reconcile with a zero budget:\n%s", out)
+	}
+}
+
+func TestRefusedUpdateUsageTheGatewayNeverRecordedIsCaught(t *testing.T) {
+	// The reconciler's metrics say everything is fine, but the usage of refused updates was never charged.
+	rp, out := exercise(t, newFake("deniedsilent"), nil)
+	if rp.Pass || rp.Verification.Verdicts[verdictCreated] == 0 {
+		t.Fatalf("a refused update whose usage vanished must be reported, not waved through as unknown:\n%s", out)
 	}
 }

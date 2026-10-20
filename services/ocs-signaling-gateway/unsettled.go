@@ -49,8 +49,9 @@ func startReconciler(ctx context.Context, s *unsettled.Spool, eng *engine.Engine
 func registerUnsettledMetrics(reg *telemetry.Registry, eng *engine.Engine, s *unsettled.Spool, r *unsettled.Reconciler) {
 	f := func(v uint64) float64 { return float64(v) }
 	st := func() engine.Stats { return eng.Stats() }
-	reg.CounterFunc("ocs_engine_unsettled_recorded_total", "Unsettled terminates saved in the spool for reconciliation.", nil, func() float64 { return f(st().UnsettledRecorded) })
-	reg.CounterFunc("ocs_engine_unsettled_unrecorded_total", "Unsettled terminates whose usage is LOST: no spool, or writing the record failed.", nil, func() float64 { return f(st().UnsettledUnrecorded) })
+	reg.CounterFunc("ocs_engine_unsettled_updates_total", "Updates refused while the data tier was down that reported usage: that usage was not charged.", nil, func() float64 { return f(st().UnsettledUpdates) })
+	reg.CounterFunc("ocs_engine_unsettled_recorded_total", "Unsettled terminates and refused updates saved in the spool for reconciliation.", nil, func() float64 { return f(st().UnsettledRecorded) })
+	reg.CounterFunc("ocs_engine_unsettled_unrecorded_total", "Unsettled terminates and refused updates whose usage is LOST: no spool, or writing the record failed.", nil, func() float64 { return f(st().UnsettledUnrecorded) })
 
 	sp := func() unsettled.Stats {
 		if s == nil {
@@ -67,7 +68,8 @@ func registerUnsettledMetrics(reg *telemetry.Registry, eng *engine.Engine, s *un
 	reg.GaugeFunc("ocs_unsettled_pending", "Unsettled terminates waiting to be charged.", nil, func() float64 { return float64(sp().Pending) })
 	reg.GaugeFunc("ocs_unsettled_oldest_age_seconds", "Age of the oldest unsettled terminate still waiting.", nil, func() float64 { return sp().OldestAge.Seconds() })
 	reg.GaugeFunc("ocs_unsettled_dead_letters", "Unsettled terminates that can never be charged and are kept for inspection.", nil, func() float64 { return float64(sp().Dead) })
-	reg.CounterFunc("ocs_unsettled_settled_total", "Unsettled terminates charged by the reconciler.", nil, func() float64 { return f(rc().Settled) })
+	reg.CounterFunc("ocs_unsettled_ambiguous_total", "Refused updates left uncharged on purpose: the session moved past them and charging could charge twice. A person decides.", nil, func() float64 { return f(rc().Ambiguous) })
+	reg.CounterFunc("ocs_unsettled_settled_total", "Unsettled terminates and refused updates charged by the reconciler.", nil, func() float64 { return f(rc().Settled) })
 	reg.CounterFunc("ocs_unsettled_dead_total", "Unsettled terminates the reconciler found could never be charged (the session is gone).", nil, func() float64 { return f(rc().Dead) })
 	reg.CounterFunc("ocs_unsettled_deferred_total", "Reconciliation passes that stopped because the data tier could not take the usage yet.", nil, func() float64 { return f(rc().Deferred) })
 }

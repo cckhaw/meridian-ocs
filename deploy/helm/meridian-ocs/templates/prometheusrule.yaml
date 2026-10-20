@@ -45,11 +45,11 @@ spec:
             summary: "Requests are being answered without the data tier"
             description: "The fail policy is answering instead of the balance store (prepaid fail-closed, postpaid fail-open with caps). Redis is unreachable or slow."
         - alert: OcsUsageNotSettled
-          expr: sum(increase(ocs_engine_unsettled_terminates_total[10m])) > 0
+          expr: sum(increase(ocs_engine_unsettled_terminates_total[10m])) > 0 or sum(increase(ocs_engine_unsettled_updates_total[10m])) > 0
           labels: {severity: warning}
           annotations:
-            summary: "Sessions were released while the data tier was down; their last usage awaits charging"
-            description: "A terminate arrived while Redis was unavailable and was acknowledged. Its usage is kept in the gateway's spool and is charged when Redis returns; OcsUnsettledUsageBacklog and OcsUnsettledUsageLost say if that is not happening."
+            summary: "Usage was reported while the data tier was down; it awaits charging"
+            description: "A terminate or an update arrived while Redis was unavailable and was acknowledged or refused. Its usage is kept in the gateway's spool and is charged when Redis returns; OcsUnsettledUsageBacklog and OcsUnsettledUsageLost say if that is not happening."
         - alert: OcsUnsettledUsageBacklog
           expr: max(ocs_unsettled_oldest_age_seconds) > {{ $a.unsettledBacklogSeconds }}
           for: 5m
@@ -63,6 +63,12 @@ spec:
           annotations:
             summary: "Usage was released without being charged and can no longer be recovered"
             description: "Either the spool is off or could not be written (ocs_engine_unsettled_unrecorded_total), or a recorded terminate belonged to a session that no longer exists (ocs_unsettled_dead_total; the records are kept as dead letters in the spool). That usage is revenue not charged."
+        - alert: OcsUnsettledUsageAmbiguous
+          expr: sum(increase(ocs_unsettled_ambiguous_total[10m])) > 0
+          labels: {severity: warning}
+          annotations:
+            summary: "Usage in a refused update was left uncharged because charging it could charge twice"
+            description: "An update was refused while the data tier was down and its outcome was unknown; the session has since moved on, and the network element may have reported that usage again. The record is kept as a dead letter in the gateway's spool; a person decides."
         - alert: OcsDataTierBreakerOpen
           expr: max(ocs_datatier_breaker_open) == 1
           for: 1m

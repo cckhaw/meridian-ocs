@@ -8,6 +8,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +36,11 @@ const (
 	ModeUpdate    Mode = 'U'
 	ModeTerminate Mode = 'T'
 	ModeEvent     Mode = 'E'
+	// ModeLate and ModeLateUnapplied settle the usage of an update that was refused while the data tier was down,
+	// after the fact, without reserving anything (see charge.lua). ModeLateUnapplied is for one that provably never
+	// reached the data tier; ModeLate for one whose outcome is unknown.
+	ModeLate          Mode = 'L'
+	ModeLateUnapplied Mode = 'N'
 )
 
 // Class orders and prices buckets: promo, then bundle, then cash.
@@ -162,7 +168,7 @@ func (r *Request) validate() error {
 		return fmt.Errorf("%w: subscriber/session id", ErrInvalid)
 	}
 	switch r.Mode {
-	case ModeInitial, ModeUpdate, ModeTerminate, ModeEvent:
+	case ModeInitial, ModeUpdate, ModeTerminate, ModeEvent, ModeLate, ModeLateUnapplied:
 	default:
 		return fmt.Errorf("%w: mode", ErrInvalid)
 	}
@@ -181,6 +187,13 @@ func (r *Request) validate() error {
 		}
 	}
 	return nil
+}
+
+// NotSent reports whether err proves that the command never reached the server: the connection could not be made.
+// Anything else (a timeout, a reset, a closed connection) leaves it unknown whether the command was applied.
+func NotSent(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial"
 }
 
 // Charge executes one credit-control step atomically. A non-nil error means

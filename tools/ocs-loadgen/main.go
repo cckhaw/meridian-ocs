@@ -145,6 +145,7 @@ func execute(ctx context.Context, c config, w io.Writer) (*Report, error) {
 			gw.Recorded = gwDelta(gwBefore, after, "ocs_engine_unsettled_recorded_total")
 			gw.Settled = gwDelta(gwBefore, after, "ocs_unsettled_settled_total")
 			gw.Lost = gwDelta(gwBefore, after, "ocs_engine_unsettled_unrecorded_total") + gwDelta(gwBefore, after, "ocs_unsettled_dead_total")
+			gw.Ambiguous = gwDelta(gwBefore, after, "ocs_unsettled_ambiguous_total")
 			gw.StillPending = after["ocs_unsettled_pending"]
 		}
 	}

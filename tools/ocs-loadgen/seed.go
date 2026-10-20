@@ -134,13 +134,16 @@ type subscriber struct {
 	key, imsi string
 	initial   int64 // balance of the checked bucket before the run
 
-	mu       sync.Mutex
-	used     int64 // usage the gateway confirmed it settled
-	held     int64 // granted, but the session was not confirmed released
-	unsure   int64 // upper bound of what requests with an unknown outcome may have moved
-	sessions int
-	pdu      atomic.Uint32 // PDU session identifiers handed out, so concurrent sessions never look alike
-	trail    []string      // what happened, in order; only kept with --audit
+	mu     sync.Mutex
+	used   int64 // usage the gateway confirmed it settled
+	held   int64 // granted, but the session was not confirmed released
+	unsure int64 // upper bound of what requests with an unknown outcome may have moved
+	// refusedUsed / refusedHeld are the part of unsure / held that comes from updates the gateway refused with
+	// "denied": a reconciler charges that usage afterwards, so once it has drained it counts as used.
+	refusedUsed, refusedHeld int64
+	sessions                 int
+	pdu                      atomic.Uint32 // PDU session identifiers handed out, so concurrent sessions never look alike
+	trail                    []string      // what happened, in order; only kept with --audit
 }
 
 func (s *subscriber) note(audit bool, f string, a ...any) {

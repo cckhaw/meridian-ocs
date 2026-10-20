@@ -38,9 +38,15 @@ type Unit struct {
 
 // Record is a terminate that was acknowledged without being settled: everything needed to submit it again.
 type Record struct {
-	ID            string    `json:"id"` // subscriber|session|request number: a retransmission is the same record
-	At            time.Time `json:"at"` // when it was acknowledged
-	Source        uint8     `json:"src,omitempty"`
+	ID     string    `json:"id"` // subscriber|session|request number: a retransmission is the same record
+	At     time.Time `json:"at"` // when it was acknowledged
+	Source uint8     `json:"src,omitempty"`
+	// Type is the canonical request type of what was acknowledged without being settled: a terminate (the
+	// default, and what every record written before updates were recorded is) or a refused update.
+	Type uint8 `json:"typ,omitempty"`
+	// Unapplied is true for an update that provably never reached the data tier (circuit breaker open,
+	// connection never made), false when its outcome is unknown.
+	Unapplied     bool      `json:"na,omitempty"`
 	SubscriberID  string    `json:"sub"`
 	SessionID     string    `json:"ses"`
 	RequestNumber uint32    `json:"no"`
@@ -57,6 +63,8 @@ func FromRequest(req *canonical.Request, at time.Time) Record {
 		ID:           fmt.Sprintf("%s|%s|%d", req.SubscriberID, req.SessionID, req.RequestNumber),
 		At:           at,
 		Source:       uint8(req.Source),
+		Type:         uint8(req.Type),
+		Unapplied:    req.Unapplied,
 		SubscriberID: req.SubscriberID, SessionID: req.SessionID, RequestNumber: req.RequestNumber,
 		EventTime: req.EventTime, RATType: req.RATType, CellID: req.CellID, Slice: req.Slice,
 	}
@@ -68,10 +76,18 @@ func FromRequest(req *canonical.Request, at time.Time) Record {
 	return r
 }
 
-// Request rebuilds the terminate. The caller releases it with canonical.ReleaseRequest.
+// IsUpdate reports whether the record is a refused update (otherwise it is a terminate).
+func (r Record) IsUpdate() bool { return canonical.RequestType(r.Type) == canonical.TypeUpdate }
+
+// Request rebuilds what was acknowledged: a terminate, or the update that was refused (asking for nothing:
+// its usage is settled after the fact and nothing is reserved). The caller releases it with
+// canonical.ReleaseRequest.
 func (r Record) Request() *canonical.Request {
 	q := canonical.AcquireRequest()
 	q.Source, q.Type = canonical.Source(r.Source), canonical.TypeTerminate
+	if r.IsUpdate() {
+		q.Type, q.Unapplied = canonical.TypeUpdate, r.Unapplied
+	}
 	q.SubscriberID, q.SessionID, q.RequestNumber = r.SubscriberID, r.SessionID, r.RequestNumber
 	q.EventTime, q.RATType, q.CellID, q.Slice = r.EventTime, r.RATType, r.CellID, r.Slice
 	for _, u := range r.Units {
@@ -286,7 +302,7 @@ func (s *Spool) append(o op) error {
 	return nil
 }
 
-// Record stores a terminate that was acknowledged without being settled. It returns only after the record is
+// Record stores a terminate (or a refused update) that was acknowledged without being settled. It returns only after the record is
 // on disk; an error means it is NOT safe and the caller must count the usage as lost. A repeat of a record
 // already pending (the network element retransmitting the terminate) is accepted without a second entry.
 func (s *Spool) Record(req *canonical.Request) error {

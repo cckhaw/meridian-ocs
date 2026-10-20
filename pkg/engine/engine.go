@@ -124,6 +124,10 @@ type Stats struct {
 	// those whose usage is lost because no sink was configured or writing the record failed.
 	UnsettledRecorded   uint64
 	UnsettledUnrecorded uint64
+	// UnsettledUpdates counts updates that reported usage and were refused because the data tier was unavailable:
+	// that usage was not charged either. They are recorded (or not) exactly like the terminates above and are
+	// included in UnsettledRecorded / UnsettledUnrecorded.
+	UnsettledUpdates uint64
 }
 
 type job struct {
@@ -148,7 +152,7 @@ type Engine struct {
 	closed      atomic.Bool
 	wg          sync.WaitGroup
 
-	requests, degraded, overloaded, auditDropped, unreplicated, unpriced, unsettled, unsettledRecorded, unsettledUnrecorded atomic.Uint64
+	requests, degraded, overloaded, auditDropped, unreplicated, unpriced, unsettled, unsettledRecorded, unsettledUnrecorded, unsettledUpdates atomic.Uint64
 }
 
 // New builds and starts an engine.
@@ -198,7 +202,7 @@ func (e *Engine) Close() {
 
 // Stats returns a snapshot of the counters.
 func (e *Engine) Stats() Stats {
-	return Stats{e.requests.Load(), e.degraded.Load(), e.overloaded.Load(), e.auditDropped.Load(), e.unreplicated.Load(), e.unpriced.Load(), e.unsettled.Load(), e.unsettledRecorded.Load(), e.unsettledUnrecorded.Load()}
+	return Stats{e.requests.Load(), e.degraded.Load(), e.overloaded.Load(), e.auditDropped.Load(), e.unreplicated.Load(), e.unpriced.Load(), e.unsettled.Load(), e.unsettledRecorded.Load(), e.unsettledUnrecorded.Load(), e.unsettledUpdates.Load()}
 }
 
 // Rate processes one request and fills resp. It blocks until the answer is
@@ -240,14 +244,15 @@ func (e *Engine) Rate(ctx context.Context, req *canonical.Request, resp *canonic
 	return err
 }
 
-// Settle submits a terminate again, as the unsettled-usage reconciler does after the data tier was down when
-// it first arrived. Unlike Rate it is never answered by the fail policy: when the data tier cannot take the
+// Settle submits a terminate, or an update that was refused, again, as the unsettled-usage reconciler does after
+// the data tier was down when it first arrived. An update is settled after the fact without reserving anything
+// (datalayer.ModeLate, or ModeLateUnapplied when req.Unapplied says it never reached the data tier). Unlike Rate it is never answered by the fail policy: when the data tier cannot take the
 // request it returns the error and the caller keeps the record. The charge is idempotent per session and
 // request number, so a terminate that did reach the data tier the first time is answered from its stored
 // result and charges nothing twice. The result is ResultUnknownSession or ResultStaleRequest when the session
 // can no longer take the usage; any other result means it was settled.
 func (e *Engine) Settle(ctx context.Context, req *canonical.Request) (canonical.Result, error) {
-	if req.Type != canonical.TypeTerminate {
+	if req.Type != canonical.TypeTerminate && req.Type != canonical.TypeUpdate {
 		return 0, ErrInvalid
 	}
 	if e.closed.Load() {
@@ -348,6 +353,12 @@ func (w *worker) handle(j *job) {
 	resp.SessionID = req.SessionID
 
 	mode, ok := modeOf(req.Type)
+	if j.replay && req.Type == canonical.TypeUpdate {
+		mode = datalayer.ModeLate
+		if req.Unapplied {
+			mode = datalayer.ModeLateUnapplied
+		}
+	}
 	if !ok || req.SubscriberID == "" || req.SessionID == "" ||
 		(len(req.Units) == 0 && req.Type != canonical.TypeTerminate) {
 		j.err = ErrInvalid
@@ -395,7 +406,8 @@ func (w *worker) handle(j *job) {
 	}
 
 	if err != nil {
-		w.degrade(req, resp, now)
+		// Never sent: the breaker kept the call from being made, or the connection could not be established.
+		w.degrade(req, resp, now, errors.Is(err, errBreakerOpen) || datalayer.NotSent(err))
 		return
 	}
 	if w.dres.Replication == datalayer.ReplicationShort {
@@ -527,10 +539,13 @@ func policyKind(k canonical.UnitKind) failpolicy.UnitKind {
 
 // degrade answers a request without the data tier, via the hybrid fail policy:
 // prepaid (all of it) fails closed; postpaid gets a capped, journalled grant.
-func (w *worker) degrade(req *canonical.Request, resp *canonical.Response, now time.Time) {
+func (w *worker) degrade(req *canonical.Request, resp *canonical.Response, now time.Time, notSent bool) {
 	e := w.e
 	e.degraded.Add(1)
 	resp.Result = canonical.ResultUnavailable
+	if req.Type == canonical.TypeUpdate {
+		w.saveUnsettledUpdate(req, notSent)
+	}
 
 	if req.Type == canonical.TypeTerminate {
 		// Nothing can be settled now. Acknowledge so the network element can
@@ -581,6 +596,25 @@ func (w *worker) degrade(req *canonical.Request, resp *canonical.Response, now t
 	if anyGranted {
 		resp.Result = canonical.ResultGranted
 		w.audit(AuditDegradedGrant, req, resp, now)
+	}
+}
+
+// saveUnsettledUpdate records the usage of an update that is about to be refused for want of the data tier: the
+// network element reports usage since its last measurement and will not report it again, so without a record
+// it is never charged.
+func (w *worker) saveUnsettledUpdate(req *canonical.Request, notSent bool) {
+	e := w.e
+	for i := range req.Units {
+		if req.Units[i].Used > 0 {
+			e.unsettledUpdates.Add(1)
+			req.Unapplied = notSent
+			if sink := e.deps.Unsettled; sink != nil && sink.Record(req) == nil {
+				e.unsettledRecorded.Add(1)
+			} else {
+				e.unsettledUnrecorded.Add(1)
+			}
+			return
+		}
 	}
 }
 

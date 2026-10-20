@@ -70,6 +70,9 @@ type Request struct {
 	CellID        string
 	Slice         string
 	Units         []UnitRequest
+	// Unapplied is set only when an unsettled report is replayed after the data tier was down: the request is known
+	// never to have reached it (see datalayer.ModeLateUnapplied). Adapters never set it.
+	Unapplied bool
 }
 
 // Reset clears the request for reuse while keeping slice capacity.
