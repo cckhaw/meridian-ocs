@@ -39,8 +39,8 @@ durability() { # the gateway's own counters: commits acknowledged by fewer repli
   curl -fsS --max-time 3 http://127.0.0.1:9080/metrics 2>/dev/null |
     awk '/^ocs_durability_short_total /{s=$2} /^ocs_durability_suspended_total /{u=$2}
          /^ocs_engine_unsettled_terminates_total /{t=$2} /^ocs_engine_unsettled_recorded_total /{r=$2} /^ocs_unsettled_settled_total /{d=$2}
-         /^ocs_engine_unsettled_unrecorded_total /{l=$2} /^ocs_unsettled_dead_total /{x=$2}
-         END{printf "short=%s suspended=%s | unsettled terminates=%s recorded=%s charged later=%s lost=%s", s+0, u+0, t+0, r+0, d+0, l+0+x}'
+         /^ocs_engine_unsettled_unrecorded_total /{l=$2} /^ocs_unsettled_dead_total /{x=$2} /^ocs_engine_unsettled_updates_total /{w=$2} /^ocs_unsettled_ambiguous_total /{a=$2}
+         END{printf "short=%s suspended=%s | unsettled terminates=%s updates=%s recorded=%s charged later=%s lost=%s ambiguous=%s", s+0, u+0, t+0, w+0, r+0, d+0, l+0+x, a+0}'
 }
 
 inject() { # inject <scenario> <start|stop>

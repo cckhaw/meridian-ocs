@@ -35,6 +35,7 @@ type Verification struct {
 	Recorded     float64 `json:"unsettledRecorded"`
 	Settled      float64 `json:"unsettledSettled"`
 	Lost         float64 `json:"unsettledLost"`
+	Ambiguous    float64 `json:"unsettledAmbiguous"`
 	StillPending float64 `json:"unsettledStillPending"`
 	Budget       int64   `json:"unsettledBudget"`
 	Explained    int64   `json:"unsettledExplained"`
@@ -44,11 +45,16 @@ type Verification struct {
 // bounds returns the balance interval the run allows for s. The confirmed usage is certain; reservations
 // that were granted but not confirmed released, and requests whose outcome is unknown, widen the lower
 // edge. The upper edge is exact: nothing can return more than was taken.
-func bounds(s *subscriber) (low, high int64) {
+func bounds(s *subscriber, reconciled bool) (low, high int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	high = s.initial - s.used
-	low = high - s.held - s.unsure
+	used, held, unsure := s.used, s.held, s.unsure
+	if reconciled {
+		// The gateway charges the usage of refused updates afterwards: after its backlog drained, it is settled.
+		used, held, unsure = used+s.refusedUsed, held-s.refusedHeld, unsure-s.refusedUsed
+	}
+	high = s.initial - used
+	low = high - held - unsure
 	if high < 0 {
 		high = 0 // the bundle is spent; the rest of the usage is charged to other buckets
 	}
@@ -60,8 +66,8 @@ func bounds(s *subscriber) (low, high int64) {
 
 // gwView is what the gateway's own counters said about unsettled usage during the run.
 type gwView struct {
-	Unsettled, Recorded, Settled, Lost, StillPending float64
-	Reconciler                                       bool
+	Unsettled, Recorded, Settled, Lost, StillPending, Ambiguous float64
+	Reconciler                                                  bool
 }
 
 // budgetTerminates is how many terminates may explain a deviation. With the reconciler, usage it charged is no
@@ -69,7 +75,7 @@ type gwView struct {
 // terminate the gateway admitted to leaving unsettled counts.
 func (g gwView) budgetTerminates() float64 {
 	if g.Reconciler {
-		return g.Lost + g.StillPending
+		return g.Lost + g.StillPending + g.Ambiguous // ambiguous ones are left uncharged on purpose
 	}
 	return g.Unsettled
 }
@@ -77,7 +83,7 @@ func (g gwView) budgetTerminates() float64 {
 func verify(ctx context.Context, p *provClient, c config, subs []*subscriber, gw gwView) Verification {
 	unsettled := gw.budgetTerminates()
 	v := Verification{Verdicts: map[string]int{}, OK: true, UnsettledTerminates: gw.Unsettled, Reconciler: gw.Reconciler,
-		Recorded: gw.Recorded, Settled: gw.Settled, Lost: gw.Lost, StillPending: gw.StillPending,
+		Recorded: gw.Recorded, Settled: gw.Settled, Lost: gw.Lost, Ambiguous: gw.Ambiguous, StillPending: gw.StillPending,
 		Budget: int64(unsettled) * c.RequestSize}
 	type result struct {
 		verdict, note string
@@ -96,7 +102,7 @@ func verify(ctx context.Context, p *provClient, c config, subs []*subscriber, gw
 			defer wg.Done()
 			defer func() { <-sem }()
 			bal, err := p.bucketBalance(ctx, s.key, c.Bucket)
-			low, high := bounds(s)
+			low, high := bounds(s, gw.Reconciler)
 			s.mu.Lock()
 			exactWanted := s.held == 0 && s.unsure == 0
 			s.mu.Unlock()

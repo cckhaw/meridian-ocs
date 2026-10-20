@@ -180,10 +180,10 @@ func (rp *Report) write(w io.Writer) {
 		if v.Overflowed > 0 {
 			p("             %d subscribers spent their whole bundle: usage beyond it is charged to other buckets, which are not checked\n", v.Overflowed)
 		}
-		if v.UnsettledTerminates > 0 {
+		if v.UnsettledTerminates > 0 || v.Recorded > 0 || v.Ambiguous > 0 {
 			if v.Reconciler {
-				p("             the gateway released %.0f terminates without charging them (data tier down): %.0f saved, %.0f charged afterwards by its reconciler, %.0f lost, %.0f still waiting\n",
-					v.UnsettledTerminates, v.Recorded, v.Settled, v.Lost, v.StillPending)
+				p("             usage reported while the data tier was down: %.0f saved, %.0f charged afterwards by the gateway's reconciler, %.0f lost, %.0f still waiting, %.0f left to a person (ambiguous: charging could charge twice)\n",
+					v.Recorded, v.Settled, v.Lost, v.StillPending, v.Ambiguous)
 			} else {
 				p("             the gateway counted %.0f terminates acknowledged without settling (data tier down): up to %d bytes may be uncharged or held; deviations explained by them: %d bytes\n",
 					v.UnsettledTerminates, v.Budget, v.Explained)

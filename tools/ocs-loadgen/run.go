@@ -342,9 +342,12 @@ func (r *runner) session(ctx context.Context, due time.Time, s *subscriber) {
 		s.mu.Lock()
 		if code == resultDenied {
 			// Refused: with the data tier down nothing was settled (the previous reservation stays until it
-			// expires); for a barred subscriber the usage was settled. The answer does not say which.
+			// expires); for a barred subscriber the usage was settled. The answer does not say which. Against a
+			// gateway with the reconciler, the usage is charged afterwards (refused* below says how much).
 			s.unsure += used
 			s.held += prev
+			s.refusedUsed += used
+			s.refusedHeld += prev
 		} else {
 			s.used += used
 		}

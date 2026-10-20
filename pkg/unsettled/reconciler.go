@@ -26,20 +26,23 @@ type Reconciler struct {
 	Batch    int           // records per pass (default 200)
 	Logf     func(format string, args ...any)
 
-	settled, dead, deferred atomic.Uint64
-	failing                 atomic.Bool
+	settled, dead, ambiguous, deferred atomic.Uint64
+	failing                            atomic.Bool
 }
 
 // ReconcilerStats are cumulative counters.
 type ReconcilerStats struct {
-	Settled  uint64 // records charged and removed
-	Dead     uint64 // records that could never be charged (see Spool.DeadLetters)
-	Deferred uint64 // passes that stopped because the data tier was not available
+	Settled uint64 // records charged and removed
+	Dead    uint64 // records that could never be charged because the session is gone (see Spool.DeadLetters)
+	// Ambiguous counts refused updates left uncharged on purpose: the session had moved past the update, and the
+	// network element may have reported its usage again, so charging could charge twice. A person decides.
+	Ambiguous uint64
+	Deferred  uint64 // passes that stopped because the data tier was not available
 }
 
 // Stats returns the counters.
 func (r *Reconciler) Stats() ReconcilerStats {
-	return ReconcilerStats{r.settled.Load(), r.dead.Load(), r.deferred.Load()}
+	return ReconcilerStats{r.settled.Load(), r.dead.Load(), r.ambiguous.Load(), r.deferred.Load()}
 }
 
 func (r *Reconciler) logf(f string, a ...any) {
@@ -69,15 +72,23 @@ func (r *Reconciler) Pass(ctx context.Context) (int, error) {
 		}
 		switch res {
 		case canonical.ResultUnknownSession, canonical.ResultStaleRequest:
-			why := "session unknown: its state expired before the usage could be charged"
+			why, ambiguous := "session unknown: its state expired before the usage could be charged", false
 			if res == canonical.ResultStaleRequest {
 				why = "stale: a later request of the session was already processed"
+				if rec.IsUpdate() {
+					why = "a later request of the session was already processed and the outcome of this update was unknown: its usage may have been reported again, so it was NOT charged (it could be charged twice)"
+					ambiguous = true
+				}
 			}
 			if err := r.Spool.Dead(rec.ID, why); err != nil {
 				return n, err
 			}
-			r.dead.Add(1)
-			r.logf("unsettled usage for %s session %s request %d can never be charged: %s", rec.SubscriberID, rec.SessionID, rec.RequestNumber, why)
+			if ambiguous {
+				r.ambiguous.Add(1)
+			} else {
+				r.dead.Add(1)
+			}
+			r.logf("unsettled usage for %s session %s request %d was not charged: %s", rec.SubscriberID, rec.SessionID, rec.RequestNumber, why)
 		default:
 			if err := r.Spool.Done(rec.ID); err != nil {
 				return n, err
