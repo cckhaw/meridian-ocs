@@ -79,10 +79,10 @@ mediation already exported metrics ([11](11-aiops.md)); this part adds the rest:
   author is ever a label (checked by tests): labels are bounded enums (result,
   outcome, type, code class).
 
-Alerts (32, six groups; thresholds in `alerts.*`): scrape target down; charging P99
+Alerts (34, six groups; thresholds in `alerts.*`): scrape target down; charging P99
 above 10 ms (warning) and 50 ms (critical); requests answered by the fail policy;
 breaker open, or forced open for 30 minutes; **commits acknowledged by fewer replicas
-than required** (the durability promise); replica wait suspended; **usage released without being charged** (a terminate acknowledged while the data tier was down); load shedding; audit
+than required** (the durability promise); replica wait suspended; **usage released without being charged** (a terminate acknowledged while the data tier was down), **not draining** from the gateway's spool, and **lost**; load shedding; audit
 dropped; identity directory errors and conflicts; usage the catalog cannot price;
 catalog sync stale or failing, **no version in effect**, **nodes on different versions**;
 catalog publish errors and denied publishes; a request **waiting too long for approval**, an attempted self-approval, approval events not published; provisioning stalled (commands accepted
@@ -93,6 +93,10 @@ metric names are not release-labelled: two releases scraped into one Prometheus 
 the aggregate alerts.
 
 ## Installing
+
+- **Losing revenue is a stated choice too.** `gateway.unsettledSpool.mode` is required: `emptyDir` gives each gateway
+  pod a volume for the usage it released while Redis was down (charged when Redis returns, [03](03-rating-engine.md#usage-released-while-the-data-tier-is-down-and-its-reconciler)),
+  `off` discards that usage and is refused unless `allowInsecure`. An `emptyDir` survives a container restart, not the loss of the pod or node.
 
 1. Redis (primary plus the replicas you configure) and Kafka exist, and the
    Secrets are created.
@@ -116,7 +120,7 @@ deliberate refusals each checked for the right reason (missing image, auth not
 chosen, `off` without `allowInsecure`, mTLS without a Secret or named callers,
 Nchf in clear, OAuth without keys, control plane with nobody allowed in,
 `allowNoReplica`, NetworkPolicy with empty lists, typos, an unquoted `off`, ...);
-`promtool check rules` and **11 alert unit-test scenarios** (the alerts fire on synthetic
+`promtool check rules` and **13 alert unit-test scenarios** (the alerts fire on synthetic
 series when they should and stay quiet when they should: degraded serving,
 under-replicated commits, provisioning stalled vs keeping up, catalog version skew,
 slow vs fast charging, approvals waiting too long, self-approval attempts); a check that **every metric name in the rules and dashboard is

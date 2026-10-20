@@ -46,10 +46,23 @@ spec:
             description: "The fail policy is answering instead of the balance store (prepaid fail-closed, postpaid fail-open with caps). Redis is unreachable or slow."
         - alert: OcsUsageNotSettled
           expr: sum(increase(ocs_engine_unsettled_terminates_total[10m])) > 0
+          labels: {severity: warning}
+          annotations:
+            summary: "Sessions were released while the data tier was down; their last usage awaits charging"
+            description: "A terminate arrived while Redis was unavailable and was acknowledged. Its usage is kept in the gateway's spool and is charged when Redis returns; OcsUnsettledUsageBacklog and OcsUnsettledUsageLost say if that is not happening."
+        - alert: OcsUnsettledUsageBacklog
+          expr: max(ocs_unsettled_oldest_age_seconds) > {{ $a.unsettledBacklogSeconds }}
+          for: 5m
           labels: {severity: critical}
           annotations:
-            summary: "Sessions were released without their last usage being charged"
-            description: "A terminate arrived while the data tier was down and was acknowledged; the usage it reported was not charged and its reservation will expire and be refunded. There is no reconciler yet: the affected sessions are in the engine audit events."
+            summary: "Usage released without being charged has been waiting for over {{ div $a.unsettledBacklogSeconds 60 }} minutes"
+            description: "The reconciler is not draining the gateway's spool: Redis is still unavailable, the circuit breaker is held open, or replays are failing. The usage is on disk and will be charged once it can be."
+        - alert: OcsUnsettledUsageLost
+          expr: sum(increase(ocs_engine_unsettled_unrecorded_total[10m])) + sum(increase(ocs_unsettled_dead_total[10m])) > 0
+          labels: {severity: critical}
+          annotations:
+            summary: "Usage was released without being charged and can no longer be recovered"
+            description: "Either the spool is off or could not be written (ocs_engine_unsettled_unrecorded_total), or a recorded terminate belonged to a session that no longer exists (ocs_unsettled_dead_total; the records are kept as dead letters in the spool). That usage is revenue not charged."
         - alert: OcsDataTierBreakerOpen
           expr: max(ocs_datatier_breaker_open) == 1
           for: 1m

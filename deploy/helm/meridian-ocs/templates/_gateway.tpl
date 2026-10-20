@@ -10,6 +10,7 @@
 - {name: OCS_REGION, value: {{ $g.region | quote }}}
 - {name: OCS_MAX_TPS, value: {{ $g.maxTps | quote }}}
 - {name: OCS_MAX_INFLIGHT, value: {{ $g.maxInflight | quote }}}
+- {name: OCS_UNSETTLED_SPOOL, value: {{ ternary "/var/spool/ocs" "off" (eq $g.unsettledSpool.mode "emptyDir") | quote }}}
 - {name: OCS_TARIFF, value: {{ $g.tariff | quote }}}
 - {name: OCS_IDENTITY_MODE, value: {{ $g.identity.mode | quote }}}
 {{- include "ocs.opt" (dict "name" "OCS_DEFAULT_PLAN" "value" $g.defaultPlan) }}

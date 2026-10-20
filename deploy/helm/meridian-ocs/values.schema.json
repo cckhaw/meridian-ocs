@@ -310,6 +310,10 @@
         "approvalWaitSeconds": {
           "type": "integer",
           "minimum": 0
+        },
+        "unsettledBacklogSeconds": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "additionalProperties": false
@@ -376,6 +380,22 @@
         "maxInflight": {
           "type": "integer",
           "minimum": 0
+        },
+        "unsettledSpool": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": [
+                "string",
+                "integer",
+                "number"
+              ]
+            },
+            "sizeLimit": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
         },
         "tariff": {
           "type": "string",

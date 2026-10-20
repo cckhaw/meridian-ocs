@@ -12,6 +12,7 @@ networkPolicy:
   monitoringFrom: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}}]
 serviceMonitor: {enabled: true}
 gateway:
+  unsettledSpool: {mode: emptyDir}
   tariff: catalog
   defaultPlan: std
   diameter:

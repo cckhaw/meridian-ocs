@@ -185,8 +185,9 @@ services:
       OCS_ORIGIN_HOST: ocs1.dev.local
       OCS_ORIGIN_REALM: dev.local
       OCS_HOST_IP: 127.0.0.1
+      OCS_UNSETTLED_SPOOL: /var/spool/ocs   # usage released while Redis is down is kept here and charged later
     ports: ["127.0.0.1:3868:3868", "127.0.0.1:8000:8000", "127.0.0.1:9080:8080"]
-    volumes: *certs-ro
+    volumes: [certs:/certs:ro, "gateway-spool:/var/spool/ocs"]
     depends_on:
       <<: *ocs-deps
       seed: {condition: service_completed_successfully}
@@ -219,3 +220,4 @@ volumes:
   redis-replica-data:
   redpanda-data:
   mediation-data:
+  gateway-spool:

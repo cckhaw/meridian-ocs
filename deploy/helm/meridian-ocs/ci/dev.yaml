@@ -6,6 +6,7 @@ kafka: {brokers: kafka:9092}
 spread: {enabled: false}
 gateway:
   replicas: 1
+  unsettledSpool: {mode: emptyDir}
   diameter: {realm: dev.local, originHostSuffix: ocs.dev.local}
   nchf: {oauth: "off"}
 provisioning: {auth: "off", currency: EUR, split: false, approval: {policy: "adjust_balance>1000,change_lifecycle:terminated", allowSelf: true}}

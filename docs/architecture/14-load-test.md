@@ -58,15 +58,21 @@ Two cases the client cannot see are handled explicitly rather than assumed away:
   the previous reservation stays; for a barred subscriber the usage was settled. The answer does not say which,
   so the usage goes to `unsure` and the grant to `held`, never to `used`.
 - A **release answered `204`** carries no body, so the client cannot tell a settled release from a terminate
-  the gateway acknowledged while the data tier was down ([03](03-rating-engine.md)). The gateway counts those
-  (`ocs_engine_unsettled_terminates_total`; only terminates that reported usage). With `--gateway-admin`, the
-  generator allows total deviation outside the bounds of at most *that many requests' worth of bytes* and
-  reports it as **unsettled**; any deviation beyond that budget, or any deviation when the gateway admitted
-  nothing, is a violation. (Mutation-checked: a fake that hides the same fault from its counter fails the run.)
+  the gateway acknowledged while the data tier was down ([03](03-rating-engine.md)). With `--gateway-admin` it
+  reads the gateway's counters before and after the run. If the gateway has the reconciler
+  (`ocs_unsettled_*`), it waits up to `--drain-timeout` (90 s) for `ocs_unsettled_pending` to reach zero, then
+  allows a deviation only for what the gateway reports **lost** (no spool, a failed write, a dead letter) or
+  **still waiting**; usage the reconciler charged is no deviation at all. Anything lost or still waiting also
+  **fails the run**, even when it explains the deviation. With an older gateway, every terminate it admitted to
+  leaving unsettled is allowed as a deviation. Any other deviation is a violation. (Mutation-checked with
+  fakes: a reconciler that repairs everything passes with a zero budget, one that never drains fails, one that
+  loses usage fails, a fault hidden from the counters fails.)
 
 The check is limited, and says so: it covers the one bucket named by `--bucket`; a subscriber who spends the
 whole bundle is reported separately because usage beyond it is charged to other buckets, which are not
-checked. It does not check the cash bucket, events, or the Kafka event trail.
+checked. It does not check the cash bucket, events, or the Kafka event trail. It is **blind to usage in a refused
+update** (settled or not is unknowable to the client, so both are accepted), which is exactly the loss the
+reconciler does not cover yet ([03](03-rating-engine.md)).
 
 ### Look-alike sessions
 
@@ -97,9 +103,10 @@ fails.
 
 ## Failure injection
 
-`dev/chaos.sh replica-freeze|primary-stop|primary-kill|gateway-kill|all` (needs the local stack, Docker and
-Go) starts the generator at 150 sessions/s over 300 subscribers, lets it run healthy for 10 s, breaks one
-thing for 8 s, restores it, keeps loading for 25 s more, and reconciles every balance. `--timeline` prints
+`dev/chaos.sh replica-freeze|primary-stop|primary-kill|gateway-kill|redis-and-gateway|all` (needs the local stack, Docker and
+Go) starts the generator at 150 sessions/s over 300 subscribers (each session lasting 2 s, so many are in flight when
+the fault strikes), lets it run healthy for 10 s, breaks one thing for 8 s, restores it, keeps loading for 25 s
+more, waits for the gateway to charge any usage it saved, and reconciles every balance. `--timeline` prints
 what happened in each second. It stops, freezes and kills containers of the stack: development only, and not
 part of CI (it takes about a minute per scenario).
 
@@ -110,25 +117,30 @@ part of CI (it takes about a minute per scenario).
 | Redis **primary killed** (SIGKILL), restarted | about 1,200 of 6,450 | the same | Same as above. No acknowledged commit was lost in 4 kills, which is evidence, not proof (see gaps). |
 | **Gateway killed**, restarted | about 1,650 of 6,450 (26 %) | the 8 s of the fault and about 3 s after | In-flight sessions fail; sessions continue after the restart because their state is in Redis. About 3 s from `start` to serving. |
 
-Across the 10 runs with the final generator and gateway (all four scenarios once, then the two Redis
-outages three more times each) **every balance reconciled**: no money created, none taken twice, none
-negative. One of the 10 showed the gateway's *unsettled terminate* counter at 1 and a deviation of 200,000 bytes
-inside the 1,000,000-byte budget it allows.
+| Redis stopped **and the gateway restarted** while it was down (`redis-and-gateway`) | about 2,000 of 6,450 | the fault and the restart | Usage the gateway had saved to its spool before it was killed was charged by the *new* process once Redis returned (it charged records it had not written itself). |
 
-### What the failure injection found
+Across the **12 runs with the reconciler on** (all five scenarios once, then the two Redis outages and the
+restart scenario two or three more times each) every balance reconciled, 0 terminates were lost and none was left
+waiting. In the runs that stopped or killed Redis, between 3 and 150 terminates were released uncharged and saved,
+and all were charged afterwards. In **one** of the three restart runs the restarted gateway charged 6 records that
+the previous process had written; in the other two nothing was waiting at the moment of the kill, so persistence
+across a restart is shown by that one run and by the spool's own tests, not by all three.
+
+### What the failure injection found, and what was done
 
 1. **Usage was lost, silently, when Redis was down during a terminate.** The first Redis-stop run failed the
-   reconciliation: one session's release had been acknowledged with `204` after a 0.6 s stall but never
-   settled; its reservation expired 36 s later and the usage (800 KB) was never charged. Redis's own ledger
-   for the subscriber showed 22 sessions the client had completed, 21 with two settlements and one with
-   one. This is the documented behaviour of the engine ([03](03-rating-engine.md): a terminate during an
-   outage is acknowledged so the network can release the session, and the usage "is not charged until
-   reconciliation consumes the audit event"), and the reconciler **does not exist**. What was missing was any
-   way to see it, and a test that sizes it. Now: `ocs_engine_unsettled_terminates_total`, the chart alert
-   `OcsUsageNotSettled`, and the generator's budgeted check above. It is revenue leakage (the subscriber is
-   charged less), not a double-spend, but it is real, and a reconciler remains the thing to build.
+   reconciliation: a release acknowledged with `204` after a stall had never been settled; its reservation
+   expired and its usage was never charged (Redis's own ledger for that subscriber showed 22 completed sessions
+   but one with a single settlement). This was the documented behaviour of the engine ([03](03-rating-engine.md))
+   with a reconciler that did not exist. Making sessions last 2 s turned it from a rare event into a certain one:
+   with the spool switched off, **one 8 s Redis stop lost the usage of 151 terminates**, and the run fails.
+   **Fixed in this version**: the gateway saves each such terminate to a local fsynced log before acknowledging it
+   and a reconciler replays it when Redis returns ([03](03-rating-engine.md#usage-released-while-the-data-tier-is-down-and-its-reconciler)).
+   With it on, the same fault left 150 terminates saved, 150 charged afterwards, 0 lost, and every balance
+   reconciled with a **zero** deviation budget (the generator now waits for the backlog to drain, and
+   fails the run for anything lost or still waiting).
 2. **The first version of the check blamed the system for a gap in its own model**: it assumed a `204` meant
-   settled. The fix above makes the model state what it does not know.
+   settled. It now states what it cannot know (refused updates) and takes the rest from the gateway's counters.
 3. **Behaviour during a Redis outage is not uniform** (hanging until the client times out versus an
    immediate refusal), probably depending on whether the breaker has opened by the time a request arrives. Not
    investigated.
@@ -162,11 +174,12 @@ Redis persistence, or replica acknowledgement, and none was tested. The measured
 2. **Nchf only.** There is no Diameter Gy mode: the generator speaks HTTP/2 JSON, not the Diameter
    capabilities exchange and credit-control messages.
 3. **Charging only; no mixed load.** Provisioning changes, catalog publishes and mediation are not driven
-   concurrently. Failure injection covers four faults, one at a time, for 8 s ([above](#failure-injection)):
+   concurrently. Failure injection covers five faults, one at a time, for 8 s ([above](#failure-injection)):
    no Kafka outage, network partition, slow or full disk, clock jump, or two faults at once, and no
    **Redis failover** (there is no Sentinel or operator, so a killed primary is simply restarted: a promoted
    replica that lacks an acknowledged write is untested). Whether a SIGKILLed primary can lose commits the
-   replica acknowledged depends on AOF settings and was exercised only four times.
+   replica acknowledged depends on AOF settings and was exercised only a handful of times. The reconciler
+   covers terminates, not refused updates, and the gateway's spool is node-local ([03](03-rating-engine.md)).
 4. **Seeding goes through the provisioning API**, about 250 subscribers per second here, and at most 99,999
    per run; nothing exercises a large subscriber population or a skewed (hot-subscriber) distribution
    beyond choosing a small `--subscribers`.

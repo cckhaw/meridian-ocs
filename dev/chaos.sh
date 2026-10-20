@@ -4,16 +4,18 @@
 # and lets the generator reconcile every balance afterwards. The run reports what the fault did to
 # availability, second by second, and fails if money was created, lost or taken twice.
 #
-#   dev/chaos.sh replica-freeze primary-stop primary-kill gateway-kill     (or: all)
+#   dev/chaos.sh replica-freeze primary-stop primary-kill gateway-kill redis-and-gateway     (or: all)
 #
 # Needs docker compose, Go and a running stack. Development stack only: it stops and kills containers.
-# Environment: RATE (sessions/s, default 150), SUBSCRIBERS (300), HOLD (seconds the fault lasts, 8).
+# Environment: RATE (sessions/s, default 150), SUBSCRIBERS (300), HOLD (seconds the fault lasts, 8),
+# SESSION (how long each charging session lasts, default 2s: sessions must be in flight when the fault strikes).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 RATE=${RATE:-150}
 SUBSCRIBERS=${SUBSCRIBERS:-300}
 HOLD=${HOLD:-8}
+SESSION=${SESSION:-2s}
 WARMUP=3
 BEFORE=10                         # seconds of healthy load before the fault
 AFTER=${AFTER:-25}                # seconds after the fault is removed, to see recovery
@@ -32,9 +34,13 @@ wait_ready() { # wait_ready <admin port> <seconds>
   return 1
 }
 
-durability() { # the gateway's own counters: commits acknowledged by fewer replicas than required, and commits that skipped the wait
+durability() { # the gateway's own counters: commits acknowledged by fewer replicas than required, commits that skipped the wait,
+  # and usage released while Redis was down (saved, charged afterwards, lost)
   curl -fsS --max-time 3 http://127.0.0.1:9080/metrics 2>/dev/null |
-    awk '/^ocs_durability_short_total /{s=$2} /^ocs_durability_suspended_total /{u=$2} END{printf "short=%s suspended=%s", s+0, u+0}'
+    awk '/^ocs_durability_short_total /{s=$2} /^ocs_durability_suspended_total /{u=$2}
+         /^ocs_engine_unsettled_terminates_total /{t=$2} /^ocs_engine_unsettled_recorded_total /{r=$2} /^ocs_unsettled_settled_total /{d=$2}
+         /^ocs_engine_unsettled_unrecorded_total /{l=$2} /^ocs_unsettled_dead_total /{x=$2}
+         END{printf "short=%s suspended=%s | unsettled terminates=%s recorded=%s charged later=%s lost=%s", s+0, u+0, t+0, r+0, d+0, l+0+x}'
 }
 
 inject() { # inject <scenario> <start|stop>
@@ -45,6 +51,9 @@ inject() { # inject <scenario> <start|stop>
     primary-stop:stop)    docker compose start redis >/dev/null 2>&1 ;;
     primary-kill:start)   docker compose kill redis >/dev/null 2>&1 ;;
     primary-kill:stop)    docker compose start redis >/dev/null 2>&1 ;;
+    redis-and-gateway:start) # Redis down, then the gateway restarts while usage it could not charge is still on disk
+      docker compose stop redis >/dev/null 2>&1; sleep 3; docker compose kill gateway >/dev/null 2>&1; docker compose start gateway >/dev/null 2>&1 ;;
+    redis-and-gateway:stop) docker compose start redis >/dev/null 2>&1 ;;
     gateway-kill:start)   docker compose kill gateway >/dev/null 2>&1 ;;
     gateway-kill:stop)    docker compose start gateway >/dev/null 2>&1 ;;
     *) echo "unknown scenario $1" >&2; return 2 ;;
@@ -57,7 +66,7 @@ run_scenario() {
   echo "=== $s: $RATE sessions/s, fault after ${BEFORE}s for ${HOLD}s, then ${AFTER}s of recovery"
   for p in 9080 9081; do wait_ready "$p" 120 || { echo "service on admin port $p is not ready before the run" >&2; return 2; }; done
   "$BIN" -subscribers "$SUBSCRIBERS" -rate "$RATE" -duration "${DURATION}s" -warmup "${WARMUP}s" -conns 4 \
-    -timeout 3s -timeline -audit -gateway-admin http://127.0.0.1:9080 -json "$json" > "$log" 2>&1 &
+    -timeout 3s -hold "$SESSION" -timeline -audit -gateway-admin http://127.0.0.1:9080 -json "$json" > "$log" 2>&1 &
   local pid=$!
   # seeding finishes when the generator starts driving; the fault clock starts from the end of warm-up
   for _ in $(seq 120); do grep -q '^driving' "$log" 2>/dev/null && break; kill -0 "$pid" 2>/dev/null || break; sleep 1; done
@@ -70,7 +79,7 @@ run_scenario() {
   wait "$pid"; local rc=$?
   local dur; dur=$(durability)
   sed -n '/=== load test result ===/,$p' "$log" | grep -v '^$'
-  echo "gateway durability counters after the run: $dur  (commits that were not replica-acknowledged; reset if the gateway restarted)"
+  echo "gateway counters after the run: $dur  (reset if the gateway restarted)"
   # leave the stack healthy for the next scenario
   for p in 9080 9081; do wait_ready "$p" 120 || echo "WARNING: admin port $p did not become ready again after $s" >&2; done
   case $rc in
@@ -82,8 +91,8 @@ run_scenario() {
 }
 
 scenarios=("$@")
-[ "${#scenarios[@]}" -eq 0 ] && { echo "usage: dev/chaos.sh replica-freeze|primary-stop|primary-kill|gateway-kill ... | all" >&2; exit 2; }
-[ "${scenarios[0]}" = all ] && scenarios=(replica-freeze primary-stop primary-kill gateway-kill)
+[ "${#scenarios[@]}" -eq 0 ] && { echo "usage: dev/chaos.sh replica-freeze|primary-stop|primary-kill|gateway-kill|redis-and-gateway ... | all" >&2; exit 2; }
+[ "${scenarios[0]}" = all ] && scenarios=(replica-freeze primary-stop primary-kill gateway-kill redis-and-gateway)
 for s in "${scenarios[@]}"; do run_scenario "$s"; done
 echo "logs and JSON: $OUT"
 exit "$worst"

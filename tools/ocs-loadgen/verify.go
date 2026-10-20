@@ -29,9 +29,16 @@ type Verification struct {
 	// request's worth of usage uncharged or one reservation held. Budget is that, in bytes, and Explained the
 	// part of it the observed deviations used.
 	UnsettledTerminates float64 `json:"unsettledTerminates"`
-	Budget              int64   `json:"unsettledBudget"`
-	Explained           int64   `json:"unsettledExplained"`
-	OK                  bool    `json:"ok"`
+	// With the gateway's reconciler (ocs_unsettled_* metrics): how many of them it saved, charged afterwards, could
+	// not recover, and how many were still waiting when the wait for the backlog ended.
+	Reconciler   bool    `json:"reconcilerSeen"`
+	Recorded     float64 `json:"unsettledRecorded"`
+	Settled      float64 `json:"unsettledSettled"`
+	Lost         float64 `json:"unsettledLost"`
+	StillPending float64 `json:"unsettledStillPending"`
+	Budget       int64   `json:"unsettledBudget"`
+	Explained    int64   `json:"unsettledExplained"`
+	OK           bool    `json:"ok"`
 }
 
 // bounds returns the balance interval the run allows for s. The confirmed usage is certain; reservations
@@ -51,8 +58,27 @@ func bounds(s *subscriber) (low, high int64) {
 	return low, high
 }
 
-func verify(ctx context.Context, p *provClient, c config, subs []*subscriber, unsettled float64) Verification {
-	v := Verification{Verdicts: map[string]int{}, OK: true, UnsettledTerminates: unsettled, Budget: int64(unsettled) * c.RequestSize}
+// gwView is what the gateway's own counters said about unsettled usage during the run.
+type gwView struct {
+	Unsettled, Recorded, Settled, Lost, StillPending float64
+	Reconciler                                       bool
+}
+
+// budgetTerminates is how many terminates may explain a deviation. With the reconciler, usage it charged is no
+// deviation at all: only what it lost or has not yet charged can be. Without it (an older gateway), every
+// terminate the gateway admitted to leaving unsettled counts.
+func (g gwView) budgetTerminates() float64 {
+	if g.Reconciler {
+		return g.Lost + g.StillPending
+	}
+	return g.Unsettled
+}
+
+func verify(ctx context.Context, p *provClient, c config, subs []*subscriber, gw gwView) Verification {
+	unsettled := gw.budgetTerminates()
+	v := Verification{Verdicts: map[string]int{}, OK: true, UnsettledTerminates: gw.Unsettled, Reconciler: gw.Reconciler,
+		Recorded: gw.Recorded, Settled: gw.Settled, Lost: gw.Lost, StillPending: gw.StillPending,
+		Budget: int64(unsettled) * c.RequestSize}
 	type result struct {
 		verdict, note string
 		spent         bool
