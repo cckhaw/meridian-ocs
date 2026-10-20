@@ -9,6 +9,8 @@
 //	POST /v1/catalog/validate               validate a draft document
 //	POST /v1/catalog/dry-run                price synthetic requests under the draft and the live version
 //	POST /v1/catalog/versions               publish a draft as the next version   (publisher)
+//	GET  /v1/catalog/me                     who the caller is and whether it may publish
+//	GET  /ui/                               the catalog editor (web console)
 //
 // A publish is validated exactly as /validate does, is atomic cluster-wide and
 // is rejected with 409 when the editor's expectedVersion is stale.
@@ -20,6 +22,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +30,7 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/catalog"
 	"github.com/cckhaw/meridian-ocs/pkg/catalog/expr"
 	"github.com/cckhaw/meridian-ocs/pkg/tlsconf"
+	"github.com/cckhaw/meridian-ocs/services/ocs-catalog-service/internal/ui"
 )
 
 // MaxBody bounds request bodies (a large catalog is a few hundred KiB).
@@ -45,6 +49,8 @@ type Handler struct {
 	open       bool            // authentication off
 	now        func() time.Time
 	mux        *http.ServeMux
+	// Logf records publishes (who, which version); nil discards.
+	Logf func(format string, args ...any)
 }
 
 // New builds the handler. With open (authentication off) every caller may do
@@ -63,11 +69,53 @@ func New(store *catalog.Store, pub Publisher, open bool, publishers []string) *H
 	h.mux.HandleFunc("POST /v1/catalog/validate", h.validate)
 	h.mux.HandleFunc("POST /v1/catalog/dry-run", h.dryRun)
 	h.mux.HandleFunc("POST /v1/catalog/versions", h.publish)
+	h.mux.HandleFunc("GET /v1/catalog/me", h.me)
+	h.mux.Handle("GET /ui/", ui.Handler())
+	h.mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/", http.StatusFound)
+	})
 	return h
 }
 
-// ServeHTTP implements http.Handler.
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.ServeHTTP(w, r) }
+// ServeHTTP implements http.Handler. Requests that change state, or that only
+// check a draft, are refused when a browser says they come from another origin:
+// with client-certificate authentication the browser attaches the certificate
+// to any request, so without this check a page on another site could publish a
+// catalog for a user who has a certificate installed. (The JSON content type
+// already forces a CORS pre-flight that is never granted; this is the second
+// layer.)
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+	default:
+		if o := r.Header.Get("Origin"); o != "" {
+			if u, err := url.Parse(o); err != nil || u.Host != r.Host {
+				fail(w, http.StatusForbidden, "cross_origin", "cross-origin request refused", nil)
+				return
+			}
+		}
+	}
+	h.mux.ServeHTTP(w, r)
+}
+
+func (h *Handler) logf(format string, args ...any) {
+	if h.Logf != nil {
+		h.Logf(format, args...)
+	}
+}
+
+func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
+	cn, ok := h.authn(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"principal":  cn,
+		"canPublish": h.open || h.publishers[cn],
+		"authOff":    h.open,
+	})
+}
 
 type errBody struct {
 	Error struct {
@@ -301,6 +349,7 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 	var ve *catalog.ValidationError
 	switch {
 	case err == nil:
+		h.logf("catalog version %d published by %q, effective %s", sn.Version, cn, sn.EffectiveFrom.Format(time.RFC3339))
 		w.Header().Set("Location", "/v1/catalog?version="+strconv.FormatInt(sn.Version, 10))
 		writeJSON(w, http.StatusCreated, publishResponse{sn.Version, sn.EffectiveFrom, nonNil(warns)})
 	case errors.As(err, &ve):

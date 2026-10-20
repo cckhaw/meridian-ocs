@@ -20,7 +20,7 @@ versioned tariff catalog, provisions subscribers asynchronously, and mediates of
 | Subscriber identity mapping | done | `pkg/identity` | [06](docs/architecture/06-identity-mapping.md) |
 | Durability (replica-acknowledged commits) | done | `pkg/datalayer/durability.go` | [07](docs/architecture/07-durability.md) |
 | Provisioning & lifecycle, subscriber lookup by MSISDN/IMSI/NAI, web console (find, create) | done | `services/ocs-provisioning-service` | [08](docs/architecture/08-provisioning.md) |
-| Tariff catalog + per-subscriber plans (offerings) | done | `pkg/catalog`, `services/ocs-catalog-service`, `attach_offering` in provisioning | [09](docs/architecture/09-catalog.md), [08](docs/architecture/08-provisioning.md) |
+| Tariff catalog + per-subscriber plans (offerings), catalog editor web UI | done | `pkg/catalog`, `services/ocs-catalog-service`, `attach_offering` in provisioning | [09](docs/architecture/09-catalog.md), [08](docs/architecture/08-provisioning.md) |
 | Offline CDR mediation | done (BER mapping unverified) | `services/ocs-mediation-pipeline` | [10](docs/architecture/10-mediation.md) |
 | Multi-region active-active | design only | doc 01 §6 | |
 | AI Ops integration: metrics, guarded control plane, declarative mappings | done for the gateway and mediation (no agent included) | `pkg/telemetry`, `pkg/control`, `pkg/mapping`, `services/ocs-aiops-layer` | [11](docs/architecture/11-aiops.md) |
@@ -124,6 +124,13 @@ OCS_UI_DEV_ADDR=127.0.0.1:8443 go test -run ServeConsoleForManualTesting -timeou
 # then open http://127.0.0.1:8443/ui/   (in-memory Kafka and a throwaway Redis, authentication off, two sample offerings)
 ```
 
+The catalog editor (offerings, price plans, validate, price comparison, publish, history) has the same helper:
+
+```sh
+OCS_UI_DEV_ADDR=127.0.0.1:8444 go test -run ServeEditorForManualTesting -timeout 1h ./services/ocs-catalog-service
+# then open http://127.0.0.1:8444/ui/
+```
+
 ## Testing
 
 - Unit and integration tests run against a **real `redis-server`**, including a primary with a real
@@ -161,7 +168,7 @@ Honest list; each module doc has the detail.
   against real network files before use; no SMF-CDR mapping.
 - **The web console** covers finding a subscriber and creating one (with offering and top-up). It has no login
   of its own (browser client certificates), and no screens yet for top-ups, lifecycle changes, offering
-  changes, catalog editing or usage history.
+  changes or usage history. The catalog editor is separate (on the catalog service) and has no approval workflow.
 - **Kafka connections are plaintext** (no TLS/SASL), no SFTP pull for CDR files, no ClickHouse/S3 sink.
 - **No automatic Grace → Suspended timer**, no reconciler for usage that could not be settled during
   an outage, and no profile cache feeding the postpaid fail-open path.

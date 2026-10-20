@@ -128,15 +128,51 @@ need any verified client certificate; publish needs a common name in
 `GET /v1/catalog/schema` returns the variables, functions, enums and limits so an
 editor can build its form without hard-coding them.
 
+## Catalog editor (web)
+
+`/ui/` on the catalog listener (`GET /` redirects there) is a no-build, no-dependency
+single-page editor with the same hardening as the provisioning console: embedded
+assets, strict CSP (no inline script or style), text-only rendering, and the same
+mTLS and publisher rules, because it only calls the REST API. `GET /v1/catalog/me`
+tells it who the caller is and whether it may publish.
+
+- **Draft.** The editor works on a private copy of the newest published version
+  (kept in `sessionStorage` while the tab lives; it is dropped if a newer version
+  appears). Nothing affects pricing until a publish succeeds.
+- **Screens.** Offerings (name, plan, allowance buckets with readable units), price
+  plans (policy filters, charge rules with priority, ordering, classes and cash
+  price), Review & publish, History, and a JSON view for bulk edits.
+- **Review.** Changes against the newest version are listed (new/changed/removed),
+  *Validate* shows every problem with its path, *Try some prices* runs dry-run cases
+  against the version in force and the draft side by side, and *Publish* needs a
+  successful validation of the current draft plus an explicit confirmation. A stale
+  editor gets the server's 409 and is told to reload.
+- **History.** Any older version can become the starting point of a new draft (a
+  rollback is a new, later version; history stays append-only).
+- **Browser-origin protection.** A client certificate is attached by the browser to
+  any request, so non-GET requests carrying an `Origin` other than the listener's own
+  are refused with `403 cross_origin` (tested, mutation-checked). Publishes are logged
+  with the certificate's common name.
+
 ## Verification
 
 Unit and integration tests with a real `redis-server`; mutation-checked:
 disabling the engine tolerance, the policy filters, the atomic append guard,
 the publisher check, strict JSON decoding and the conflict mapping each makes a
 test fail. End to end: REST over mTLS -> Redis -> an independent node that
-prices from the replicated catalog, including a future-dated version.
+prices from the replicated catalog, including a future-dated version. The editor
+is also driven in a real browser (`internal/ui/browser-check/editor.mjs`, by hand):
+create a plan and an offering, see an invalid draft refused with its path, compare
+prices, publish, find the future-dated version in the history, roll back to a draft,
+and see a stale second editor refused; no CSP violations and no horizontal scroll at
+phone width.
 
 ## Known gaps
+
+0. **The editor has no per-user identity beyond the certificate name** and no
+   approval step (any publisher can publish); there is no diff view of rule
+   contents beyond "changed", and no concurrent-edit merge (a stale editor must copy
+   its draft out of the JSON tab and reload).
 
 1. **Offering changes are seen after the cache TTL** (30 s by default) by gateways
    and mediation nodes; there is no push invalidation. There is no command to

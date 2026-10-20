@@ -40,6 +40,7 @@ func NewApp(ctx context.Context, cfg Config, logf func(string, ...any)) (*App, e
 	}
 
 	h := api.New(store, a.rep, cfg.Auth == "off", cfg.Publishers)
+	h.Logf = logf
 	a.srv = &http.Server{Handler: h, ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
 	if cfg.Auth == "mtls" {
