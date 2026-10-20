@@ -393,6 +393,9 @@
             },
             "sizeLimit": {
               "type": "string"
+            },
+            "peerMayRepeat": {
+              "type": "boolean"
             }
           },
           "additionalProperties": false

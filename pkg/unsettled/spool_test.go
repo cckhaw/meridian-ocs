@@ -315,11 +315,11 @@ func TestRunDrainsOnceTheDataTierReturns(t *testing.T) {
 	}
 }
 
-func TestAnUpdateRecordKeepsItsTypeAndWhetherItWasEverSent(t *testing.T) {
+func TestAnUpdateRecordKeepsItsType(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
 	u := term("u1", "s1", 4, 900)
-	u.Type, u.Unapplied = canonical.TypeUpdate, true
+	u.Type = canonical.TypeUpdate
 	u.Units[0].Requested = 123456 // an update asked for more; the late settlement reserves nothing
 	if err := s.Record(u); err != nil {
 		t.Fatal(err)
@@ -328,13 +328,13 @@ func TestAnUpdateRecordKeepsItsTypeAndWhetherItWasEverSent(t *testing.T) {
 	s, _ = Open(dir)
 	defer s.Close()
 	rec := s.Pending(0)[0]
-	if !rec.IsUpdate() || !rec.Unapplied {
+	if !rec.IsUpdate() {
 		t.Fatalf("%+v", rec)
 	}
 	q := rec.Request()
 	defer canonical.ReleaseRequest(q)
-	if q.Type != canonical.TypeUpdate || !q.Unapplied || q.Units[0].Used != 900 || q.Units[0].Requested != 0 || q.RequestNumber != 4 {
-		t.Fatalf("a refused update is replayed asking for nothing, and remembers it was never sent: %+v", q)
+	if q.Type != canonical.TypeUpdate || q.Units[0].Used != 900 || q.Units[0].Requested != 0 || q.RequestNumber != 4 {
+		t.Fatalf("a refused update is replayed asking for nothing: %+v", q)
 	}
 }
 
@@ -352,7 +352,7 @@ func TestRecordsWrittenBeforeUpdatesWereRecordedAreTerminates(t *testing.T) {
 	rec := s.Pending(0)[0]
 	q := rec.Request()
 	defer canonical.ReleaseRequest(q)
-	if rec.IsUpdate() || q.Type != canonical.TypeTerminate || q.Unapplied {
+	if rec.IsUpdate() || q.Type != canonical.TypeTerminate {
 		t.Fatalf("a record without a type is a terminate: %+v", q)
 	}
 }

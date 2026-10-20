@@ -78,7 +78,7 @@ tests:
           - exp_labels: {severity: warning}
             exp_annotations:
               summary: "Usage in a refused update was left uncharged because charging it could charge twice"
-              description: "An update was refused while the data tier was down and its outcome was unknown; the session has since moved on, and the network element may have reported that usage again. The record is kept as a dead letter in the gateway's spool; a person decides."
+              description: "An update was refused while the data tier was down, and whether the data tier ever applied it can no longer be told (the session is more than 8 requests past it), so charging it could charge twice. The record is kept as a dead letter in the gateway's spool; a person decides."
       - {eval_time: 19m, alertname: OcsUnsettledUsageAmbiguous, exp_alerts: []}
 
   - name: unsettled usage that can no longer be recovered

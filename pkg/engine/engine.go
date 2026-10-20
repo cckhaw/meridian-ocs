@@ -86,6 +86,13 @@ type Config struct {
 	Validity   time.Duration // grant validity, whole seconds, default 30s
 	Grace      time.Duration // extra reservation lifetime beyond validity, default 5s
 	Now        func() time.Time
+	// PeerMayRepeatUsage says the network elements may report the usage of an update they were refused again
+	// (in a later request of the same session, under a new request number). The reconciler then charges a refused
+	// update only if the session has not moved past it, and otherwise keeps it for a person, so usage that was
+	// repeated is never charged twice at the price of sometimes not charging usage that was not. False (the
+	// default) charges it unless the data tier applied that very request, which it can tell exactly for the last 8
+	// request numbers of a session; RFC 4006 §9.1 and its client state machine support that for Gy (doc 03).
+	PeerMayRepeatUsage bool
 }
 
 // Deps are the engine's collaborators. Breaker, Policy and Audit are optional.
@@ -246,7 +253,7 @@ func (e *Engine) Rate(ctx context.Context, req *canonical.Request, resp *canonic
 
 // Settle submits a terminate, or an update that was refused, again, as the unsettled-usage reconciler does after
 // the data tier was down when it first arrived. An update is settled after the fact without reserving anything
-// (datalayer.ModeLate, or ModeLateUnapplied when req.Unapplied says it never reached the data tier). Unlike Rate it is never answered by the fail policy: when the data tier cannot take the
+// (datalayer.ModeLateExact, or ModeLateStrict with PeerMayRepeatUsage), and never when the data tier already applied it. Unlike Rate it is never answered by the fail policy: when the data tier cannot take the
 // request it returns the error and the caller keeps the record. The charge is idempotent per session and
 // request number, so a terminate that did reach the data tier the first time is answered from its stored
 // result and charges nothing twice. The result is ResultUnknownSession or ResultStaleRequest when the session
@@ -354,9 +361,9 @@ func (w *worker) handle(j *job) {
 
 	mode, ok := modeOf(req.Type)
 	if j.replay && req.Type == canonical.TypeUpdate {
-		mode = datalayer.ModeLate
-		if req.Unapplied {
-			mode = datalayer.ModeLateUnapplied
+		mode = datalayer.ModeLateExact
+		if e.cfg.PeerMayRepeatUsage {
+			mode = datalayer.ModeLateStrict
 		}
 	}
 	if !ok || req.SubscriberID == "" || req.SessionID == "" ||
@@ -407,7 +414,7 @@ func (w *worker) handle(j *job) {
 
 	if err != nil {
 		// Never sent: the breaker kept the call from being made, or the connection could not be established.
-		w.degrade(req, resp, now, errors.Is(err, errBreakerOpen) || datalayer.NotSent(err))
+		w.degrade(req, resp, now)
 		return
 	}
 	if w.dres.Replication == datalayer.ReplicationShort {
@@ -539,12 +546,12 @@ func policyKind(k canonical.UnitKind) failpolicy.UnitKind {
 
 // degrade answers a request without the data tier, via the hybrid fail policy:
 // prepaid (all of it) fails closed; postpaid gets a capped, journalled grant.
-func (w *worker) degrade(req *canonical.Request, resp *canonical.Response, now time.Time, notSent bool) {
+func (w *worker) degrade(req *canonical.Request, resp *canonical.Response, now time.Time) {
 	e := w.e
 	e.degraded.Add(1)
 	resp.Result = canonical.ResultUnavailable
 	if req.Type == canonical.TypeUpdate {
-		w.saveUnsettledUpdate(req, notSent)
+		w.saveUnsettledUpdate(req)
 	}
 
 	if req.Type == canonical.TypeTerminate {
@@ -602,12 +609,11 @@ func (w *worker) degrade(req *canonical.Request, resp *canonical.Response, now t
 // saveUnsettledUpdate records the usage of an update that is about to be refused for want of the data tier: the
 // network element reports usage since its last measurement and will not report it again, so without a record
 // it is never charged.
-func (w *worker) saveUnsettledUpdate(req *canonical.Request, notSent bool) {
+func (w *worker) saveUnsettledUpdate(req *canonical.Request) {
 	e := w.e
 	for i := range req.Units {
 		if req.Units[i].Used > 0 {
 			e.unsettledUpdates.Add(1)
-			req.Unapplied = notSent
 			if sink := e.deps.Unsettled; sink != nil && sink.Record(req) == nil {
 				e.unsettledRecorded.Add(1)
 			} else {

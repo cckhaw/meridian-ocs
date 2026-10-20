@@ -112,6 +112,7 @@ gateway:
   unsettledSpool:
     mode: ""                 # REQUIRED: "emptyDir" (survives a container restart, NOT the loss of the pod or node) | "off" (that usage is lost; development only)
     sizeLimit: 256Mi
+    peerMayRepeat: false     # true if a network element may report a refused update's usage again under a new request number: it is then kept for a person once the session moved on, not charged (doc 03)
   tariff: static             # static | catalog
   defaultPlan: ""            # REQUIRED when tariff=catalog
   cashBytesRate: ""          # static tariff num/den; empty = the gateway's default

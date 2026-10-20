@@ -43,10 +43,7 @@ type Record struct {
 	Source uint8     `json:"src,omitempty"`
 	// Type is the canonical request type of what was acknowledged without being settled: a terminate (the
 	// default, and what every record written before updates were recorded is) or a refused update.
-	Type uint8 `json:"typ,omitempty"`
-	// Unapplied is true for an update that provably never reached the data tier (circuit breaker open,
-	// connection never made), false when its outcome is unknown.
-	Unapplied     bool      `json:"na,omitempty"`
+	Type          uint8     `json:"typ,omitempty"`
 	SubscriberID  string    `json:"sub"`
 	SessionID     string    `json:"ses"`
 	RequestNumber uint32    `json:"no"`
@@ -64,7 +61,6 @@ func FromRequest(req *canonical.Request, at time.Time) Record {
 		At:           at,
 		Source:       uint8(req.Source),
 		Type:         uint8(req.Type),
-		Unapplied:    req.Unapplied,
 		SubscriberID: req.SubscriberID, SessionID: req.SessionID, RequestNumber: req.RequestNumber,
 		EventTime: req.EventTime, RATType: req.RATType, CellID: req.CellID, Slice: req.Slice,
 	}
@@ -86,7 +82,7 @@ func (r Record) Request() *canonical.Request {
 	q := canonical.AcquireRequest()
 	q.Source, q.Type = canonical.Source(r.Source), canonical.TypeTerminate
 	if r.IsUpdate() {
-		q.Type, q.Unapplied = canonical.TypeUpdate, r.Unapplied
+		q.Type = canonical.TypeUpdate
 	}
 	q.SubscriberID, q.SessionID, q.RequestNumber = r.SubscriberID, r.SessionID, r.RequestNumber
 	q.EventTime, q.RATType, q.CellID, q.Slice = r.EventTime, r.RATType, r.CellID, r.Slice

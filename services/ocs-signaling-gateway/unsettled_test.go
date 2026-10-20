@@ -76,3 +76,16 @@ type nopStore struct{}
 
 func (nopStore) Charge(context.Context, *datalayer.Request, *datalayer.Response) error { return nil }
 func (nopStore) SweepExpired(context.Context, string, time.Time) (int, error)          { return 0, nil }
+
+func TestPeerRepeatsUsageSetting(t *testing.T) {
+	for v, want := range map[string]bool{"": false, "false": false, "true": true} {
+		t.Setenv("OCS_UNSETTLED_PEER_REPEATS", v)
+		if got, err := peerRepeatsUsage(); err != nil || got != want {
+			t.Errorf("%q: %v %v", v, got, err)
+		}
+	}
+	t.Setenv("OCS_UNSETTLED_PEER_REPEATS", "yes")
+	if _, err := peerRepeatsUsage(); err == nil || !strings.Contains(err.Error(), "OCS_UNSETTLED_PEER_REPEATS") {
+		t.Errorf("a typo must be refused, not read as false: %v", err)
+	}
+}

@@ -41,6 +41,9 @@
 //	OCS_UNSETTLED_SPOOL  required: a directory, or "off". The log of terminates that were acknowledged while
 //	                     Redis was down; the reconciler charges their usage when Redis returns. "off" means
 //	                     that usage is lost. Needs a volume that outlives the process (docs/architecture/03)
+//	OCS_UNSETTLED_PEER_REPEATS  "true" if a network element may report the usage of an update it was refused
+//	                     again under a new request number: such usage is then not charged by the reconciler once the
+//	                     session has moved past it, but kept for a person (default false; docs/architecture/03)
 //	OCS_ADMIN_ADDR       /healthz, /readyz and /metrics       (default :8080; keep it cluster-internal)
 //	OCS_LOG_LEVEL        debug | info | warn | error          (default info; JSON logs)
 //	OCS_CONTROL_ADDR     guarded AI Ops control plane (gRPC); unset = none. With it:
@@ -255,6 +258,10 @@ func run(ctx context.Context, ready func()) error {
 	if err != nil {
 		return err
 	}
+	peerMayRepeatUsage, err := peerRepeatsUsage()
+	if err != nil {
+		return err
+	}
 	if spool != nil {
 		defer spool.Close() // after the engine has stopped (defers run last-in first)
 	}
@@ -270,7 +277,7 @@ func run(ctx context.Context, ready func()) error {
 	if spool != nil {
 		deps.Unsettled = spool
 	}
-	eng, err := engine.New(engine.Config{}, deps)
+	eng, err := engine.New(engine.Config{PeerMayRepeatUsage: peerMayRepeatUsage}, deps)
 	if err != nil {
 		return err
 	}
