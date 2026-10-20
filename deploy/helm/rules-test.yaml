@@ -230,3 +230,26 @@ tests:
             exp_annotations:
               summary: "Someone tried to approve their own request"
               description: "The attempt was refused. Look for a shared certificate or a person using two identities."
+
+  - name: a gateway spool volume left behind by a scale-in
+    interval: 1m
+    input_series:
+      # claims 0 and 1 exist for the whole run; pod 1 stops mounting its claim at minute 5
+      - series: 'kube_persistentvolumeclaim_info{namespace="default",persistentvolumeclaim="unsettled-spool-r-gateway-0"}'
+        values: '1+0x60'
+      - series: 'kube_persistentvolumeclaim_info{namespace="default",persistentvolumeclaim="unsettled-spool-r-gateway-1"}'
+        values: '1+0x60'
+      - series: 'kube_pod_spec_volumes_persistentvolumeclaims_info{namespace="default",pod="r-gateway-0",persistentvolumeclaim="unsettled-spool-r-gateway-0"}'
+        values: '1+0x60'
+      - series: 'kube_pod_spec_volumes_persistentvolumeclaims_info{namespace="default",pod="r-gateway-1",persistentvolumeclaim="unsettled-spool-r-gateway-1"}'
+        values: '1+0x4 _x56'
+    alert_rule_test:
+      - {eval_time: 3m, alertname: OcsSpoolClaimStranded, exp_alerts: []}
+      - {eval_time: 20m, alertname: OcsSpoolClaimStranded, exp_alerts: []}   # stranded, but not yet for 30 minutes
+      - eval_time: 40m
+        alertname: OcsSpoolClaimStranded
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: default, persistentvolumeclaim: unsettled-spool-r-gateway-1}
+            exp_annotations:
+              summary: "A gateway spool volume has no pod"
+              description: "unsettled-spool-r-gateway-1 is not mounted by any pod, which happens after the gateway is scaled in. Usage it holds is not replayed until a pod with that ordinal runs again. Scale back out to drain it, then delete the claim."

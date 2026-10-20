@@ -132,6 +132,18 @@ spec:
           annotations:
             summary: "Usage is arriving that the catalog cannot price"
             description: "Units are sent with no rates: a subscriber's plan is missing or a barring filter is matching more than intended."
+    {{- if eq .Values.gateway.unsettledSpool.mode "persistent" }}
+        - alert: OcsSpoolClaimStranded
+          expr: |
+            kube_persistentvolumeclaim_info{namespace="{{ .Release.Namespace }}", persistentvolumeclaim=~"unsettled-spool-{{ include "ocs.name" (dict "root" . "name" "gateway") }}-[0-9]+"}
+              unless on (namespace, persistentvolumeclaim)
+            kube_pod_spec_volumes_persistentvolumeclaims_info
+          for: 30m
+          labels: {severity: warning}
+          annotations:
+            summary: "A gateway spool volume has no pod"
+            description: "{{ "{{ $labels.persistentvolumeclaim }}" }} is not mounted by any pod, which happens after the gateway is scaled in. Usage it holds is not replayed until a pod with that ordinal runs again. Scale back out to drain it, then delete the claim."
+    {{- end }}
     {{- end }}
     {{- if or .Values.gateway.enabled .Values.provisioning.enabled .Values.catalog.enabled .Values.mediation.enabled }}
     - name: ocs-catalog
