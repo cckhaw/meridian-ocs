@@ -13,6 +13,7 @@ const (
 	verdictOverspend = "overspend"  // the balance is lower than any sequence of outcomes can explain: money was taken twice
 	verdictCreated   = "created"    // the balance is higher than allowed: value appeared from nowhere
 	verdictNegative  = "negative"   // the balance is below zero
+	verdictUnsettled = "unsettled"  // off the bounds by no more than the unsettled terminates the gateway counted allow
 	verdictUnread    = "unreadable" // the balance could not be read
 )
 
@@ -23,7 +24,14 @@ type Verification struct {
 	Violations []string            `json:"violations,omitempty"` // the first few, for reading
 	Trails     map[string][]string `json:"trails,omitempty"`     // with --audit: the history of each violating subscriber
 	Overflowed int                 `json:"subscribersThatSpentTheirBundle"`
-	OK         bool                `json:"ok"`
+	// UnsettledTerminates is how many terminates the gateway itself counted as acknowledged without settling
+	// (data tier down). A 204 carries no body, so the client cannot tell which; each one may leave up to one
+	// request's worth of usage uncharged or one reservation held. Budget is that, in bytes, and Explained the
+	// part of it the observed deviations used.
+	UnsettledTerminates float64 `json:"unsettledTerminates"`
+	Budget              int64   `json:"unsettledBudget"`
+	Explained           int64   `json:"unsettledExplained"`
+	OK                  bool    `json:"ok"`
 }
 
 // bounds returns the balance interval the run allows for s. The confirmed usage is certain; reservations
@@ -43,11 +51,12 @@ func bounds(s *subscriber) (low, high int64) {
 	return low, high
 }
 
-func verify(ctx context.Context, p *provClient, c config, subs []*subscriber) Verification {
-	v := Verification{Verdicts: map[string]int{}, OK: true}
+func verify(ctx context.Context, p *provClient, c config, subs []*subscriber, unsettled float64) Verification {
+	v := Verification{Verdicts: map[string]int{}, OK: true, UnsettledTerminates: unsettled, Budget: int64(unsettled) * c.RequestSize}
 	type result struct {
 		verdict, note string
 		spent         bool
+		dev           int64 // how far outside the bounds
 		key           string
 		trail         []string
 	}
@@ -72,9 +81,9 @@ func verify(ctx context.Context, p *provClient, c config, subs []*subscriber) Ve
 			case bal < 0:
 				results[i] = result{verdict: verdictNegative, note: fmt.Sprintf("%s: balance %d is negative", s.key, bal), spent: false}
 			case bal < low:
-				results[i] = result{verdict: verdictOverspend, note: fmt.Sprintf("%s: balance %d is below the lowest explainable %d (started %d)", s.key, bal, low, s.initial), spent: false}
+				results[i] = result{verdict: verdictOverspend, dev: low - bal, note: fmt.Sprintf("%s: balance %d is below the lowest explainable %d (started %d)", s.key, bal, low, s.initial), spent: false}
 			case bal > high:
-				results[i] = result{verdict: verdictCreated, note: fmt.Sprintf("%s: balance %d is above the highest explainable %d (started %d)", s.key, bal, high, s.initial), spent: false}
+				results[i] = result{verdict: verdictCreated, dev: bal - high, note: fmt.Sprintf("%s: balance %d is above the highest explainable %d (started %d)", s.key, bal, high, s.initial), spent: false}
 			case exactWanted && low == high:
 				results[i] = result{verdict: verdictExact, spent: bal == 0}
 			default:
@@ -83,6 +92,16 @@ func verify(ctx context.Context, p *provClient, c config, subs []*subscriber) Ve
 		}()
 	}
 	wg.Wait()
+	for i := range results {
+		// Deviations the gateway's own counter of unsettled terminates can account for are not violations;
+		// anything beyond that budget is.
+		r := &results[i]
+		if (r.verdict == verdictOverspend || r.verdict == verdictCreated) && v.Explained+r.dev <= v.Budget {
+			v.Explained += r.dev
+			r.note = fmt.Sprintf("%s (accounted for by %.0f unsettled terminates)", r.note, unsettled)
+			r.verdict = verdictUnsettled
+		}
+	}
 	for _, r := range results {
 		v.Checked++
 		v.Verdicts[r.verdict]++
@@ -90,7 +109,7 @@ func verify(ctx context.Context, p *provClient, c config, subs []*subscriber) Ve
 			v.Overflowed++
 		}
 		switch r.verdict {
-		case verdictExact, verdictWithin:
+		case verdictExact, verdictWithin, verdictUnsettled:
 		default:
 			v.OK = false
 			if len(v.Violations) < 10 {

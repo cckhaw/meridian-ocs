@@ -44,6 +44,12 @@ spec:
           annotations:
             summary: "Requests are being answered without the data tier"
             description: "The fail policy is answering instead of the balance store (prepaid fail-closed, postpaid fail-open with caps). Redis is unreachable or slow."
+        - alert: OcsUsageNotSettled
+          expr: sum(increase(ocs_engine_unsettled_terminates_total[10m])) > 0
+          labels: {severity: critical}
+          annotations:
+            summary: "Sessions were released without their last usage being charged"
+            description: "A terminate arrived while the data tier was down and was acknowledged; the usage it reported was not charged and its reservation will expire and be refunded. There is no reconciler yet: the affected sessions are in the engine audit events."
         - alert: OcsDataTierBreakerOpen
           expr: max(ocs_datatier_breaker_open) == 1
           for: 1m

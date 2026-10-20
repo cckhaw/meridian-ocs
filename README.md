@@ -10,7 +10,7 @@ with web consoles, metrics, alert rules, a Helm chart and a one-command local st
 99.999 % availability, zero double-spend. None of these has been demonstrated yet; see
 [What is not built yet](#what-is-not-built-yet).
 
-*Last updated: 2026-10-20, after the load test and balance reconciliation tool. This README is kept current with every
+*Last updated: 2026-10-20, after failure injection under load. This README is kept current with every
 change: see [Keeping this up to date](#keeping-this-up-to-date).*
 
 ## Try it
@@ -67,11 +67,11 @@ mean production-ready). The list of what does not exist yet is [further down](#w
 | Two-person approval | privileged changes (large balance corrections, terminations, bucket removals: chosen by one policy setting) wait until a *different* authorised person approves exactly what was requested; decided atomically in Redis, enforced again by the worker, expiring, audited on the events topic, over REST, gRPC and the console | [08](docs/architecture/08-provisioning.md#two-person-approval) |
 | Subscriber console (web) | find a subscriber, create one (with offering and top-up), top up, change offering, correct a balance, change status (termination needs the key typed in), and for approvers an Approvals tab; shows only what the caller's certificate allows | [08](docs/architecture/08-provisioning.md) |
 | Catalog editor (web) | create and configure offerings and price plans, validate, compare prices against the live version, publish, history and rollback drafts | [09](docs/architecture/09-catalog.md) |
-| Metrics and alerts | Prometheus metrics from every service, 31 alert rules (unit-tested with `promtool`), a Grafana dashboard | [11](docs/architecture/11-aiops.md), [12](docs/architecture/12-deployment.md) |
+| Metrics and alerts | Prometheus metrics from every service, 32 alert rules (unit-tested with `promtool`), a Grafana dashboard | [11](docs/architecture/11-aiops.md), [12](docs/architecture/12-deployment.md) |
 | AI Ops interface | guarded control plane in the gateway (allow-listed, clamped, auto-reverting, two-person rule for risky changes, audited), declarative mapping workbench, structured logs; no agent included | [11](docs/architecture/11-aiops.md) |
 | Helm chart | gateway, provisioning (api and worker), catalog, mediation, AI Ops; autoscaling, disruption budgets, spread, optional NetworkPolicy, ServiceMonitor, alert rules, dashboard; refuses insecure choices; values schema; checked in CI | [12](docs/architecture/12-deployment.md) |
 | Local stack | `docker-compose.yml` plus a smoke test that runs in CI | [13](docs/architecture/13-local-stack.md) |
-| Load test and reconciliation | `tools/ocs-loadgen`: seeds subscribers, drives Nchf sessions at a constant arrival rate (open loop, latency counted from when the arrival was due), then checks every balance against the usage it reported, so lost or created money fails the run; a short run is part of CI | [14](docs/architecture/14-load-test.md) |
+| Load test and reconciliation | `tools/ocs-loadgen`: seeds subscribers, drives Nchf sessions at a constant arrival rate (open loop, latency counted from when the arrival was due), then checks every balance against the usage it reported, so lost or created money fails the run; a short run is part of CI; `dev/chaos.sh` repeats it while the Redis replica or primary or the gateway is frozen, stopped or killed (development stack only, not in CI) | [14](docs/architecture/14-load-test.md) |
 
 Architecture and decisions: [01](docs/architecture/01-system-architecture.md),
 [02](docs/architecture/02-decisions-and-failure-policy.md).
@@ -85,7 +85,9 @@ one I would build first.
 - **Capacity is unproven.** A load generator exists ([14](docs/architecture/14-load-test.md)) but has only been
   run with the generator and the whole stack sharing one 4-vCPU sandbox, where the system sustained roughly
   1,800 charging requests/s before shedding load. 50k TPS and P99 < 10 ms are untested on real infrastructure; the generator has no
-  Diameter Gy mode, no fault injection during a run and no soak. **(next candidate: a run on dedicated hardware or a cluster, with failures injected)**
+  Diameter Gy mode and no soak, and fault injection covers four faults on the local stack only (no failover, partition or Kafka outage). **(next candidate: a run on dedicated hardware or a cluster)**
+- **Usage reported in a terminate that arrives while Redis is down is acknowledged but not charged**, and no reconciler recovers it
+  (measured under fault injection; now counted by `ocs_engine_unsettled_terminates_total` and alerted on, see [03](docs/architecture/03-rating-engine.md)).
 - **No Redis Cluster support** (`WAIT` is not available on Cluster) and no Sentinel/operator integration (the address is a single endpoint).
 - Redis access control is coarse: one user and password per release (no least-privilege ACL profile per service), and a rotated CA certificate is read at start-up only.
 - **No multi-region active-active replication** (design only, doc 01 §6).
@@ -189,7 +191,7 @@ pkg/                  shared library module
 tools/ocs-loadgen/    load generator and balance reconciliation (own Go module; see doc 14)
 services/             one Go module per service (see go.work); the provisioning and catalog services embed their consoles
 build/Dockerfile      builds any service: --build-arg SERVICE=<name>
-docker-compose.yml    local development stack (+ dev/: seed catalog, smoke test)
+docker-compose.yml    local development stack (+ dev/: seed catalog, smoke test, failure-injection script)
 deploy/helm/          Helm chart (values schema, CI value sets, alert rules + tests, dashboard, test.sh)
 docs/architecture/    design documents 01-14
 .github/workflows/    CI: fmt, vet, build, test (with Redis); protobuf checks; Helm chart checks; local stack smoke test and a short load test
@@ -206,6 +208,7 @@ make proto-tools proto       # regenerate protobuf code (needs buf)
 make docker                  # one image per service
 make stack-up stack-smoke    # the local stack and its smoke test (make stack-down to stop)
 make loadtest                # load + balance reconciliation against the running stack (LOAD_ARGS="-rate 500 ...")
+make chaos                   # the same while the replica, the Redis primary or the gateway is broken (dev stack only)
 deploy/helm/test.sh          # chart checks (needs helm; kubeconform and promtool are used if installed)
 ```
 
@@ -242,7 +245,8 @@ Each service documents its environment variables at the top of its `main.go`/`co
 - Load generator: tested against in-process fakes of the gateway and provisioning, including faulty ones that
   must make it fail (grants not debited, double debit, look-alike sessions); run against the real stack at
   100 to 1,000 sessions/s, including overload (`429` shedding) and a deliberately spent bundle; a short run
-  is part of the CI stack job. Measured results and their limits: [14](docs/architecture/14-load-test.md).
+  is part of the CI stack job. `dev/chaos.sh` runs it under four injected faults; every balance reconciled in 10 runs, and
+  it found that usage in a terminate during a Redis outage is not charged. Measured results and their limits: [14](docs/architecture/14-load-test.md).
 
 ## Documentation
 

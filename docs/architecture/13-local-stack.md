@@ -21,7 +21,8 @@ docker compose down -v         # stop and forget everything
 ```
 
 `make stack-up`, `make stack-smoke` and `make stack-down` do the same. `make loadtest` drives charging
-traffic at the running stack and reconciles every balance afterwards ([14](14-load-test.md)). It needs Docker
+traffic at the running stack and reconciles every balance afterwards, and `make chaos` does the same
+while it stops, freezes and kills the replica, the Redis primary and the gateway ([14](14-load-test.md#failure-injection)). It needs Docker
 with Compose v2 and about 2 GB of memory. Images are built for the host architecture,
 so it runs natively on Apple Silicon.
 

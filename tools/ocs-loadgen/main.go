@@ -46,6 +46,7 @@ func parseFlags(args []string, errOut io.Writer) (config, error) {
 	fs.DurationVar(&c.SLOP99, "slo-p99", 0, "fail when the P99 of the create (from its due time) is above this; 0 = not checked")
 	fs.Float64Var(&c.SLOOK, "slo-completed", 0, "fail when fewer than this share of sessions finish as expected (e.g. 0.999); 0 = not checked")
 	fs.BoolVar(&c.Audit, "audit", false, "keep every subscriber's history and print it for those that fail the balance check")
+	fs.BoolVar(&c.Timeline, "timeline", false, "print outcomes for every second of the run (shows when a fault started and how long recovery took)")
 	fs.BoolVar(&c.NoVerify, "no-verify", false, "skip the balance check afterwards")
 	if err := fs.Parse(args); err != nil {
 		return c, err
@@ -97,12 +98,13 @@ func execute(ctx context.Context, c config, w io.Writer) (*Report, error) {
 		return nil, fmt.Errorf("bucket %q starts empty: check --bucket and --offering", c.Bucket)
 	}
 
-	var before float64
+	var before, unsettledBefore float64
 	haveGW := c.GatewayAdmin != ""
 	if haveGW {
 		if before, err = engineRequests(ctx, c.GatewayAdmin); err != nil {
 			return nil, fmt.Errorf("--gateway-admin: %w", err)
 		}
+		unsettledBefore, _ = scrape(ctx, c.GatewayAdmin, "ocs_engine_unsettled_terminates_total")
 	}
 	r := &runner{c: c, pool: pool, subs: subs}
 	out("driving %.0f sessions/s: %s warm-up, then %s measured\n", c.Rate, c.Warmup, c.Duration)
@@ -111,15 +113,26 @@ func execute(ctx context.Context, c config, w io.Writer) (*Report, error) {
 		return nil, ctx.Err()
 	}
 	rp := r.report(measured)
+	rp.showTimeline = c.Timeline
+	var unsettled float64
 	if haveGW {
 		if after, err := engineRequests(ctx, c.GatewayAdmin); err == nil {
 			d := after - before
+			if d < 0 { // the gateway restarted during the run: its counters began again at zero
+				d = after
+			}
 			rp.GatewayCounted = &d
+		}
+		if after, err := scrape(ctx, c.GatewayAdmin, "ocs_engine_unsettled_terminates_total"); err == nil {
+			unsettled = after - unsettledBefore
+			if unsettled < 0 {
+				unsettled = after
+			}
 		}
 	}
 	if !c.NoVerify {
 		out("checking every balance\n")
-		v := verify(ctx, prov, c, subs)
+		v := verify(ctx, prov, c, subs, unsettled)
 		rp.Verification = &v
 	}
 	rp.judge(c)

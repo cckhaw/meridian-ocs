@@ -75,6 +75,7 @@ The gateway reads `INFO replication` and **refuses to start** if fewer than `OCS
 ## Verified
 
 - A frozen replica process (SIGSTOP) makes a commit report `Short` after the timeout; after SIGCONT and catch-up the commit is `Acked` and the replica holds the same balance as the primary. Ignoring `WAIT`'s result makes three tests fail (mutation check).
+- Under load on the local stack (`dev/chaos.sh`, [14](14-load-test.md)): a replica frozen for 8 s caused no failed charging sessions and no latency change beyond one 0.2 s blip, while about 3,100 commits skipped the wait during suspension (`ocs_durability_suspended_total`); every balance reconciled afterwards. A SIGKILLed Redis primary, restarted, lost no acknowledged commit in 4 runs (not a proof; there is no failover in the stack).
 - A killed replica: shortfalls, then suspension (commits fast again), then a probe after the suspension. Business results are unaffected throughout.
 - Honest limit of the tests: on loopback a replica is practically never behind even without `WAIT` (measured 0 of 300 commits), so a "the replica already has it" assertion cannot distinguish `WAIT` from no `WAIT`. The frozen-replica test is the one that does.
 - Startup behaviour of the built binary: refuses without a replica, starts with the override (warning), starts with a replica (logs the wait).

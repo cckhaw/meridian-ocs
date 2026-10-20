@@ -244,8 +244,17 @@ func TestDataTierDownUsesHybridPolicy(t *testing.T) {
 	if fmt.Sprint(kinds) != fmt.Sprint(want) {
 		t.Fatalf("audit kinds %v, want %v", kinds, want)
 	}
-	if e.Stats().Degraded != 4 {
+	if e.Stats().Degraded != 4 { // (checked before the zero-usage terminate below)
 		t.Fatalf("%+v", e.Stats())
+	}
+	// A terminate that reports no usage loses nothing and is not counted.
+	r = rate(t, e, newReq(canonical.TypeTerminate, "postpaid", "b", 2, 0, 0))
+	if r.Result != canonical.ResultGranted {
+		t.Fatalf("%+v", r)
+	}
+	// Only the terminate that reported usage left it unsettled; denied and capped grants did not.
+	if e.Stats().UnsettledTerminates != 1 {
+		t.Fatalf("unsettled terminates %d, want 1", e.Stats().UnsettledTerminates)
 	}
 }
 

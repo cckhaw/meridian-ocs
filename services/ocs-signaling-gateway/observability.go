@@ -24,6 +24,7 @@ func registerMetrics(reg *telemetry.Registry, eng *engine.Engine, adm *admission
 	reg.CounterFunc("ocs_engine_degraded_total", "Requests answered without the data tier (fail policy).", nil, func() float64 { return f(st().Degraded) })
 	reg.CounterFunc("ocs_engine_overloaded_total", "Requests shed because a worker queue was full.", nil, func() float64 { return f(st().Overloaded) })
 	reg.CounterFunc("ocs_engine_audit_dropped_total", "Audit events dropped because the audit channel was full.", nil, func() float64 { return f(st().AuditDropped) })
+	reg.CounterFunc("ocs_engine_unsettled_terminates_total", "Terminates acknowledged while the data tier was down: the usage they reported was not charged.", nil, func() float64 { return f(st().UnsettledTerminates) })
 	reg.CounterFunc("ocs_engine_unreplicated_total", "Committed steps acknowledged by fewer replicas than required.", nil, func() float64 { return f(st().Unreplicated) })
 	reg.CounterFunc("ocs_engine_unpriced_total", "Units the tariff could not price (sent with no rates).", nil, func() float64 { return f(st().Unpriced) })
 

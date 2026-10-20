@@ -2,7 +2,7 @@ SERVICES := $(notdir $(wildcard services/ocs-*))
 TOOLS    := $(notdir $(wildcard tools/ocs-*))
 MODULES  := pkg $(addprefix services/,$(SERVICES)) $(addprefix tools/,$(TOOLS))
 
-.PHONY: build test vet fmt proto docker lint-proto proto-tools proto-check stack-up stack-smoke stack-down loadtest
+.PHONY: build test vet fmt proto docker lint-proto proto-tools proto-check stack-up stack-smoke stack-down loadtest chaos
 build:
 	@for m in $(MODULES); do (cd $$m && go build ./...) || exit 1; done
 test:
@@ -41,3 +41,7 @@ stack-down:
 LOAD_ARGS ?= -rate 200 -duration 20s -warmup 5s -gateway-admin http://127.0.0.1:9080
 loadtest:
 	cd tools/ocs-loadgen && go run . $(LOAD_ARGS)
+
+# Failure injection under load (stops, freezes and kills containers of the local stack; development only).
+chaos:
+	dev/chaos.sh all

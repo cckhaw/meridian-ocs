@@ -33,6 +33,9 @@ type fakeSystem struct {
 	held  map[string]*fakeSession
 	reqs  atomic.Int64
 	creat atomic.Int64
+	rel   atomic.Int64
+	upd   atomic.Int64
+	unset atomic.Int64 // terminates acknowledged without settling that the fake admits to
 	n     atomic.Int64
 }
 
@@ -174,6 +177,13 @@ func (f *fakeSystem) nchf() http.Handler {
 	mux.HandleFunc("POST /nchf-convergedcharging/v3/chargingdata/{ref}/update", func(w http.ResponseWriter, r *http.Request) {
 		f.reqs.Add(1)
 		_, want, used := parse(r)
+		if f.mode == "deniedupdate" && f.upd.Add(1)%4 == 0 {
+			// Data tier down: nothing is settled, the reservation stays, the answer is a refusal.
+			answer := `{"multipleUnitInformation":[{"ratingGroup":100,"resultCode":"END_USER_SERVICE_DENIED"}]}`
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, answer)
+			return
+		}
 		f.mu.Lock()
 		s := f.held[r.PathValue("ref")]
 		f.bal[s.key] += s.held - used
@@ -185,6 +195,14 @@ func (f *fakeSystem) nchf() http.Handler {
 	mux.HandleFunc("POST /nchf-convergedcharging/v3/chargingdata/{ref}/release", func(w http.ResponseWriter, r *http.Request) {
 		f.reqs.Add(1)
 		_, _, used := parse(r)
+		if (f.mode == "unsettled" || f.mode == "unsettledsilent") && f.rel.Add(1)%5 == 0 {
+			// Data tier down: the terminate is acknowledged but nothing is settled (the reservation stays).
+			if f.mode == "unsettled" {
+				f.unset.Add(1)
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		f.mu.Lock()
 		s := f.held[r.PathValue("ref")]
 		f.bal[s.key] += s.held - used
@@ -200,7 +218,7 @@ func (f *fakeSystem) nchf() http.Handler {
 
 func (f *fakeSystem) admin() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "# HELP x\nocs_engine_requests_total %d\n", f.reqs.Load())
+		fmt.Fprintf(w, "# HELP x\nocs_engine_requests_total %d\nocs_engine_unsettled_terminates_total %d\n", f.reqs.Load(), f.unset.Load())
 	})
 }
 
@@ -362,5 +380,48 @@ func TestLookAlikeSessionsAreDetectedAndInvalidateTheRun(t *testing.T) {
 	rp, out := exercise(t, newFake("samesession"), func(c *config) { c.Subscribers = 1 })
 	if rp.RefCollisions == 0 || rp.Pass || !strings.Contains(out, "look-alike") {
 		t.Fatalf("a gateway that maps different sessions to one reference must invalidate the run:\n%s", out)
+	}
+}
+
+func TestTimelineAccountsForEverySession(t *testing.T) {
+	rp, out := exercise(t, newFake("hang"), func(c *config) { c.Timeout, c.Timeline, c.Duration = 80*time.Millisecond, true, 2*time.Second })
+	var started, ok, failed uint64
+	for _, s := range rp.Timeline {
+		started += s.Started
+		ok += s.OK
+		failed += s.Failed
+	}
+	if len(rp.Timeline) < 2 || started != rp.Sessions["started"] || ok+failed != started {
+		t.Fatalf("the timeline must add up to the session totals (started %d, ok %d, failed %d vs %v):\n%s", started, ok, failed, rp.Sessions, out)
+	}
+	if failed == 0 || !strings.Contains(out, "<-- failures") {
+		t.Fatalf("seconds with failures must be marked:\n%s", out)
+	}
+}
+
+func TestUnsettledTerminatesTheGatewayCountsAreAccountedFor(t *testing.T) {
+	rp, out := exercise(t, newFake("unsettled"), nil)
+	v := rp.Verification
+	if !rp.Pass || v.UnsettledTerminates == 0 || v.Verdicts[verdictUnsettled] == 0 || v.Explained == 0 || v.Explained > v.Budget {
+		t.Fatalf("deviations explained by the gateway's own counter must pass:\n%s", out)
+	}
+	if !strings.Contains(out, "terminates acknowledged without settling") {
+		t.Fatalf("the report must say how much was unsettled:\n%s", out)
+	}
+}
+
+func TestUnsettledTerminatesTheGatewayDoesNotAdmitFailTheRun(t *testing.T) {
+	// The same fault, but the gateway's counter says nothing happened: the books are off and nothing explains it.
+	rp, out := exercise(t, newFake("unsettledsilent"), nil)
+	if rp.Pass || rp.Verification.Verdicts[verdictOverspend] == 0 {
+		t.Fatalf("unexplained deviations must fail:\n%s", out)
+	}
+}
+
+func TestRefusedUpdatesAreNotCountedAsSettled(t *testing.T) {
+	// An update answered "denied" may not have settled anything; the generator must not assume it did.
+	rp, out := exercise(t, newFake("deniedupdate"), nil)
+	if !rp.Pass || rp.Verification.Verdicts[verdictWithin] == 0 {
+		t.Fatalf("refused updates must widen the bounds, not break them:\n%s", out)
 	}
 }
