@@ -1,7 +1,7 @@
 SERVICES := $(notdir $(wildcard services/ocs-*))
 MODULES  := pkg $(addprefix services/,$(SERVICES))
 
-.PHONY: build test vet fmt proto docker lint-proto proto-tools proto-check
+.PHONY: build test vet fmt proto docker lint-proto proto-tools proto-check stack-up stack-smoke stack-down
 build:
 	@for m in $(MODULES); do (cd $$m && go build ./...) || exit 1; done
 test:
@@ -25,3 +25,12 @@ proto-check: lint-proto proto
 	@git diff --exit-code -- pkg/gen || (echo "pkg/gen is stale: run make proto and commit"; exit 1)
 docker:
 	@for s in $(SERVICES); do docker build -f build/Dockerfile --build-arg SERVICE=$$s -t meridian/$$s:dev . || exit 1; done
+
+# The local development stack (docker-compose.yml): Redis primary + replica,
+# Redpanda and the services, authentication off, ports bound to 127.0.0.1.
+stack-up:
+	docker compose up -d --build
+stack-smoke:
+	dev/smoke.sh
+stack-down:
+	docker compose down -v

@@ -1,0 +1,39 @@
+{
+  "document": {
+    "effectiveFrom": "2020-01-01T00:00:00Z",
+    "note": "local development catalog",
+    "plans": [
+      {
+        "id": "basic",
+        "name": "Basic pay-as-you-go",
+        "currency": "EUR",
+        "filters": [{"id": "no-roaming", "when": "rat == \"ROAM\"", "action": "deny"}],
+        "rules": [
+          {"id": "data", "when": "unit == \"bytes\"", "cash": {"num": 1, "den": 1024}},
+          {"id": "other", "cash": {"num": 1, "den": 1}}
+        ]
+      },
+      {
+        "id": "gold",
+        "name": "Gold",
+        "currency": "EUR",
+        "timeZone": "Europe/Berlin",
+        "rules": [
+          {"id": "night-data", "priority": 10, "when": "unit == \"bytes\" && (hour >= 22 || hour < 6)", "cash": {"num": 1, "den": 4096}},
+          {"id": "data", "when": "unit == \"bytes\"", "cash": {"num": 1, "den": 2048}},
+          {"id": "other", "cash": {"num": 1, "den": 1}}
+        ]
+      }
+    ],
+    "offerings": [
+      {"id": "basic-offer", "name": "Basic", "planId": "basic"},
+      {
+        "id": "gold-offer", "name": "Gold 10 GB", "planId": "gold",
+        "allowances": [
+          {"id": "data10g", "class": "bundle", "unit": "bytes", "amount": 10737418240, "validityDays": 30},
+          {"id": "welcome-sms", "class": "promo", "unit": "events", "amount": 50}
+        ]
+      }
+    ]
+  }
+}

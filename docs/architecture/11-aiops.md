@@ -195,8 +195,9 @@ specified, validated and bounded.
    timers are in-process. The audit ring is bounded and only the JSON log is a
    durable record, so ship the logs.
 5. **No OpenTelemetry SDK, no traces**, no `zap` (see section 1).
-6. **No metrics from provisioning/catalog**, and the admin port has no
-   authentication.
+6. **The admin port has no authentication** (keep it cluster-internal; the chart
+   exposes it only through `-admin` Services). Provisioning, catalog and catalog
+   replication export metrics (doc 12); Kafka consumer lag and gRPC calls are not exported.
 7. **Mapping rules are JSON-to-JSON for the mediation input.** There is no
    northbound (events out) translation and no mapping for the signalling
    protocols.

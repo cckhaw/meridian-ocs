@@ -1,0 +1,9 @@
+.git
+.github
+**/*.test
+services/*/ocs-*
+dev
+docs
+deploy
+*.md
+node_modules

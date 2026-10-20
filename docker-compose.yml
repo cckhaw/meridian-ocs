@@ -1,0 +1,160 @@
+# A local development stack: Redis (primary + replica), Redpanda (Kafka API), and
+# the gateway, provisioning, catalog, mediation and AI Ops services.
+#
+#   docker compose up --build            # first start takes a few minutes (it compiles five services)
+#   dev/smoke.sh                         # creates a subscriber and charges it
+#   docker compose down -v               # stop and forget all data
+#
+# FOR DEVELOPMENT ONLY. Every listener runs with authentication OFF (the services
+# only allow that when told so explicitly, as below), data is not backed up, and
+# every published port is bound to 127.0.0.1 so only this machine can reach it.
+# Production uses mTLS, Secrets and the Helm chart (deploy/helm).
+#
+# Ports on this machine:
+#   8443 provisioning REST + console (/ui/)   9443 provisioning gRPC
+#   8444 catalog REST + editor (/ui/)         8445 AI Ops mapping workbench
+#   3868 Diameter (Gy)                        8000 Nchf (HTTP/2 without TLS)
+#   9080-9084 admin (/healthz /readyz /metrics) of gateway, provisioning, catalog, mediation, aiops
+#   19092 Kafka API (for kcat/rpk from the host)
+
+name: meridian-ocs
+
+x-ocs-common: &ocs-common
+  restart: on-failure          # a service that cannot reach its dependencies yet exits and is retried
+  depends_on: &ocs-deps
+    redis-replica: {condition: service_healthy}
+
+x-redis-env: &redis-env
+  OCS_REDIS_ADDR: redis:6379
+  OCS_REDIS_REPLICAS: "1"      # every commit waits for the replica to acknowledge it
+  OCS_REDIS_WAIT_TIMEOUT: 100ms
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--save", ""]
+    volumes: [redis-data:/data]
+    healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 2s, timeout: 2s, retries: 30}
+
+  redis-replica:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--replicaof", "redis", "6379", "--appendonly", "yes", "--save", ""]
+    volumes: [redis-replica-data:/data]
+    depends_on: {redis: {condition: service_healthy}}
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli info replication | grep -q master_link_status:up"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  redpanda:
+    image: redpandadata/redpanda:v26.1.18
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=768M
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+    ports: ["127.0.0.1:19092:19092"]
+    volumes: [redpanda-data:/var/lib/redpanda/data]
+    healthcheck: {test: ["CMD-SHELL", "rpk cluster health --exit-when-healthy"], interval: 3s, timeout: 10s, retries: 40}
+
+  topics:
+    image: redpandadata/redpanda:v26.1.18
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for t in ocs.provisioning.commands ocs.provisioning.events ocs.provisioning.dlq; do
+          rpk topic create "$$t" --brokers redpanda:9092 --partitions 3 --replicas 1 || true
+        done
+    depends_on: {redpanda: {condition: service_healthy}}
+    restart: "no"
+
+  catalog:
+    <<: *ocs-common
+    build: {context: ., dockerfile: build/Dockerfile, args: {SERVICE: ocs-catalog-service}}
+    image: meridian/ocs-catalog-service:dev
+    environment:
+      <<: *redis-env
+      OCS_CATALOG_ADDR: ":8444"
+      OCS_CATALOG_AUTH: "off"
+    ports: ["127.0.0.1:8444:8444", "127.0.0.1:9082:8080"]
+
+  seed:                        # publishes the sample catalog once (dev/seed-catalog.json)
+    image: curlimages/curl:8.10.1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until curl -fsS http://catalog:8444/v1/catalog/schema >/dev/null; do sleep 1; done
+        if curl -fsS http://catalog:8444/v1/catalog/versions | grep -q '"version"'; then echo "catalog already has versions, leaving it alone"; exit 0; fi
+        code=$$(curl -s -o /tmp/out -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data @/seed/catalog.json http://catalog:8444/v1/catalog/versions)
+        [ "$$code" = 201 ] && echo "published the sample catalog" && exit 0
+        echo "seeding failed ($$code): $$(cat /tmp/out)"; exit 1
+    volumes: ["./dev/seed-catalog.json:/seed/catalog.json:ro"]
+    depends_on: {catalog: {condition: service_started}}
+    restart: "no"
+
+  provisioning:
+    <<: *ocs-common
+    build: {context: ., dockerfile: build/Dockerfile, args: {SERVICE: ocs-provisioning-service}}
+    image: meridian/ocs-provisioning-service:dev
+    environment:
+      <<: *redis-env
+      OCS_KAFKA_BROKERS: redpanda:9092
+      OCS_CURRENCY: EUR
+      OCS_PROVISIONING_AUTH: "off"
+      OCS_PROV_REST_ADDR: ":8443"
+      OCS_PROV_GRPC_ADDR: ":9443"
+    ports: ["127.0.0.1:8443:8443", "127.0.0.1:9443:9443", "127.0.0.1:9081:8080"]
+    depends_on:
+      <<: *ocs-deps
+      topics: {condition: service_completed_successfully}
+      seed: {condition: service_completed_successfully}
+
+  gateway:
+    <<: *ocs-common
+    build: {context: ., dockerfile: build/Dockerfile, args: {SERVICE: ocs-signaling-gateway}}
+    image: meridian/ocs-signaling-gateway:dev
+    environment:
+      <<: *redis-env
+      OCS_TARIFF: catalog
+      OCS_DEFAULT_PLAN: basic
+      OCS_GY_ADDR: ":3868"
+      OCS_NCHF_ADDR: ":8000"
+      OCS_NCHF_OAUTH: "off"
+      OCS_ORIGIN_HOST: ocs1.dev.local
+      OCS_ORIGIN_REALM: dev.local
+      OCS_HOST_IP: 127.0.0.1
+    ports: ["127.0.0.1:3868:3868", "127.0.0.1:8000:8000", "127.0.0.1:9080:8080"]
+    depends_on:
+      <<: *ocs-deps
+      seed: {condition: service_completed_successfully}
+
+  mediation:
+    <<: *ocs-common
+    build: {context: ., dockerfile: build/Dockerfile, args: {SERVICE: ocs-mediation-pipeline}}
+    image: meridian/ocs-mediation-pipeline:dev
+    environment:
+      <<: *redis-env
+      OCS_MED_OUT_DIR: /data/out
+      OCS_MED_IN_DIR: /data/in
+    volumes: [mediation-data:/data]
+    ports: ["127.0.0.1:9083:8080"]
+
+  aiops:
+    <<: *ocs-common
+    build: {context: ., dockerfile: build/Dockerfile, args: {SERVICE: ocs-aiops-layer}}
+    image: meridian/ocs-aiops-layer:dev
+    environment:
+      OCS_AIOPS_ADDR: ":8445"
+      OCS_AIOPS_AUTH: "off"
+    ports: ["127.0.0.1:8445:8445", "127.0.0.1:9084:8080"]
+    depends_on: {}
+
+volumes:
+  redis-data:
+  redis-replica-data:
+  redpanda-data:
+  mediation-data:

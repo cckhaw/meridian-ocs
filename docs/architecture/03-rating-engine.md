@@ -55,6 +55,6 @@ Single-thread loopback Redis 7.0.15, one subscriber, `Charge` update path: ~110 
 ## Known limitations / follow-ups
 
 1. **Redis Cluster key declaration.** The script derives keys from `KEYS[1]` (the hash-tagged prefix) instead of declaring each one. This works because they share a slot, but it breaks the strict "declare all keys" contract; verify against the target Redis version/proxy before deploying to Cluster.
-2. **Durability** is whatever the Redis persistence config provides (risk R1 in doc 01). The `WAIT` call on commit paths is not wired in yet.
+2. **Durability** is whatever the Redis persistence config provides (risk R1 in doc 01). Commits wait for replica acknowledgement (`WAIT`, doc 07), which narrows this but is not a consensus guarantee.
 3. **Allocations in the data client** (go-redis) mean the end-to-end path is not zero-alloc; a custom RESP client is an option if GC profiling demands it.
 4. **Deleted buckets.** Refunds to a bucket that no longer exists are parked in `P:orph` rather than dropped; nothing reads that hash yet.
