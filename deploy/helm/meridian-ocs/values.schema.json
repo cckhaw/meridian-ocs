@@ -394,6 +394,22 @@
             "sizeLimit": {
               "type": "string"
             },
+            "persistence": {
+              "type": "object",
+              "properties": {
+                "size": {
+                  "type": "string"
+                },
+                "storageClass": {
+                  "type": [
+                    "string",
+                    "integer",
+                    "number"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
             "peerMayRepeat": {
               "type": "boolean"
             }

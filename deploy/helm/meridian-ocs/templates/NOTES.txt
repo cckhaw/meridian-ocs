@@ -8,6 +8,15 @@ refuses to start while fewer than redis.requiredReplicas replicas are connected.
 
 NOTE: provisioning.approval.policy is "off": balance corrections, bucket removals and terminations are applied by one person alone.
 {{- end }}
+{{- if and .Values.gateway.enabled (eq .Values.gateway.unsettledSpool.mode "persistent") }}
+
+The gateway is a StatefulSet with a volume claim per pod for usage it releases while Redis is down. Scaling it in leaves the removed
+pods' claims (unsettled-spool-<release>-gateway-N) behind with whatever was still saved on them: check them after a scale-in.
+{{- else if and .Values.gateway.enabled (eq .Values.gateway.unsettledSpool.mode "emptyDir") }}
+
+The gateway keeps usage it releases while Redis is down on a pod emptyDir: a replaced pod loses what it could not charge during its
+shutdown drain. gateway.unsettledSpool.mode=persistent keeps it across replacements.
+{{- end }}
 {{- if .Values.allowInsecure }}
 
 WARNING: allowInsecure=true. Anything rendered with authentication "off" is open to whoever can reach it.

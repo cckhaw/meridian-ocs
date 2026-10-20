@@ -94,7 +94,8 @@ helm.sh/chart: {{ printf "%s-%s" .root.Chart.Name .root.Chart.Version }}
 A component: ServiceAccount-less workload + admin Service + PDB (+ HPA).
 Inputs: root, name, service (binary), kind (Deployment|StatefulSet), replicas,
 resources, ports (list of {name, port}), env (yaml list text), volumes, mounts,
-claims (StatefulSet), pdb ({maxUnavailable}), autoscaling (optional), checksum (optional).
+claims (StatefulSet), parallel (StatefulSet: start and replace pods together), pdb ({maxUnavailable}),
+autoscaling (optional), checksum (optional).
 */}}
 {{- define "ocs.component" -}}
 {{- $root := .root -}}
@@ -109,6 +110,9 @@ metadata:
 spec:
   {{- if eq .kind "StatefulSet" }}
   serviceName: {{ $full }}-admin
+  {{- if .parallel }}
+  podManagementPolicy: Parallel    # pods are independent: do not start or replace them one after the other
+  {{- end }}
   {{- end }}
   {{- if not (and .autoscaling .autoscaling.enabled) }}
   replicas: {{ .replicas }}

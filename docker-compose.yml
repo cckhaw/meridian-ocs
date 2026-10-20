@@ -187,6 +187,8 @@ services:
       OCS_ORIGIN_REALM: dev.local
       OCS_HOST_IP: 127.0.0.1
       OCS_UNSETTLED_SPOOL: /var/spool/ocs   # usage released while Redis is down is kept here and charged later
+      OCS_UNSETTLED_DRAIN: 20s              # on shutdown, keep charging it for up to this long
+    stop_grace_period: 30s                  # longer than the drain, or docker kills the gateway mid-drain
     ports: ["127.0.0.1:3868:3868", "127.0.0.1:8000:8000", "127.0.0.1:9080:8080"]
     volumes: [certs:/certs:ro, "gateway-spool:/var/spool/ocs"]
     depends_on:

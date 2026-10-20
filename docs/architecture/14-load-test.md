@@ -108,7 +108,7 @@ fails.
 
 ## Failure injection
 
-`dev/chaos.sh replica-freeze|primary-stop|primary-kill|gateway-kill|redis-and-gateway|all` (needs the local stack, Docker and
+`dev/chaos.sh replica-freeze|primary-stop|primary-kill|gateway-kill|redis-and-gateway|gateway-drain|all` (needs the local stack, Docker and
 Go) starts the generator at 150 sessions/s over 300 subscribers (each session lasting 2 s, so many are in flight when
 the fault strikes), lets it run healthy for 10 s, breaks one thing for 8 s, restores it, keeps loading for 25 s
 more, waits for the gateway to charge any usage it saved, and reconciles every balance. `--timeline` prints
@@ -122,6 +122,7 @@ part of CI (it takes about a minute per scenario).
 | Redis **primary killed** (SIGKILL), restarted | about 1,200 of 6,450 | the same | Same as above. No acknowledged commit was lost in 4 kills, which is evidence, not proof (see gaps). |
 | **Gateway killed**, restarted | about 1,650 of 6,450 (26 %) | the 8 s of the fault and about 3 s after | In-flight sessions fail; sessions continue after the restart because their state is in Redis. About 3 s from `start` to serving. |
 
+| Redis stopped and the **gateway told to stop while Redis is still down**, Redis returning during its drain (`gateway-drain`) | about 1,600 of 6,450 | the fault and the gateway's restart | On SIGTERM the gateway kept replaying its saved usage until Redis answered: **301 of 301, 300 of 300 and 9 of 9** records were charged before it exited in three runs, none left on disk, every balance reconciled. |
 | Redis stopped **and the gateway restarted** while it was down (`redis-and-gateway`) | about 2,000 of 6,450 | the fault and the restart | Usage the gateway had saved to its spool before it was killed was charged by the *new* process once Redis returned (it charged records it had not written itself). |
 
 Across the **12 runs with the reconciler on** (all five scenarios once, then the two Redis outages and the
@@ -201,7 +202,8 @@ Redis persistence, or replica acknowledgement, and none was tested. The measured
    covers terminates and refused updates, leaves a refused update more than 8 requests behind its session to a
    person, assumes a network element does not report refused usage again under a *new* request number (supported
    for Gy by RFC 4006, unverified for Nchf and real peers; `OCS_UNSETTLED_PEER_REPEATS` is the cautious setting),
-   and the gateway's spool is node-local ([03](03-rating-engine.md)).
+   and the gateway's spool is node-local unless the chart's `persistent` mode is used, which has only been rendered and
+   schema-checked, never attached to a volume in a cluster ([03](03-rating-engine.md)).
 4. **Seeding goes through the provisioning API**, about 250 subscribers per second here, and at most 99,999
    per run; nothing exercises a large subscriber population or a skewed (hot-subscriber) distribution
    beyond choosing a small `--subscribers`.

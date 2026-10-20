@@ -110,8 +110,11 @@ gateway:
   # Usage reported in a terminate that arrives while Redis is down is acknowledged (so the network can release the
   # session) and kept here, then charged when Redis returns (docs/architecture/03-rating-engine.md).
   unsettledSpool:
-    mode: ""                 # REQUIRED: "emptyDir" (survives a container restart, NOT the loss of the pod or node) | "off" (that usage is lost; development only)
-    sizeLimit: 256Mi
+    mode: ""                 # REQUIRED: "persistent" (a volume per pod: the gateway becomes a StatefulSet) | "emptyDir" (survives a container restart, NOT a replaced pod or a lost node) | "off" (that usage is lost; development only)
+    sizeLimit: 256Mi         # emptyDir
+    persistence:             # persistent
+      size: 1Gi
+      storageClass: ""       # empty = the cluster default
     peerMayRepeat: false     # true if a network element may report a refused update's usage again under a new request number: it is then kept for a person once the session moved on, not charged (doc 03)
   tariff: static             # static | catalog
   defaultPlan: ""            # REQUIRED when tariff=catalog

@@ -44,6 +44,8 @@
 //	OCS_UNSETTLED_PEER_REPEATS  "true" if a network element may report the usage of an update it was refused
 //	                     again under a new request number: such usage is then not charged by the reconciler once the
 //	                     session has moved past it, but kept for a person (default false; docs/architecture/03)
+//	OCS_UNSETTLED_DRAIN  how long to keep charging saved usage on shutdown (default 10s, 0 = off; keep it below the
+//	                     platform's termination grace period)
 //	OCS_ADMIN_ADDR       /healthz, /readyz and /metrics       (default :8080; keep it cluster-internal)
 //	OCS_LOG_LEVEL        debug | info | warn | error          (default info; JSON logs)
 //	OCS_CONTROL_ADDR     guarded AI Ops control plane (gRPC); unset = none. With it:
@@ -282,6 +284,10 @@ func run(ctx context.Context, ready func()) error {
 		return err
 	}
 	defer eng.Close()
+	drain, err := unsettledDrain()
+	if err != nil {
+		return err
+	}
 	reconciler := startReconciler(ctx, spool, eng, func(f string, a ...any) { log.Printf("ocs-signaling-gateway: "+f, a...) })
 
 	adm := admission.New(float64(maxTPS), maxTPS/10+1, maxInflight)
@@ -377,6 +383,14 @@ func run(ctx context.Context, ready func()) error {
 	}
 	for _, stop := range stops {
 		stop()
+	}
+	// No more requests arrive. Charge the usage that was saved while Redis was down, if Redis is back, before the
+	// process (and perhaps its volume) goes away; what cannot be charged stays on the spool's volume.
+	if reconciler != nil && drain > 0 {
+		if before := spool.Stats().Pending; before > 0 {
+			left := reconciler.Drain(context.Background(), drain)
+			log.Printf("ocs-signaling-gateway: shutdown: %d of %d saved usage records charged, %d stay on the spool", before-left, before, left)
+		}
 	}
 	return serveErr
 }

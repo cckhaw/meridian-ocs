@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/cckhaw/meridian-ocs/pkg/engine"
 	"github.com/cckhaw/meridian-ocs/pkg/telemetry"
@@ -44,6 +45,22 @@ func peerRepeatsUsage() (bool, error) {
 	default:
 		return false, fmt.Errorf(`OCS_UNSETTLED_PEER_REPEATS must be "true" or "false", got %q`, v)
 	}
+}
+
+// unsettledDrain applies OCS_UNSETTLED_DRAIN: how long the gateway keeps replaying the spool on shutdown, before it
+// stops. It must be shorter than the time the platform allows for termination (Kubernetes
+// terminationGracePeriodSeconds, Docker's stop timeout), or the process is killed mid-drain, which costs nothing
+// that is not already on disk but wastes the attempt. Default 10s; "0" turns it off.
+func unsettledDrain() (time.Duration, error) {
+	v := os.Getenv("OCS_UNSETTLED_DRAIN")
+	if v == "" {
+		return 10 * time.Second, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 || d > 5*time.Minute {
+		return 0, fmt.Errorf("OCS_UNSETTLED_DRAIN: want a duration between 0 and 5m (for example 10s), got %q", v)
+	}
+	return d, nil
 }
 
 // startReconciler replays the spool against the engine until ctx is done.

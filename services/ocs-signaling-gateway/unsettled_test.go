@@ -89,3 +89,24 @@ func TestPeerRepeatsUsageSetting(t *testing.T) {
 		t.Errorf("a typo must be refused, not read as false: %v", err)
 	}
 }
+
+func TestTheShutdownDrainIsBoundedAndTypoProof(t *testing.T) {
+	t.Setenv("OCS_UNSETTLED_DRAIN", "")
+	if d, err := unsettledDrain(); err != nil || d != 10*time.Second {
+		t.Fatalf("default: %v %v", d, err)
+	}
+	t.Setenv("OCS_UNSETTLED_DRAIN", "0")
+	if d, err := unsettledDrain(); err != nil || d != 0 {
+		t.Fatalf("0 turns it off: %v %v", d, err)
+	}
+	t.Setenv("OCS_UNSETTLED_DRAIN", "25s")
+	if d, err := unsettledDrain(); err != nil || d != 25*time.Second {
+		t.Fatalf("%v %v", d, err)
+	}
+	for _, bad := range []string{"ten", "-1s", "10m", "10"} {
+		t.Setenv("OCS_UNSETTLED_DRAIN", bad)
+		if _, err := unsettledDrain(); err == nil {
+			t.Errorf("%q must be refused, not read as something else", bad)
+		}
+	}
+}
