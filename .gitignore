@@ -4,3 +4,5 @@
 # binaries written by `go build ./...` in single-main-package modules
 /services/ocs-*/ocs-*
 !/services/ocs-*/ocs-*/
+/tools/ocs-*/ocs-*
+!/tools/ocs-*/ocs-*/
