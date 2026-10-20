@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -27,6 +28,9 @@ type Replicator struct {
 	Resync  time.Duration // default 30s
 	// OnError receives background errors (resync, bad stored document).
 	OnError func(error)
+
+	lastOK atomic.Int64  // unix nanoseconds of the last successful Sync, 0 = never
+	errs   atomic.Uint64 // background errors reported
 }
 
 func (r *Replicator) key() string {
@@ -44,7 +48,11 @@ func (r *Replicator) channel() string {
 }
 
 func (r *Replicator) report(err error) {
-	if r.OnError != nil && err != nil {
+	if err == nil {
+		return
+	}
+	r.errs.Add(1)
+	if r.OnError != nil {
 		r.OnError(err)
 	}
 }
@@ -60,6 +68,14 @@ return 0`)
 // Sync loads any versions this node does not have yet. On an empty store it
 // loads only the newest Store-retain versions.
 func (r *Replicator) Sync(ctx context.Context) error {
+	err := r.sync(ctx)
+	if err == nil {
+		r.lastOK.Store(time.Now().UnixNano())
+	}
+	return err
+}
+
+func (r *Replicator) sync(ctx context.Context) error {
 	n, err := r.Redis.LLen(ctx, r.key()).Result()
 	if err != nil {
 		return err

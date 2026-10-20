@@ -55,8 +55,9 @@ flowchart LR
 
 Not done: OpenTelemetry SDK / OTLP export, distributed traces (Jaeger/Tempo),
 `uber-go/zap`. A Collector can scrape `/metrics` and forward OTLP; there are no
-traces at all yet. The provisioning and catalog services expose only
-health endpoints, not metrics.
+traces at all yet. Provisioning, the catalog service and catalog replication export
+metrics too (see [12](12-deployment.md#observability)), with alert rules and a
+dashboard in the Helm chart; Kafka consumer lag and gRPC calls are not exported.
 
 ## 2. Guarded control plane (`pkg/control`)
 

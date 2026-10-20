@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -452,4 +453,64 @@ func devDuration() time.Duration {
 		return time.Duration(s) * time.Second
 	}
 	return time.Hour
+}
+
+// What /metrics says matches what actually happened: one subscriber created and
+// topped up, a replay, a reused key, an invalid amount and an unknown lookup.
+func TestMetricsCountWhatHappened(t *testing.T) {
+	s := startSystem(t)
+	create := map[string]any{"subscriberKey": "m-1", "paymentType": "prepaid",
+		"identifiers": []map[string]string{{"type": "msisdn", "value": "491709990001"}}}
+	if code, m := s.call(t, "crm", "POST", "/v1/subscribers", "m-create", create); code != 202 {
+		t.Fatalf("%d %v", code, m)
+	}
+	s.waitApplied(t, "m-create")
+	top := map[string]any{"amountMinorUnits": 500, "currency": "EUR"}
+	if code, _ := s.call(t, "crm", "POST", "/v1/subscribers/m-1/top-ups", "m-pay", top); code != 202 {
+		t.Fatal(code)
+	}
+	s.waitApplied(t, "m-pay")
+	if _, m := s.call(t, "crm", "POST", "/v1/subscribers/m-1/top-ups", "m-pay", top); m["duplicate"] != true { // replay
+		t.Fatalf("%v", m)
+	}
+	if code, _ := s.call(t, "crm", "POST", "/v1/subscribers/m-1/top-ups", "m-pay", map[string]any{"amountMinorUnits": 9, "currency": "EUR"}); code != 409 {
+		t.Fatalf("reused key: %d", code)
+	}
+	if code, _ := s.call(t, "crm", "POST", "/v1/subscribers/m-1/top-ups", "m-bad", map[string]any{"amountMinorUnits": 0, "currency": "EUR"}); code != 400 {
+		t.Fatalf("invalid amount: %d", code)
+	}
+	if code, _ := s.call(t, "crm", "GET", "/v1/subscribers?msisdn=491700000404", "", nil); code != 404 {
+		t.Fatalf("unknown: %d", code)
+	}
+
+	var sb strings.Builder
+	if _, err := s.app.Metrics().WriteTo(&sb); err != nil {
+		t.Fatal(err)
+	}
+	out := sb.String()
+	for _, want := range []string{
+		`ocs_prov_submissions_total{result="accepted"} 2`,
+		`ocs_prov_submissions_total{result="duplicate"} 1`,
+		`ocs_prov_submissions_total{result="conflict"} 1`,
+		`ocs_prov_submissions_total{result="rejected"} 1`,
+		`ocs_prov_submissions_total{result="unavailable"} 0`,
+		`ocs_prov_accepted_by_type_total{type="create_subscriber"} 1`,
+		`ocs_prov_accepted_by_type_total{type="top_up"} 1`,
+		`ocs_prov_commands_total{outcome="applied"} 2`,
+		`ocs_prov_commands_total{outcome="failed"} 0`,
+		`ocs_prov_dead_lettered_total 0`,
+		`ocs_prov_command_lag_seconds_count 2`,
+		`ocs_prov_http_requests_total{code="4xx"} 3`, // 409, 400, 404 (the 2xx count depends on how often the test polled)
+		`ocs_prov_http_requests_total{code="5xx"} 0`,
+		`ocs_prov_http_request_duration_seconds_bucket`,
+		`ocs_catalog_sync_age_seconds`,
+		`go_goroutines`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if strings.Contains(out, "m-1") || strings.Contains(out, "491709990001") {
+		t.Error("a subscriber identifier leaked into the metrics")
+	}
 }

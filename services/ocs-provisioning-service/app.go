@@ -16,7 +16,9 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/catalog"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/identity"
+	svcrun "github.com/cckhaw/meridian-ocs/pkg/service"
 	"github.com/cckhaw/meridian-ocs/pkg/svcenv"
+	"github.com/cckhaw/meridian-ocs/pkg/telemetry"
 	"github.com/cckhaw/meridian-ocs/pkg/tlsconf"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/auth"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/bus"
@@ -37,6 +39,7 @@ type App struct {
 	cons *kgo.Client
 	wrk  *worker.Worker
 	rep  *catalog.Replicator
+	reg  *telemetry.Registry
 
 	restSrv *http.Server
 	grpcSrv *grpc.Server
@@ -73,6 +76,8 @@ func NewApp(ctx context.Context, cfg Config, g svcenv.Getenv, logf func(string, 
 		PoolSize:     64,
 	})
 	data := datalayer.New(a.rdb)
+	reg := telemetry.NewRegistry()
+	a.reg = reg
 	if err := svcenv.ConfigureDurability(ctx, g, data, logf); err != nil {
 		return nil, err
 	}
@@ -88,7 +93,9 @@ func NewApp(ctx context.Context, cfg Config, g svcenv.Getenv, logf func(string, 
 			return nil, fmt.Errorf("kafka consumer: %w", err)
 		}
 		applier := &worker.DataApplier{Data: data, Dir: identity.NewRedisDirectory(a.rdb, cfg.IdentityPrefix)}
-		a.wrk = worker.New(worker.Config{Bus: cfg.Bus, Limits: cfg.Limits, Workers: cfg.Workers, Logf: logf}, a.cons, applier, st, a.prod)
+		lag := reg.Histogram("ocs_prov_command_lag_seconds", "Time from acceptance of a command to its recorded outcome.", nil, commandLagBuckets...)
+		a.wrk = worker.New(worker.Config{Bus: cfg.Bus, Limits: cfg.Limits, Workers: cfg.Workers, Logf: logf, Lag: lag}, a.cons, applier, st, a.prod)
+		a.registerWorkerMetrics()
 	}
 
 	if cfg.runsAPI() {
@@ -102,6 +109,7 @@ func NewApp(ctx context.Context, cfg Config, g svcenv.Getenv, logf func(string, 
 		// attach_offering answers 503 until it can.
 		store := catalog.NewStore(0)
 		a.rep = &catalog.Replicator{Redis: a.rdb, Store: store, OnError: func(err error) { logf("catalog sync: %v", err) }}
+		a.rep.RegisterMetrics(reg)
 		if err := a.rep.Sync(ctx); err != nil {
 			logf("WARNING cannot read the catalog yet (%v); attach_offering is unavailable until it can", err)
 		} else if cur := store.Current(); cur != nil {
@@ -112,7 +120,8 @@ func NewApp(ctx context.Context, cfg Config, g svcenv.Getenv, logf func(string, 
 		svc := service.New(service.Config{Limits: cfg.Limits, CommandsTopic: cfg.Bus.CommandsTopic, Catalog: store, Directory: identity.NewRedisDirectory(a.rdb, cfg.IdentityPrefix)}, st, a.prod, data)
 
 		if cfg.RESTAddr != "off" {
-			a.restSrv = &http.Server{Handler: rest.New(svc, az), ReadHeaderTimeout: 5 * time.Second,
+			a.registerAPIMetrics(svc)
+			a.restSrv = &http.Server{Handler: telemetry.Instrument(rest.New(svc, az), reg, "ocs_prov", "/v1/"), ReadHeaderTimeout: 5 * time.Second,
 				ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
 			if cfg.Auth == "mtls" {
 				if a.restSrv.TLSConfig, err = tlsconf.Server(cfg.TLSCert, cfg.TLSKey, cfg.ClientCA, "h2", "http/1.1"); err != nil {
@@ -142,6 +151,8 @@ func NewApp(ctx context.Context, cfg Config, g svcenv.Getenv, logf func(string, 
 			logf("WARNING authentication is OFF: anyone who can reach the API can move money")
 		}
 	}
+	a.registerCommonMetrics(data)
+	svcrun.HandleAdmin("/metrics", reg.Handler())
 	ok = true
 	return a, nil
 }

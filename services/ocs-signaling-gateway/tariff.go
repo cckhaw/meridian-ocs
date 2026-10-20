@@ -14,6 +14,7 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/catalog"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/engine"
+	"github.com/cckhaw/meridian-ocs/pkg/telemetry"
 )
 
 // newTariff builds the pricing source from the environment.
@@ -32,7 +33,7 @@ import (
 // provisioning service) via the catalog; one with no offering is priced on the
 // default plan. A failed profile lookup is never answered with the default
 // plan: the unit is priced with no rates instead (no new quota).
-func newTariff(ctx context.Context, env func(string, string) string, rdb redis.UniversalClient) (engine.Tariff, func(), error) {
+func newTariff(ctx context.Context, env func(string, string) string, rdb redis.UniversalClient, reg *telemetry.Registry) (engine.Tariff, func(), error) {
 	switch mode := env("OCS_TARIFF", "static"); mode {
 	case "static":
 		cash, err := parseRate(env("OCS_CASH_BYTES_RATE", "1/1024"))
@@ -59,6 +60,7 @@ func newTariff(ctx context.Context, env func(string, string) string, rdb redis.U
 		if err := rep.Sync(ctx); err != nil {
 			return nil, nil, fmt.Errorf("loading the catalog: %w", err)
 		}
+		rep.RegisterMetrics(reg)
 		cur := store.Current()
 		if cur == nil {
 			return nil, nil, errors.New("OCS_TARIFF=catalog but no catalog version is in effect: publish one with ocs-catalog-service first")

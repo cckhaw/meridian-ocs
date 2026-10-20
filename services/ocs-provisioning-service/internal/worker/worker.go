@@ -46,6 +46,8 @@ type Config struct {
 	MinBackoff time.Duration // default 50ms
 	MaxBackoff time.Duration // default 2s
 	Logf       func(format string, args ...any)
+	// Lag, when set, observes the time from acceptance to a recorded outcome.
+	Lag interface{ Observe(time.Duration) }
 }
 
 func (c *Config) setDefaults() {
@@ -277,6 +279,9 @@ func (w *Worker) finish(ctx context.Context, c *command.Command, out Outcome) {
 		w.applied.Add(1)
 	} else {
 		w.failedN.Add(1)
+	}
+	if w.cfg.Lag != nil && c.AcceptedAt > 0 {
+		w.cfg.Lag.Observe(time.Since(time.UnixMilli(c.AcceptedAt)))
 	}
 }
 

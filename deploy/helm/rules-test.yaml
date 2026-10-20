@@ -1,0 +1,121 @@
+# promtool unit tests for the alert rules: the alerts that matter most fire when
+# they should and stay quiet when they should. Run by test.sh.
+rule_files: [rules.yaml]
+evaluation_interval: 1m
+tests:
+  - name: serving degraded
+    interval: 1m
+    input_series:
+      - series: 'ocs_engine_degraded_total{pod="g0"}'
+        values: '0+0x5 0+30x10'
+    alert_rule_test:
+      - {eval_time: 4m, alertname: OcsServingDegraded, exp_alerts: []}
+      - eval_time: 10m
+        alertname: OcsServingDegraded
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "Requests are being answered without the data tier"
+              description: "The fail policy is answering instead of the balance store (prepaid fail-closed, postpaid fail-open with caps). Redis is unreachable or slow."
+
+  - name: a commit acknowledged by too few replicas
+    interval: 1m
+    input_series:
+      - series: 'ocs_durability_short_total{pod="g0"}'
+        values: '0+0x3 0+1x10'
+      - series: 'ocs_engine_unreplicated_total{pod="g0"}'
+        values: '0+0x13'
+    alert_rule_test:
+      - {eval_time: 2m, alertname: OcsCommitsNotReplicated, exp_alerts: []}
+      - eval_time: 8m
+        alertname: OcsCommitsNotReplicated
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "Commits are being acknowledged by fewer replicas than required"
+              description: "The no-double-spend durability promise is weakened: a primary failure now could lose charges. A replica is lagging, partitioned or down."
+
+  - name: provisioning accepts commands but none finish
+    interval: 1m
+    input_series:
+      - series: 'ocs_prov_submissions_total{result="accepted",pod="a0"}'
+        values: '0+5x30'
+      - series: 'ocs_prov_commands_total{outcome="applied",pod="w0"}'
+        values: '0+0x30'
+    alert_rule_test:
+      - {eval_time: 5m, alertname: OcsProvisioningStalled, exp_alerts: []}
+      - eval_time: 25m
+        alertname: OcsProvisioningStalled
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "Provisioning commands are accepted but none finish"
+              description: "The workers are not consuming: Kafka, Redis or the worker pods are down."
+
+  - name: provisioning keeping up is quiet
+    interval: 1m
+    input_series:
+      - series: 'ocs_prov_submissions_total{result="accepted",pod="a0"}'
+        values: '0+5x30'
+      - series: 'ocs_prov_commands_total{outcome="applied",pod="w0"}'
+        values: '0+5x30'
+    alert_rule_test:
+      - {eval_time: 25m, alertname: OcsProvisioningStalled, exp_alerts: []}
+
+  - name: nodes on different catalog versions
+    interval: 1m
+    input_series:
+      - series: 'ocs_catalog_version_in_effect{pod="g0"}'
+        values: '4x30'
+      - series: 'ocs_catalog_version_in_effect{pod="g1"}'
+        values: '3x30'
+    alert_rule_test:
+      - {eval_time: 10m, alertname: OcsCatalogVersionSkew, exp_alerts: []}
+      - eval_time: 20m
+        alertname: OcsCatalogVersionSkew
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Nodes disagree about which catalog version is in effect"
+              description: "A publish has not reached every node, or a node is stuck. Different nodes are pricing differently."
+
+  - name: nodes on one catalog version are quiet
+    interval: 1m
+    input_series:
+      - series: 'ocs_catalog_version_in_effect{pod="g0"}'
+        values: '4x30'
+      - series: 'ocs_catalog_version_in_effect{pod="g1"}'
+        values: '4x30'
+    alert_rule_test:
+      - {eval_time: 25m, alertname: OcsCatalogVersionSkew, exp_alerts: []}
+
+  - name: slow charging (all requests in the 25 ms bucket)
+    interval: 1m
+    input_series:
+      - series: 'ocs_engine_rate_duration_seconds_bucket{le="0.01",pod="g0"}'
+        values: '0x30'
+      - series: 'ocs_engine_rate_duration_seconds_bucket{le="0.025",pod="g0"}'
+        values: '0+600x30'
+      - series: 'ocs_engine_rate_duration_seconds_bucket{le="+Inf",pod="g0"}'
+        values: '0+600x30'
+    alert_rule_test:
+      - {eval_time: 5m, alertname: OcsChargingLatencyHigh, exp_alerts: []}
+      - eval_time: 20m
+        alertname: OcsChargingLatencyHigh
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Charging P99 latency is above 10 ms"
+              description: "Rating P99 over 5 minutes is 24.85ms. The target is 10 ms."
+
+  - name: fast charging is quiet (everything under 1 ms)
+    interval: 1m
+    input_series:
+      - series: 'ocs_engine_rate_duration_seconds_bucket{le="0.001",pod="g0"}'
+        values: '0+600x30'
+      - series: 'ocs_engine_rate_duration_seconds_bucket{le="0.01",pod="g0"}'
+        values: '0+600x30'
+      - series: 'ocs_engine_rate_duration_seconds_bucket{le="+Inf",pod="g0"}'
+        values: '0+600x30'
+    alert_rule_test:
+      - {eval_time: 25m, alertname: OcsChargingLatencyHigh, exp_alerts: []}

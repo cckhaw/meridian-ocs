@@ -76,3 +76,5 @@ aiops:
   enabled: true
   auth: mtls
   tls: {secretName: aiops-tls}
+alerts: {enabled: true}
+dashboard: {enabled: true}

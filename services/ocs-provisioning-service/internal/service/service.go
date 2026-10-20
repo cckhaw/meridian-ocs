@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/cckhaw/meridian-ocs/pkg/catalog"
@@ -54,6 +55,29 @@ type Service struct {
 	status *status.Store
 	prod   bus.Producer
 	data   *datalayer.Client
+
+	accepted, duplicates, rejected, conflicts, unavailable atomic.Uint64
+	byType                                                 map[command.Type]*atomic.Uint64
+}
+
+// SubmitStats count what became of the submissions since start.
+type SubmitStats struct {
+	Accepted    uint64 // new commands queued
+	Duplicates  uint64 // repeats of a command already known (idempotent replays)
+	Rejected    uint64 // refused as invalid
+	Conflicts   uint64 // idempotency key reused with different content
+	Unavailable uint64 // could not be queued (store, Kafka or catalog unavailable)
+	ByType      map[command.Type]uint64
+}
+
+// Stats returns the submission counters.
+func (s *Service) Stats() SubmitStats {
+	st := SubmitStats{s.accepted.Load(), s.duplicates.Load(), s.rejected.Load(), s.conflicts.Load(), s.unavailable.Load(),
+		map[command.Type]uint64{}}
+	for t, c := range s.byType {
+		st.ByType[t] = c.Load()
+	}
+	return st
 }
 
 // New builds a Service.
@@ -67,7 +91,11 @@ func New(cfg Config, st *status.Store, prod bus.Producer, data *datalayer.Client
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Service{cfg: cfg, status: st, prod: prod, data: data}
+	by := map[command.Type]*atomic.Uint64{}
+	for _, t := range command.Types {
+		by[t] = new(atomic.Uint64)
+	}
+	return &Service{cfg: cfg, status: st, prod: prod, data: data, byType: by}
 }
 
 // Limits returns the configured command limits.
@@ -87,6 +115,26 @@ type Accepted struct {
 // different content is ErrIdempotencyConflict. If the command cannot be queued
 // it is forgotten, so the caller can retry with the same id.
 func (s *Service) Submit(ctx context.Context, c *command.Command) (Accepted, error) {
+	acc, err := s.submit(ctx, c)
+	switch {
+	case err == nil && acc.Duplicate:
+		s.duplicates.Add(1)
+	case err == nil:
+		s.accepted.Add(1)
+		if n := s.byType[c.Type]; n != nil {
+			n.Add(1)
+		}
+	case command.IsValidation(err):
+		s.rejected.Add(1)
+	case errors.Is(err, ErrIdempotencyConflict):
+		s.conflicts.Add(1)
+	default: // store, Kafka or catalog unavailable
+		s.unavailable.Add(1)
+	}
+	return acc, err
+}
+
+func (s *Service) submit(ctx context.Context, c *command.Command) (Accepted, error) {
 	c.AcceptedAt = s.cfg.Now().UnixMilli()
 	if err := c.Validate(s.cfg.Limits); err != nil {
 		return Accepted{}, err

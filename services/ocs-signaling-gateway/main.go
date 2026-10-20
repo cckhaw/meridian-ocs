@@ -227,7 +227,8 @@ func run(ctx context.Context, ready func()) error {
 		return err
 	}
 
-	tariff, stopTariff, err := newTariff(ctx, env, rdb)
+	reg := telemetry.NewRegistry()
+	tariff, stopTariff, err := newTariff(ctx, env, rdb, reg)
 	if err != nil {
 		return err
 	}
@@ -241,7 +242,6 @@ func run(ctx context.Context, ready func()) error {
 	logger, levelVar := telemetry.NewLogger(os.Stderr, "ocs-signaling-gateway", lvl)
 	slog.SetDefault(logger) // the standard log package now writes through it too
 
-	reg := telemetry.NewRegistry()
 	latency := reg.Histogram("ocs_engine_rate_duration_seconds", "Time to rate one charging request (queueing and processing).", nil)
 	breaker := failpolicy.NewBreaker(5, time.Second,
 		func() { logger.Warn("data-tier circuit breaker opened: requests are answered by the fail policy") },
