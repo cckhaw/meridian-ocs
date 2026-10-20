@@ -5,9 +5,13 @@
 #   dev/smoke.sh                         # creates a subscriber and charges it
 #   docker compose down -v               # stop and forget all data
 #
-# FOR DEVELOPMENT ONLY. Every listener runs with authentication OFF (the services
-# only allow that when told so explicitly, as below), data is not backed up, and
-# every published port is bound to 127.0.0.1 so only this machine can reach it.
+# FOR DEVELOPMENT ONLY. The service listeners run with authentication OFF (the
+# services only allow that when told so explicitly, as below), data is not backed
+# up, and every published port is bound to 127.0.0.1 so only this machine can reach
+# it. Redis, on the other hand, is protected as it would be in production: it needs
+# a password and only speaks TLS (a throwaway CA is generated into the `certs`
+# volume on first start), so the services' Redis access control is exercised.
+# The development password below is public: never reuse it.
 # Production uses mTLS, Secrets and the Helm chart (deploy/helm).
 #
 # Ports on this machine:
@@ -21,28 +25,75 @@ name: meridian-ocs
 
 x-ocs-common: &ocs-common
   restart: on-failure          # a service that cannot reach its dependencies yet exits and is retried
+  volumes: &certs-ro [certs:/certs:ro]
   depends_on: &ocs-deps
     redis-replica: {condition: service_healthy}
 
 x-redis-env: &redis-env
   OCS_REDIS_ADDR: redis:6379
+  OCS_REDIS_PASSWORD: ${OCS_DEV_REDIS_PASSWORD:-dev-only-redis-password}
+  OCS_REDIS_TLS: "on"
+  OCS_REDIS_TLS_CA: /certs/ca.crt
   OCS_REDIS_REPLICAS: "1"      # every commit waits for the replica to acknowledge it
   OCS_REDIS_WAIT_TIMEOUT: 100ms
 
 services:
+  certs:                       # a throwaway CA and a Redis server certificate, generated once
+    image: alpine/openssl:3.5.9
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e; cd /certs
+        [ -f ca.crt ] && echo "certificates already exist" && exit 0
+        openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt -subj "/CN=ocs-dev-ca" -days 3650
+        openssl req -newkey rsa:2048 -nodes -keyout redis.key -out redis.csr -subj "/CN=redis"
+        printf "subjectAltName=DNS:redis,DNS:redis-replica,DNS:localhost,IP:127.0.0.1\n" > ext
+        openssl x509 -req -in redis.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out redis.crt -days 3650 -extfile ext
+        chmod 644 ca.crt redis.crt redis.key   # development only: the Redis user must read the key
+        echo "generated the development CA and Redis certificate"
+    volumes: [certs:/certs]
+    restart: "no"
+
   redis:
     image: redis:7.4-alpine
-    command: ["redis-server", "--appendonly", "yes", "--save", ""]
-    volumes: [redis-data:/data]
-    healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 2s, timeout: 2s, retries: 30}
+    command:
+      - redis-server
+      - --requirepass
+      - ${OCS_DEV_REDIS_PASSWORD:-dev-only-redis-password}
+      - --masterauth
+      - ${OCS_DEV_REDIS_PASSWORD:-dev-only-redis-password}
+      - --port
+      - "0"
+      - --tls-port
+      - "6379"
+      - --tls-cert-file
+      - /certs/redis.crt
+      - --tls-key-file
+      - /certs/redis.key
+      - --tls-ca-cert-file
+      - /certs/ca.crt
+      - --tls-auth-clients
+      - "no"
+      - --tls-replication
+      - "yes"
+      - --appendonly
+      - "yes"
+      - --save
+      - ""
+    environment: &redis-cli-env
+      REDISCLI_AUTH: ${OCS_DEV_REDIS_PASSWORD:-dev-only-redis-password}
+    volumes: [redis-data:/data, "certs:/certs:ro"]
+    depends_on: {certs: {condition: service_completed_successfully}}
+    healthcheck: {test: ["CMD-SHELL", "redis-cli --tls --cacert /certs/ca.crt ping | grep -q PONG"], interval: 2s, timeout: 2s, retries: 30}
 
   redis-replica:
     image: redis:7.4-alpine
-    command: ["redis-server", "--replicaof", "redis", "6379", "--appendonly", "yes", "--save", ""]
-    volumes: [redis-replica-data:/data]
+    command: [redis-server, --replicaof, redis, "6379", --requirepass, "${OCS_DEV_REDIS_PASSWORD:-dev-only-redis-password}", --masterauth, "${OCS_DEV_REDIS_PASSWORD:-dev-only-redis-password}", --port, "0", --tls-port, "6379", --tls-cert-file, /certs/redis.crt, --tls-key-file, /certs/redis.key, --tls-ca-cert-file, /certs/ca.crt, --tls-auth-clients, "no", --tls-replication, "yes", --appendonly, "yes", --save, ""]
+    environment: *redis-cli-env
+    volumes: [redis-replica-data:/data, "certs:/certs:ro"]
     depends_on: {redis: {condition: service_healthy}}
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli info replication | grep -q master_link_status:up"]
+      test: ["CMD-SHELL", "redis-cli --tls --cacert /certs/ca.crt info replication | grep -q master_link_status:up"]
       interval: 2s
       timeout: 2s
       retries: 30
@@ -81,6 +132,7 @@ services:
       OCS_CATALOG_ADDR: ":8444"
       OCS_CATALOG_AUTH: "off"
     ports: ["127.0.0.1:8444:8444", "127.0.0.1:9082:8080"]
+    volumes: *certs-ro
 
   seed:                        # publishes the sample catalog once (dev/seed-catalog.json)
     image: curlimages/curl:8.10.1
@@ -108,6 +160,7 @@ services:
       OCS_PROV_REST_ADDR: ":8443"
       OCS_PROV_GRPC_ADDR: ":9443"
     ports: ["127.0.0.1:8443:8443", "127.0.0.1:9443:9443", "127.0.0.1:9081:8080"]
+    volumes: *certs-ro
     depends_on:
       <<: *ocs-deps
       topics: {condition: service_completed_successfully}
@@ -128,6 +181,7 @@ services:
       OCS_ORIGIN_REALM: dev.local
       OCS_HOST_IP: 127.0.0.1
     ports: ["127.0.0.1:3868:3868", "127.0.0.1:8000:8000", "127.0.0.1:9080:8080"]
+    volumes: *certs-ro
     depends_on:
       <<: *ocs-deps
       seed: {condition: service_completed_successfully}
@@ -140,7 +194,7 @@ services:
       <<: *redis-env
       OCS_MED_OUT_DIR: /data/out
       OCS_MED_IN_DIR: /data/in
-    volumes: [mediation-data:/data]
+    volumes: [mediation-data:/data, "certs:/certs:ro"]
     ports: ["127.0.0.1:9083:8080"]
 
   aiops:
@@ -151,9 +205,11 @@ services:
       OCS_AIOPS_ADDR: ":8445"
       OCS_AIOPS_AUTH: "off"
     ports: ["127.0.0.1:8445:8445", "127.0.0.1:9084:8080"]
+    volumes: []                # AI Ops does not use Redis
     depends_on: {}
 
 volumes:
+  certs:
   redis-data:
   redis-replica-data:
   redpanda-data:

@@ -12,6 +12,7 @@ import (
 
 	"github.com/cckhaw/meridian-ocs/pkg/catalog"
 	"github.com/cckhaw/meridian-ocs/pkg/service"
+	"github.com/cckhaw/meridian-ocs/pkg/svcenv"
 	"github.com/cckhaw/meridian-ocs/pkg/telemetry"
 	"github.com/cckhaw/meridian-ocs/pkg/tlsconf"
 	"github.com/cckhaw/meridian-ocs/services/ocs-catalog-service/internal/api"
@@ -31,9 +32,15 @@ type App struct {
 // NewApp connects to Redis, loads the catalog and binds the listener. It
 // refuses to start if the catalog cannot be read: serving an empty or stale
 // management view while a publish may be in flight would mislead editors.
-func NewApp(ctx context.Context, cfg Config, logf func(string, ...any)) (*App, error) {
+func NewApp(ctx context.Context, cfg Config, g svcenv.Getenv, logf func(string, ...any)) (*App, error) {
 	a := &App{cfg: cfg, logf: logf}
-	a.rdb = redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	ropts := &redis.Options{Addr: cfg.RedisAddr}
+	access, err := svcenv.ApplyRedisAccess(ropts, g)
+	if err != nil {
+		return nil, err
+	}
+	svcenv.LogRedisAccess(logf, access)
+	a.rdb = redis.NewClient(ropts)
 	store := catalog.NewStore(cfg.Retain)
 	a.rep = &catalog.Replicator{Redis: a.rdb, Store: store, Resync: cfg.Resync,
 		OnError: func(err error) { logf("catalog sync: %v", err) }}

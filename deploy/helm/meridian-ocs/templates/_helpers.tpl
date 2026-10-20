@@ -28,9 +28,46 @@ helm.sh/chart: {{ printf "%s-%s" .root.Chart.Name .root.Chart.Version }}
 {{- .value -}}
 {{- end -}}
 
-{{/* Settings every component that uses Redis shares. */}}
+{{/* Redis access control: refusals that mirror the services' own. */}}
+{{- define "ocs.redis.check" -}}
+{{- $r := .Values.redis -}}
+{{- if and (not $r.password.secretName) (not .Values.allowInsecure) -}}{{ fail "redis.password.secretName is required: an open Redis is refused unless allowInsecure=true (development clusters only)" }}{{- end -}}
+{{- if and $r.username (not $r.password.secretName) -}}{{ fail "redis.username needs redis.password.secretName" }}{{- end -}}
+{{- if and $r.tls.enabled $r.tls.mesh -}}{{ fail "redis.tls.enabled and redis.tls.mesh are both set: choose one" }}{{- end -}}
+{{- if and (not $r.tls.enabled) (not $r.tls.mesh) (not .Values.allowInsecure) -}}{{ fail "redis.tls.enabled=true is required (or redis.tls.mesh=true when a service mesh encrypts the connection): an unencrypted Redis connection is refused unless allowInsecure=true" }}{{- end -}}
+{{- if and (not $r.tls.enabled) (or $r.tls.secretName $r.tls.serverName $r.tls.clientCert) -}}{{ fail "redis.tls.secretName, serverName and clientCert have no effect without redis.tls.enabled: refusing a configuration that looks encrypted but is not" }}{{- end -}}
+{{- if and $r.tls.clientCert (not $r.tls.secretName) -}}{{ fail "redis.tls.clientCert needs redis.tls.secretName (tls.crt and tls.key are read from it)" }}{{- end -}}
+{{- end -}}
+
+{{/* How a component reaches Redis: address, credentials and TLS (files under /redis, see ocs.component). */}}
+{{- define "ocs.env.redisAccess" -}}
+{{- include "ocs.redis.check" . -}}
+{{- $r := .Values.redis }}
+- {name: OCS_REDIS_ADDR, value: {{ required "redis.addr is required" $r.addr | quote }}}
+{{- if $r.username }}
+- {name: OCS_REDIS_USERNAME, value: {{ $r.username | quote }}}
+{{- end }}
+{{- if $r.password.secretName }}
+- {name: OCS_REDIS_PASSWORD_FILE, value: {{ printf "/redis/password/%s" $r.password.key | quote }}}
+{{- end }}
+{{- if $r.tls.enabled }}
+- {name: OCS_REDIS_TLS, value: "on"}
+{{- if $r.tls.secretName }}
+- {name: OCS_REDIS_TLS_CA, value: /redis/tls/ca.crt}
+{{- end }}
+{{- if $r.tls.clientCert }}
+- {name: OCS_REDIS_TLS_CERT, value: /redis/tls/tls.crt}
+- {name: OCS_REDIS_TLS_KEY, value: /redis/tls/tls.key}
+{{- end }}
+{{- if $r.tls.serverName }}
+- {name: OCS_REDIS_TLS_SERVER_NAME, value: {{ $r.tls.serverName | quote }}}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/* Settings every component that uses Redis for balances shares. */}}
 {{- define "ocs.env.redis" -}}
-- {name: OCS_REDIS_ADDR, value: {{ required "redis.addr is required" .Values.redis.addr | quote }}}
+{{ include "ocs.env.redisAccess" . }}
 - {name: OCS_REDIS_REPLICAS, value: {{ .Values.redis.requiredReplicas | quote }}}
 - {name: OCS_REDIS_WAIT_TIMEOUT, value: {{ .Values.redis.waitTimeout | quote }}}
 {{- if .Values.redis.allowNoReplica }}
@@ -144,9 +181,30 @@ spec:
           volumeMounts:
             - {name: tmp, mountPath: /tmp}
             {{- if .mounts }}{{ .mounts | nindent 12 }}{{- end }}
+            {{- if .redis }}
+            {{- if $v.redis.password.secretName }}
+            - {name: redis-password, mountPath: /redis/password, readOnly: true}
+            {{- end }}
+            {{- if and $v.redis.tls.enabled $v.redis.tls.secretName }}
+            - {name: redis-tls, mountPath: /redis/tls, readOnly: true}
+            {{- end }}
+            {{- end }}
       volumes:
         - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
         {{- if .volumes }}{{ .volumes | nindent 8 }}{{- end }}
+        {{- if .redis }}
+        {{- if $v.redis.password.secretName }}
+        - name: redis-password
+          secret:
+            secretName: {{ $v.redis.password.secretName | quote }}
+            defaultMode: 0440
+            items: [{key: {{ $v.redis.password.key | quote }}, path: {{ $v.redis.password.key | quote }}}]
+        {{- end }}
+        {{- if and $v.redis.tls.enabled $v.redis.tls.secretName }}
+        - name: redis-tls
+          secret: {secretName: {{ $v.redis.tls.secretName | quote }}, defaultMode: 0440}
+        {{- end }}
+        {{- end }}
   {{- if .claims }}
   volumeClaimTemplates: {{- .claims | nindent 4 }}
   {{- end }}

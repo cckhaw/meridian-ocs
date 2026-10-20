@@ -5,10 +5,14 @@ demonstration: Redis (a primary **and** a replica, so commits really wait for an
 acknowledgement), Redpanda (the Kafka API) and the gateway, provisioning, catalog,
 mediation and AI Ops services, each built from `build/Dockerfile`.
 
-**For development only.** Every listener runs with authentication off (the services
+**For development only.** The service listeners run with authentication off (the services
 allow that only when told so explicitly, as the compose file does), nothing is backed
-up, and every published port is bound to `127.0.0.1`. Production uses mTLS, Secrets and
-the Helm chart ([12](12-deployment.md)).
+up, and every published port is bound to `127.0.0.1`. Redis is protected as in production:
+it needs a password and only speaks TLS (replication included), using a throwaway CA that
+the `certs` job generates into a volume on first start, so the services' Redis access control
+([07](07-durability.md#connecting-to-redis-credentials-and-tls)) is exercised. The development
+password is public (`OCS_DEV_REDIS_PASSWORD` overrides it): never reuse it. Production uses
+mTLS, Secrets and the Helm chart ([12](12-deployment.md)).
 
 ```sh
 docker compose up --build      # first start compiles five services; later starts take seconds
@@ -24,7 +28,8 @@ so it runs natively on Apple Silicon.
 
 | Service | Image | Purpose | Port on this machine |
 |---|---|---|---|
-| `redis`, `redis-replica` | `redis:7.4-alpine` | balances, sessions, identity directory, catalog | none |
+| `certs` | `alpine/openssl` | generates a throwaway CA and a Redis server certificate once, then exits | none |
+| `redis`, `redis-replica` | `redis:7.4-alpine` | balances, sessions, identity directory, catalog; password and TLS only | none |
 | `redpanda`, `topics` | `redpandadata/redpanda:v26.1.18` | Kafka API; `topics` creates the three provisioning topics (3 partitions) and exits | 19092 (Kafka API) |
 | `catalog` | built | catalog REST and editor | 8444 (`/ui/`) |
 | `seed` | `curlimages/curl` | publishes `dev/seed-catalog.json` once (plans `basic`, `gold`; offerings `basic-offer`, `gold-offer`), then exits; leaves an existing catalog alone | none |
@@ -69,7 +74,9 @@ found by MSISDN, Nchf quota granted from the offering's bundle at the catalog's 
 balance moving (10 GiB bundle: -1,000,000 on grant, +750,000 back when 250,000 were used and the
 session was released), a CDR enriched by mediation, and metrics reflecting the traffic. A
 restart (`down` then `up`, volumes kept) keeps the subscriber and does not reseed the catalog.
-The CI job `stack` repeats the build and the smoke test on every change.
+The same run was repeated with Redis behind a password and TLS (replication over TLS with the
+replica acknowledgement still arriving; a plaintext client gets an I/O error and a client without the
+password gets `NOAUTH`). The CI job `stack` repeats the build and the smoke test on every change.
 
 Found while verifying: the non-root service could not write a fresh named volume (fixed in the
 Dockerfile, which now creates `/data` owned by the service user), and a CDR file copied in
@@ -77,9 +84,9 @@ with owner-only permissions is unreadable by the service (documented above).
 
 ## Known gaps
 
-1. **Authentication is off everywhere** in this stack; it does not exercise mTLS, OAuth, the
-   privileged/standard caller split or the cross-origin checks (those are covered by tests and
-   the chart).
+1. **The service listeners have authentication off** in this stack; it does not exercise mTLS, OAuth,
+   the privileged/standard caller split or the cross-origin checks (those are covered by tests and
+   the chart). Redis does use a password and TLS, but no client certificate or ACL user.
 2. **Single Redis primary and replica with no failover**: stopping the primary stops charging.
    There is no Sentinel, so the durability and failover behaviour is only what `WAIT` gives.
 3. **No monitoring stack** (Prometheus, Grafana): `/metrics` is exposed, the chart's alert

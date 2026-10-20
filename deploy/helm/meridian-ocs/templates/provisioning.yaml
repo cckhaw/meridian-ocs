@@ -20,7 +20,7 @@
 {{- $ports := list }}
 {{- if ne $role.mode "worker" }}{{ $ports = list (dict "name" "rest" "port" $p.restPort) (dict "name" "grpc" "port" $p.grpcPort) }}{{ end }}
 {{- $env := include "provisioning.env" (dict "root" $ "mode" $role.mode) }}
-{{ include "ocs.component" (dict "root" $ "name" $role.name "service" "ocs-provisioning-service" "kind" "Deployment"
+{{ include "ocs.component" (dict "redis" true "root" $ "name" $role.name "service" "ocs-provisioning-service" "kind" "Deployment"
     "replicas" $role.cfg.replicas "resources" $role.cfg.resources "ports" $ports "env" $env
     "volumes" (ternary (toYaml $vols) "" (gt (len $vols) 0)) "mounts" (ternary (toYaml $mounts) "" (gt (len $mounts) 0))
     "pdb" $p.pdb) }}

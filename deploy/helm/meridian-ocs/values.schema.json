@@ -54,6 +54,58 @@
         },
         "allowNoReplica": {
           "type": "boolean"
+        },
+        "username": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "password": {
+          "type": "object",
+          "properties": {
+            "secretName": {
+              "type": [
+                "string",
+                "integer",
+                "number"
+              ]
+            },
+            "key": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "mesh": {
+              "type": "boolean"
+            },
+            "secretName": {
+              "type": [
+                "string",
+                "integer",
+                "number"
+              ]
+            },
+            "serverName": {
+              "type": [
+                "string",
+                "integer",
+                "number"
+              ]
+            },
+            "clientCert": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

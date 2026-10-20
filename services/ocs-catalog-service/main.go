@@ -18,7 +18,7 @@ func run(ctx context.Context, ready func()) error {
 		return err
 	}
 	logf := func(f string, a ...any) { log.Printf("ocs-catalog-service: "+f, a...) }
-	app, err := NewApp(ctx, cfg, logf)
+	app, err := NewApp(ctx, cfg, svcenv.OS, logf)
 	if err != nil {
 		return err
 	}

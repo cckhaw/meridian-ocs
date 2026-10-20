@@ -68,13 +68,22 @@ func NewApp(ctx context.Context, cfg Config, g svcenv.Getenv, logf func(string, 
 		}
 	}()
 
-	a.rdb = redis.NewClient(&redis.Options{
+	ropts := &redis.Options{
 		Addr:         cfg.RedisAddr,
 		DialTimeout:  500 * time.Millisecond,
 		ReadTimeout:  time.Second,
 		WriteTimeout: time.Second,
 		PoolSize:     64,
-	})
+	}
+	access, err := svcenv.ApplyRedisAccess(ropts, g)
+	if err != nil {
+		return nil, err
+	}
+	svcenv.LogRedisAccess(logf, access)
+	a.rdb = redis.NewClient(ropts)
+	if err := svcenv.CheckRedisAccess(ctx, a.rdb); err != nil {
+		return nil, err
+	}
 	data := datalayer.New(a.rdb)
 	reg := telemetry.NewRegistry()
 	a.reg = reg
@@ -83,7 +92,6 @@ func NewApp(ctx context.Context, cfg Config, g svcenv.Getenv, logf func(string, 
 	}
 	st := status.New(a.rdb, "", 0)
 
-	var err error
 	if a.prod, err = bus.NewProducer(cfg.Bus.Brokers); err != nil {
 		return nil, fmt.Errorf("kafka producer: %w", err)
 	}
