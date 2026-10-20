@@ -22,6 +22,39 @@ if command -v kubeconform >/dev/null; then
   else bad "rendered manifests are valid Kubernetes objects"; fi
 else echo "SKIP  kubeconform not installed"; fi
 
+# --- generated files are current
+if python3 ../gen-dashboard.py --check; then ok "dashboard.json is current"; else bad "dashboard.json is out of date (run deploy/helm/gen-dashboard.py)"; fi
+if python3 -c "import yaml" 2>/dev/null; then
+  if python3 ../gen-schema.py --check; then ok "values.schema.json is current"; else bad "values.schema.json is out of date (run deploy/helm/gen-schema.py)"; fi
+else echo "SKIP  PyYAML not installed (schema currency)"; fi
+
+# --- alert rules and dashboard
+rules=$(awk 'BEGIN{RS="---\n"} /kind: PrometheusRule/' <<<"$secure")
+dash=$(awk 'BEGIN{RS="---\n"} /meridian-ocs.json/' <<<"$secure")
+[ -n "$rules" ] && ok "PrometheusRule rendered" || bad "PrometheusRule not rendered"
+[ -n "$dash" ] && ok "dashboard ConfigMap rendered" || bad "dashboard ConfigMap not rendered"
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+sed -n '/^spec:/,$p' <<<"$rules" | sed '1d;s/^  //' > "$tmp/rules.yaml"
+if command -v promtool >/dev/null; then
+  promtool check rules "$tmp/rules.yaml" >/dev/null && ok "promtool accepts the rules" || bad "promtool rejects the rules"
+  cp ../rules-test.yaml "$tmp/"
+  if out=$(promtool test rules "$tmp/rules-test.yaml" 2>&1); then ok "alert unit tests pass ($(grep -c '^  - name:' ../rules-test.yaml) scenarios)"; else bad "alert unit tests: $out"; fi
+else echo "SKIP  promtool not installed"; fi
+# Every metric the rules and the dashboard use must be one the Go code registers
+# (names built from a prefix, like <prefix>_http_requests_total, are checked in two parts).
+root=$(cd ../../.. && pwd)
+names=$( { cat "$tmp/rules.yaml"; cat files/dashboard.json; } | grep -oE '\b(ocs|go)_[a-z0-9_]+' | sed -E 's/_(bucket|sum|count)$//' | sort -u)
+missing=""
+for m in $names; do
+  if grep -rqF --include='*.go' --exclude='*_test.go' "\"$m\"" "$root/services" "$root/pkg"; then continue; fi
+  if [[ $m =~ ^(.+)_http_(requests_total|request_duration_seconds)$ ]]; then
+    p=${BASH_REMATCH[1]}; sfx=${BASH_REMATCH[2]}
+    grep -rqF --include='*.go' --exclude='*_test.go' "\"$p\"" "$root/services" && grep -rqF --include='*.go' --exclude='*_test.go' "\"_http_$sfx\"" "$root/pkg" && continue
+  fi
+  missing="$missing $m"
+done
+[ -z "$missing" ] && ok "every metric in the rules and dashboard is registered in the code ($(wc -w <<<"$names") names)" || bad "metrics used but never registered:$missing"
+
 # refuses <label> <expected message fragment> <helm args...>
 refuses() {
   local label=$1 want=$2; shift 2

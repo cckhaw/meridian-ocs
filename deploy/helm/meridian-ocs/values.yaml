@@ -69,6 +69,21 @@ serviceMonitor:
   interval: 15s
   labels: {}
 
+# Alert rules (a PrometheusRule, needs the Prometheus Operator CRDs) and a Grafana
+# dashboard (a ConfigMap for the Grafana sidecar). Both only use metrics the
+# services export; see docs/architecture/12-deployment.md for what each alert means.
+alerts:
+  enabled: false
+  labels: {}                         # e.g. {release: kube-prometheus-stack}
+  latencyP99Seconds: 0.010           # the charging path's P99 target
+  latencyP99CriticalSeconds: 0.050
+  provisioningLagP99Seconds: 30      # acceptance to recorded outcome
+  catalogStaleSeconds: 300           # time since a node last read the shared catalog
+  rejectRatio: 0.01                  # share of mediation records in suspense or rejected
+dashboard:
+  enabled: false
+  labels: {grafana_dashboard: "1"}   # the label your Grafana sidecar selects on
+
 gateway:
   enabled: true
   replicas: 3

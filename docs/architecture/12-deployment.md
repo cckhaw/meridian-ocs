@@ -48,6 +48,39 @@ because connections and sessions are sticky. Probes use the services' own
 and again while draining). The admin port (health and metrics) is exposed only by
 the `-admin` Services, never by a client-facing one.
 
+## Observability
+
+Every service serves `/metrics` (Prometheus text) on its admin port; the chart can
+render a `ServiceMonitor`, a `PrometheusRule` (`alerts.enabled`) and a Grafana
+dashboard ConfigMap (`dashboard.enabled`, for the Grafana sidecar). The gateway and
+mediation already exported metrics ([11](11-aiops.md)); this part adds the rest:
+
+- **Provisioning**: submissions by result (`accepted`, `duplicate`, `rejected`,
+  `conflict`, `unavailable`), accepted by command type, commands finished by outcome,
+  dead-lettered messages, worker retries and commits, **command lag** (acceptance to
+  recorded outcome, a histogram), API requests by status class and their duration,
+  and the data-tier durability counters (provisioning moves money too).
+- **Catalog** (every node that reads it: gateway, provisioning, catalog service,
+  mediation): version in effect, latest version, **seconds since the shared catalog
+  was last read**, replication errors; the catalog service adds publishes by result
+  and API requests.
+- **Shared**: Go runtime gauges. No path, subscriber key, MSISDN, certificate name or
+  author is ever a label (checked by tests): labels are bounded enums (result,
+  outcome, type, code class).
+
+Alerts (28, six groups; thresholds in `alerts.*`): scrape target down; charging P99
+above 10 ms (warning) and 50 ms (critical); requests answered by the fail policy;
+breaker open, or forced open for 30 minutes; **commits acknowledged by fewer replicas
+than required** (the durability promise); replica wait suspended; load shedding; audit
+dropped; identity directory errors and conflicts; usage the catalog cannot price;
+catalog sync stale or failing, **no version in effect**, **nodes on different versions**;
+catalog publish errors and denied publishes; provisioning stalled (commands accepted
+but none finishing), lag, dead letters, worker retries, API 5xx, commands that cannot
+be queued; mediation reject share, ledger commits not replicated, mapping rejected.
+Rules are scoped to the release by the admin-Service job name and namespace, but
+metric names are not release-labelled: two releases scraped into one Prometheus mix in
+the aggregate alerts.
+
 ## Installing
 
 1. Redis (primary plus the replicas you configure) and Kafka exist, and the
@@ -67,12 +100,17 @@ SERVICE=ocs-signaling-gateway .`
 ## Verification
 
 `deploy/helm/test.sh` (CI job `helm`, helm and kubeconform pinned and
-checksum-verified): lint and render both value sets; kubeconform on the output; 28
+checksum-verified; helm, kubeconform and promtool): lint and render both value sets; kubeconform on the output; 28
 deliberate refusals each checked for the right reason (missing image, auth not
 chosen, `off` without `allowInsecure`, mTLS without a Secret or named callers,
 Nchf in clear, OAuth without keys, control plane with nobody allowed in,
 `allowNoReplica`, NetworkPolicy with empty lists, typos, an unquoted `off`, ...);
-and properties of the rendered pods (non-root, read-only filesystem, no privilege
+`promtool check rules` and **8 alert unit-test scenarios** (the alerts fire on synthetic
+series when they should and stay quiet when they should: degraded serving,
+under-replicated commits, provisioning stalled vs keeping up, catalog version skew,
+slow vs fast charging); a check that **every metric name in the rules and dashboard is
+registered in the Go code**; the generated `values.schema.json` and `dashboard.json`
+are current (`gen-schema.py`, `gen-dashboard.py`); and properties of the rendered pods (non-root, read-only filesystem, no privilege
 escalation, no token, seccomp, no CPU limits, mediation single pod, admin port not on
 client Services, no secret material). Mutation-checked: allowing `off` without
 `allowInsecure`, a writable root filesystem and Nchf in clear each make it fail.
@@ -83,7 +121,9 @@ Redis primary and replica): all six start and answer `/readyz`. That check found
 that a placeholder mapping in the example values was rejected by the service
 (`mapping: 1 problem(s)`), and confirmed the install-order behaviour above (gateway
 and mediation exit with "no catalog version is in effect" until one is published).
-It was done by hand with a throwaway script, not in CI.
+It was done by hand with a throwaway script, not in CI. The same run scraped `/metrics`
+from all of them and confirmed that **every metric the alerts and dashboard use is
+actually emitted** by the real binaries (the CI check is the cheaper static version).
 
 ## Known gaps
 
@@ -100,7 +140,11 @@ It was done by hand with a throwaway script, not in CI.
    storage class gives, and no SFTP pull or sidecar for delivering CDR files into
    `/data/in`.
 5. **HPA scales on CPU only**; no custom metrics (TPS, in-flight) and no KEDA for
-   workers (Kafka lag).
+   workers. **Kafka consumer lag is not exported**: the stalled-provisioning alert
+   infers it from accepted-versus-finished rates and the command-lag histogram, which
+   only observes commands that finish. gRPC calls are not counted (REST is). No traces
+   (OpenTelemetry), and the dashboard and alerts have been validated by tooling, not
+   looked at in a running Grafana and Prometheus.
 6. **No mesh topology, no multi-region.** Active-active across regions is not built.
 7. **The standalone rating-engine and data-layer services** are still scaffolds and
    are not in the chart (the gateway runs the engine in-process).

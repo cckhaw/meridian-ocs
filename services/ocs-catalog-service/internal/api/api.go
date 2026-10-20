@@ -25,10 +25,12 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cckhaw/meridian-ocs/pkg/catalog"
 	"github.com/cckhaw/meridian-ocs/pkg/catalog/expr"
+	"github.com/cckhaw/meridian-ocs/pkg/telemetry"
 	"github.com/cckhaw/meridian-ocs/pkg/tlsconf"
 	"github.com/cckhaw/meridian-ocs/services/ocs-catalog-service/internal/ui"
 )
@@ -51,6 +53,30 @@ type Handler struct {
 	mux        *http.ServeMux
 	// Logf records publishes (who, which version); nil discards.
 	Logf func(format string, args ...any)
+
+	// publish outcomes, in the order of publishResults
+	published [len(publishResults)]atomic.Uint64
+}
+
+var publishResults = [...]string{"ok", "invalid", "conflict", "not_monotonic", "forbidden", "error"}
+
+const (
+	pubOK = iota
+	pubInvalid
+	pubConflict
+	pubNotMonotonic
+	pubForbidden
+	pubError
+)
+
+// RegisterMetrics exposes what became of each publish attempt. Authors and
+// version numbers are logged, not labels.
+func (h *Handler) RegisterMetrics(reg *telemetry.Registry) {
+	for i, name := range publishResults {
+		i := i
+		reg.CounterFunc("ocs_catalog_publishes_total", "Catalog publish attempts by result.", telemetry.Labels{"result": name},
+			func() float64 { return float64(h.published[i].Load()) })
+	}
 }
 
 // New builds the handler. With open (authentication off) every caller may do
@@ -338,6 +364,7 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.open && !h.publishers[cn] {
+		h.published[pubForbidden].Add(1)
 		fail(w, http.StatusForbidden, "forbidden", "this client may not publish catalog versions", nil)
 		return
 	}
@@ -349,16 +376,21 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 	var ve *catalog.ValidationError
 	switch {
 	case err == nil:
+		h.published[pubOK].Add(1)
 		h.logf("catalog version %d published by %q, effective %s", sn.Version, cn, sn.EffectiveFrom.Format(time.RFC3339))
 		w.Header().Set("Location", "/v1/catalog?version="+strconv.FormatInt(sn.Version, 10))
 		writeJSON(w, http.StatusCreated, publishResponse{sn.Version, sn.EffectiveFrom, nonNil(warns)})
 	case errors.As(err, &ve):
+		h.published[pubInvalid].Add(1)
 		fail(w, http.StatusUnprocessableEntity, "invalid_catalog", "the catalog is not valid", ve.Problems)
 	case errors.Is(err, catalog.ErrVersionConflict):
+		h.published[pubConflict].Add(1)
 		fail(w, http.StatusConflict, "version_conflict", err.Error(), nil)
 	case errors.Is(err, catalog.ErrNotMonotonic):
+		h.published[pubNotMonotonic].Add(1)
 		fail(w, http.StatusUnprocessableEntity, "not_monotonic", err.Error(), nil)
 	default:
+		h.published[pubError].Add(1)
 		fail(w, http.StatusServiceUnavailable, "unavailable", "the catalog could not be published, try again", nil)
 	}
 }

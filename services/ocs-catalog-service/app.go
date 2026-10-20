@@ -11,6 +11,8 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/cckhaw/meridian-ocs/pkg/catalog"
+	"github.com/cckhaw/meridian-ocs/pkg/service"
+	"github.com/cckhaw/meridian-ocs/pkg/telemetry"
 	"github.com/cckhaw/meridian-ocs/pkg/tlsconf"
 	"github.com/cckhaw/meridian-ocs/services/ocs-catalog-service/internal/api"
 )
@@ -21,6 +23,7 @@ type App struct {
 	logf func(string, ...any)
 	rdb  *redis.Client
 	rep  *catalog.Replicator
+	reg  *telemetry.Registry
 	srv  *http.Server
 	ln   net.Listener
 }
@@ -41,7 +44,12 @@ func NewApp(ctx context.Context, cfg Config, logf func(string, ...any)) (*App, e
 
 	h := api.New(store, a.rep, cfg.Auth == "off", cfg.Publishers)
 	h.Logf = logf
-	a.srv = &http.Server{Handler: h, ReadHeaderTimeout: 5 * time.Second,
+	a.reg = telemetry.NewRegistry()
+	a.rep.RegisterMetrics(a.reg)
+	h.RegisterMetrics(a.reg)
+	telemetry.RegisterRuntime(a.reg)
+	service.HandleAdmin("/metrics", a.reg.Handler())
+	a.srv = &http.Server{Handler: telemetry.Instrument(h, a.reg, "ocs_catalog", "/v1/"), ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
 	if cfg.Auth == "mtls" {
 		var err error
@@ -68,6 +76,9 @@ func NewApp(ctx context.Context, cfg Config, logf func(string, ...any)) (*App, e
 	}
 	return a, nil
 }
+
+// Metrics returns the registry served on /metrics (for tests and tools).
+func (a *App) Metrics() *telemetry.Registry { return a.reg }
 
 // Addr is the bound address.
 func (a *App) Addr() string { return a.ln.Addr().String() }

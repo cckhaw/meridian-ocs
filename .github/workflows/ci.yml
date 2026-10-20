@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install helm and kubeconform (pinned, checksum-verified)
+      - name: Install helm, kubeconform and promtool (pinned, checksum-verified)
         run: |
           set -euo pipefail
           curl -fsSL -o /tmp/helm.tgz https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz
@@ -42,6 +42,9 @@ jobs:
           curl -fsSL -o /tmp/kc.tgz https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
           echo "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73  /tmp/kc.tgz" | sha256sum -c -
           mkdir -p /tmp/bin && tar -xzf /tmp/kc.tgz -C /tmp/bin kubeconform
+          curl -fsSL -o /tmp/prom.tgz https://github.com/prometheus/prometheus/releases/download/v2.54.1/prometheus-2.54.1.linux-amd64.tar.gz
+          echo "31715ef65e8a898d0f97c8c08c03b6b9afe485ac84e1698bcfec90fc6e62924f  /tmp/prom.tgz" | sha256sum -c -
+          tar -xzf /tmp/prom.tgz -C /tmp/bin --strip-components=1 prometheus-2.54.1.linux-amd64/promtool
           echo "/tmp/linux-amd64" >> "$GITHUB_PATH"
           echo "/tmp/bin" >> "$GITHUB_PATH"
       - run: deploy/helm/test.sh

@@ -10,6 +10,7 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/catalog"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer/redistest"
+	"github.com/cckhaw/meridian-ocs/pkg/telemetry"
 )
 
 func envOf(m map[string]string) func(string, string) string {
@@ -26,13 +27,13 @@ func TestTariffModes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if _, _, err := newTariff(ctx, envOf(map[string]string{"OCS_TARIFF": "dynamic"}), rdb); err == nil || !strings.Contains(err.Error(), "OCS_TARIFF") {
+	if _, _, err := newTariff(ctx, envOf(map[string]string{"OCS_TARIFF": "dynamic"}), rdb, telemetry.NewRegistry()); err == nil || !strings.Contains(err.Error(), "OCS_TARIFF") {
 		t.Fatalf("%v", err)
 	}
-	if _, _, err := newTariff(ctx, envOf(map[string]string{"OCS_CASH_BYTES_RATE": "x"}), rdb); err == nil {
+	if _, _, err := newTariff(ctx, envOf(map[string]string{"OCS_CASH_BYTES_RATE": "x"}), rdb, telemetry.NewRegistry()); err == nil {
 		t.Fatal("a bad static rate must be refused")
 	}
-	tf, stop, err := newTariff(ctx, envOf(nil), rdb)
+	tf, stop, err := newTariff(ctx, envOf(nil), rdb, telemetry.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,11 +44,11 @@ func TestTariffModes(t *testing.T) {
 	}
 
 	cat := map[string]string{"OCS_TARIFF": "catalog", "OCS_DEFAULT_PLAN": "std"}
-	if _, _, err := newTariff(ctx, envOf(map[string]string{"OCS_TARIFF": "catalog"}), rdb); err == nil || !strings.Contains(err.Error(), "OCS_DEFAULT_PLAN") {
+	if _, _, err := newTariff(ctx, envOf(map[string]string{"OCS_TARIFF": "catalog"}), rdb, telemetry.NewRegistry()); err == nil || !strings.Contains(err.Error(), "OCS_DEFAULT_PLAN") {
 		t.Fatalf("%v", err)
 	}
 	// Nothing published yet: refuse to start rather than price nothing.
-	if _, _, err := newTariff(ctx, envOf(cat), rdb); err == nil || !strings.Contains(err.Error(), "no catalog version is in effect") {
+	if _, _, err := newTariff(ctx, envOf(cat), rdb, telemetry.NewRegistry()); err == nil || !strings.Contains(err.Error(), "no catalog version is in effect") {
 		t.Fatalf("%v", err)
 	}
 
@@ -57,11 +58,11 @@ func TestTariffModes(t *testing.T) {
 	if _, _, err := pub.Publish(ctx, d, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := newTariff(ctx, envOf(map[string]string{"OCS_TARIFF": "catalog", "OCS_DEFAULT_PLAN": "ghost"}), rdb); err == nil || !strings.Contains(err.Error(), "does not exist") {
+	if _, _, err := newTariff(ctx, envOf(map[string]string{"OCS_TARIFF": "catalog", "OCS_DEFAULT_PLAN": "ghost"}), rdb, telemetry.NewRegistry()); err == nil || !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("%v", err)
 	}
 
-	tf, stop, err = newTariff(ctx, envOf(cat), rdb)
+	tf, stop, err = newTariff(ctx, envOf(cat), rdb, telemetry.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +117,7 @@ func TestCatalogTariffPricesBySubscribersOffering(t *testing.T) {
 			t.Fatalf("%v %+v", err, r)
 		}
 	}
-	tf, stop, err := newTariff(ctx, envOf(map[string]string{"OCS_TARIFF": "catalog", "OCS_DEFAULT_PLAN": "basic"}), rdb)
+	tf, stop, err := newTariff(ctx, envOf(map[string]string{"OCS_TARIFF": "catalog", "OCS_DEFAULT_PLAN": "basic"}), rdb, telemetry.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +132,7 @@ func TestCatalogTariffPricesBySubscribersOffering(t *testing.T) {
 	if cash("alice") != 1 || cash("bob") != 4 || cash("stranger") != 4 {
 		t.Fatalf("alice %d (want 1), bob %d (want 4), stranger %d (want 4)", cash("alice"), cash("bob"), cash("stranger"))
 	}
-	if _, _, err := newTariff(ctx, envOf(map[string]string{"OCS_TARIFF": "catalog", "OCS_DEFAULT_PLAN": "basic", "OCS_PLAN_CACHE_TTL": "0s"}), rdb); err == nil {
+	if _, _, err := newTariff(ctx, envOf(map[string]string{"OCS_TARIFF": "catalog", "OCS_DEFAULT_PLAN": "basic", "OCS_PLAN_CACHE_TTL": "0s"}), rdb, telemetry.NewRegistry()); err == nil {
 		t.Fatal("a zero cache TTL must be refused")
 	}
 }

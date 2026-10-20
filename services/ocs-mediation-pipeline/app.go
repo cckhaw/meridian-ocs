@@ -208,5 +208,9 @@ func (a *App) registerMetrics() {
 		reg.CounterFunc("ocs_mapping_reloads_total", "Mapping files loaded.", nil, func() float64 { return float64(a.maps.Reloads()) })
 		reg.CounterFunc("ocs_mapping_rejected_total", "Mapping file versions rejected as invalid.", nil, func() float64 { return float64(a.maps.Failures()) })
 	}
+	if a.rep != nil {
+		a.rep.RegisterMetrics(reg)
+	}
+	telemetry.RegisterRuntime(reg)
 	service.HandleAdmin("/metrics", reg.Handler())
 }

@@ -23,6 +23,7 @@ import (
 )
 
 type system struct {
+	app  *App
 	base string
 	pki  *tlstest.PKI
 	rdb  string
@@ -66,7 +67,7 @@ func startSystem(t *testing.T) *system {
 		}
 		app.Close()
 	})
-	return &system{base: "https://" + app.Addr(), pki: pki, rdb: rdb.Options().Addr}
+	return &system{app: app, base: "https://" + app.Addr(), pki: pki, rdb: rdb.Options().Addr}
 }
 
 func call(t *testing.T, c *http.Client, method, url string, body any, ctype string) (int, map[string]any, http.Header) {
@@ -360,4 +361,55 @@ func TestServeEditorForManualTesting(t *testing.T) {
 	<-ctx.Done()
 	<-done
 	app.Close()
+}
+
+// /metrics says what happened to each publish and which version this node holds.
+func TestMetricsCountPublishesAndShowVersions(t *testing.T) {
+	s := startSystem(t)
+	editor, viewer := s.client(t, "pricing"), s.client(t, "care")
+	past := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	bad := draft(past, 2)
+	bad.Offerings[0].PlanID = "ghost"
+
+	publish := func(c *http.Client, doc catalog.Document, expect int64) int {
+		code, _, _ := call(t, c, "POST", s.base+"/v1/catalog/versions", map[string]any{"document": doc, "expectedVersion": expect}, "application/json")
+		return code
+	}
+	if c := publish(viewer, draft(past, 2), 1); c != 403 {
+		t.Fatalf("forbidden: %d", c)
+	}
+	if c := publish(editor, bad, 1); c != 422 {
+		t.Fatalf("invalid: %d", c)
+	}
+	if c := publish(editor, draft(past, 2), 1); c != 201 {
+		t.Fatalf("ok: %d", c)
+	}
+	if c := publish(editor, draft(past.Add(time.Minute), 3), 1); c != 409 { // stale editor
+		t.Fatalf("conflict: %d", c)
+	}
+	if c := publish(editor, draft(past, 3), 2); c != 422 { // not later than version 1
+		t.Fatalf("not monotonic: %d", c)
+	}
+	call(t, viewer, "GET", s.base+"/v1/catalog/nope", nil, "") // a 404
+
+	var sb strings.Builder
+	if _, err := s.app.Metrics().WriteTo(&sb); err != nil {
+		t.Fatal(err)
+	}
+	out := sb.String()
+	for _, want := range []string{
+		`ocs_catalog_publishes_total{result="ok"} 1`, `ocs_catalog_publishes_total{result="forbidden"} 1`,
+		`ocs_catalog_publishes_total{result="invalid"} 1`, `ocs_catalog_publishes_total{result="conflict"} 1`,
+		`ocs_catalog_publishes_total{result="not_monotonic"} 1`, `ocs_catalog_publishes_total{result="error"} 0`,
+		"ocs_catalog_latest_version 1\n", "ocs_catalog_version_in_effect 1\n",
+		`ocs_catalog_http_requests_total{code="4xx"}`, `ocs_catalog_http_request_duration_seconds_count`,
+		"ocs_catalog_sync_errors_total 0",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "pricing") || strings.Contains(out, "care") {
+		t.Error("a client name leaked into the metrics")
+	}
 }

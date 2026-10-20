@@ -25,7 +25,7 @@ versioned tariff catalog, provisions subscribers asynchronously, and mediates of
 | Multi-region active-active | design only | doc 01 §6 | |
 | AI Ops integration: metrics, guarded control plane, declarative mappings | done for the gateway and mediation (no agent included) | `pkg/telemetry`, `pkg/control`, `pkg/mapping`, `services/ocs-aiops-layer` | [11](docs/architecture/11-aiops.md) |
 | Standalone rating-engine / data-layer services | scaffold only (the engine runs in-process in the gateway) | `services/ocs-rating-engine`, `services/ocs-data-layer` | |
-| Helm chart (HPA, PDB, spread, NetworkPolicy, pinned security) | done, never installed in a cluster | `deploy/helm/meridian-ocs` | [12](docs/architecture/12-deployment.md) |
+| Helm chart (HPA, PDB, spread, NetworkPolicy, pinned security) with metrics for provisioning and catalog, alert rules and a dashboard | done, never installed in a cluster | `deploy/helm/meridian-ocs` | [12](docs/architecture/12-deployment.md) |
 
 "Done" means implemented, tested (see [Testing](#testing)) and documented, with the gaps for each
 module listed at the end of its doc. It does not mean production-ready.
@@ -164,7 +164,7 @@ Honest list; each module doc has the detail.
 - **The Helm chart has never been installed in a cluster** (no cluster here), has no Redis/Kafka, and no mesh or
   multi-region topology; **the standalone rating/data-layer services** are not built. The AI Ops layer is the
   interface only (metrics, a guarded control plane in the gateway, mapping workbench): there is no agent,
-  no OpenTelemetry/traces, and provisioning and catalog expose no metrics.
+  no OpenTelemetry/traces, and Kafka consumer lag and gRPC calls are not exported as metrics.
 - **BER CDR field mapping** (PGW-CDR) comes from the specification as recalled and must be verified
   against real network files before use; no SMF-CDR mapping.
 - **The web console** covers finding and creating subscribers, top-up, offering change, balance correction and

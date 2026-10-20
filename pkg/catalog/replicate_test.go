@@ -264,3 +264,28 @@ func TestCatalogDrivesTheEngine(t *testing.T) {
 		t.Fatalf("event cost %d, want 100", before-got)
 	}
 }
+
+func TestReplicatorReportsItsOwnHealth(t *testing.T) {
+	rdb := redistest.Start(t)
+	ctx := context.Background()
+	r := &Replicator{Redis: rdb, Store: NewStore(0)}
+	if r.SyncAge() != -1 {
+		t.Fatal("a replicator that never synced must say so")
+	}
+	if _, _, err := r.Publish(ctx, doc(t0), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Sync(ctx); err != nil || r.SyncAge() < 0 || r.SyncAge() > time.Minute {
+		t.Fatalf("%v %v", err, r.SyncAge())
+	}
+	// A failed sync does not refresh the age.
+	rdb.RPush(ctx, "ocs:catalog:versions", `{"effectiveFrom":"2031-01-01T00:00:00Z","plans":[]}`)
+	before := r.SyncAge()
+	time.Sleep(20 * time.Millisecond)
+	if err := r.Sync(ctx); err == nil {
+		t.Fatal("a version that does not compile must fail the sync")
+	}
+	if r.SyncAge() < before+20*time.Millisecond {
+		t.Fatalf("a failed sync refreshed the age: %v -> %v", before, r.SyncAge())
+	}
+}

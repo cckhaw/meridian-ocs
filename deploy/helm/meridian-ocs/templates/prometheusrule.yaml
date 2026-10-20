@@ -1,0 +1,232 @@
+{{- if .Values.alerts.enabled }}
+{{- $a := .Values.alerts }}
+{{- $job := printf "%s-.*-admin" .Release.Name }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app.kubernetes.io/part-of: meridian-ocs
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- with $a.labels }}{{ toYaml . | nindent 4 }}{{- end }}
+spec:
+  groups:
+    - name: ocs-health
+      rules:
+        - alert: OcsTargetDown
+          expr: up{job=~"{{ $job }}", namespace="{{ .Release.Namespace }}"} == 0
+          for: 2m
+          labels: {severity: critical}
+          annotations:
+            summary: "{{ "{{ $labels.job }}" }} cannot be scraped"
+            description: "The admin endpoint of {{ "{{ $labels.pod }}" }} has not answered for 2 minutes: the pod is down or unreachable."
+    {{- if .Values.gateway.enabled }}
+    - name: ocs-charging-path
+      rules:
+        - alert: OcsChargingLatencyHigh
+          expr: histogram_quantile(0.99, sum by (le) (rate(ocs_engine_rate_duration_seconds_bucket[5m]))) > {{ $a.latencyP99Seconds }}
+          for: 10m
+          labels: {severity: warning}
+          annotations:
+            summary: "Charging P99 latency is above {{ mulf $a.latencyP99Seconds 1000 }} ms"
+            description: "Rating P99 over 5 minutes is {{ "{{ $value | humanizeDuration }}" }}. The target is {{ mulf $a.latencyP99Seconds 1000 }} ms."
+        - alert: OcsChargingLatencyCritical
+          expr: histogram_quantile(0.99, sum by (le) (rate(ocs_engine_rate_duration_seconds_bucket[5m]))) > {{ $a.latencyP99CriticalSeconds }}
+          for: 5m
+          labels: {severity: critical}
+          annotations:
+            summary: "Charging P99 latency is above {{ mulf $a.latencyP99CriticalSeconds 1000 }} ms"
+            description: "Peers may start timing out. Check the data tier (Redis), the breaker and the load."
+        - alert: OcsServingDegraded
+          expr: sum(rate(ocs_engine_degraded_total[5m])) > 0
+          for: 2m
+          labels: {severity: critical}
+          annotations:
+            summary: "Requests are being answered without the data tier"
+            description: "The fail policy is answering instead of the balance store (prepaid fail-closed, postpaid fail-open with caps). Redis is unreachable or slow."
+        - alert: OcsDataTierBreakerOpen
+          expr: max(ocs_datatier_breaker_open) == 1
+          for: 1m
+          labels: {severity: critical}
+          annotations:
+            summary: "The data-tier circuit breaker is open"
+            description: "Charging requests are being answered by the fail policy."
+        - alert: OcsDataTierBreakerForced
+          expr: max(ocs_datatier_breaker_forced) == 1
+          for: 30m
+          labels: {severity: warning}
+          annotations:
+            summary: "An operator has held the breaker open for 30 minutes"
+            description: "Forced via the control plane; confirm it is intended and release it."
+        - alert: OcsCommitsNotReplicated
+          expr: sum(rate(ocs_durability_short_total[5m])) + sum(rate(ocs_engine_unreplicated_total[5m])) > 0
+          for: 1m
+          labels: {severity: critical}
+          annotations:
+            summary: "Commits are being acknowledged by fewer replicas than required"
+            description: "The no-double-spend durability promise is weakened: a primary failure now could lose charges. A replica is lagging, partitioned or down."
+        - alert: OcsReplicaWaitSuspended
+          expr: sum(rate(ocs_durability_suspended_total[5m])) > 0
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "Replica acknowledgement is suspended"
+            description: "A replica stopped answering, so commits skip the wait (to avoid adding the timeout to every commit)."
+        - alert: OcsLoadShedding
+          expr: sum(rate(ocs_engine_overloaded_total[5m])) + sum(rate(ocs_admission_rejected_total[5m])) > 0
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "Requests are being shed"
+            description: "Admission control or a full worker queue is refusing requests: capacity is short or a limit was lowered."
+        - alert: OcsAuditDropped
+          expr: sum(rate(ocs_engine_audit_dropped_total[5m])) > 0
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "Audit events are being dropped"
+            description: "The audit channel is full; some charging steps have no audit record."
+        - alert: OcsIdentityLookupFailing
+          expr: sum(rate(ocs_identity_errors_total[5m])) > 0
+          for: 5m
+          labels: {severity: critical}
+          annotations:
+            summary: "Subscriber identity lookups are failing"
+            description: "The identity directory is unreachable; requests for unknown identities cannot be served."
+        - alert: OcsIdentityConflicts
+          expr: sum(rate(ocs_identity_conflicts_total[15m])) > 0
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "Requests carry identifiers that belong to different subscribers"
+            description: "These are refused. Look for a provisioning error or a SIM swap that was only half applied."
+        - alert: OcsUsageNotPriced
+          expr: sum(rate(ocs_engine_unpriced_total[10m])) > 0
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "Usage is arriving that the catalog cannot price"
+            description: "Units are sent with no rates: a subscriber's plan is missing or a barring filter is matching more than intended."
+    {{- end }}
+    {{- if or .Values.gateway.enabled .Values.provisioning.enabled .Values.catalog.enabled .Values.mediation.enabled }}
+    - name: ocs-catalog
+      rules:
+        - alert: OcsCatalogSyncStale
+          expr: max by (pod) (ocs_catalog_sync_age_seconds) > {{ $a.catalogStaleSeconds }} or max by (pod) (ocs_catalog_sync_age_seconds) < 0
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "{{ "{{ $labels.pod }}" }} has not read the shared catalog for a while"
+            description: "It may be pricing from a catalog that is no longer the published one. Redis may be unreachable from this pod."
+        - alert: OcsCatalogSyncErrors
+          expr: sum by (pod) (rate(ocs_catalog_sync_errors_total[10m])) > 0
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "{{ "{{ $labels.pod }}" }} keeps failing to replicate the catalog"
+            description: "A stored version may be unreadable, or Redis pub/sub is failing. The node keeps serving its last good catalog."
+        - alert: OcsNoCatalogInEffect
+          expr: min(ocs_catalog_version_in_effect) == 0
+          for: 5m
+          labels: {severity: critical}
+          annotations:
+            summary: "A node has no catalog version in effect"
+            description: "Nothing can be priced from the catalog on that node."
+        - alert: OcsCatalogVersionSkew
+          expr: max(ocs_catalog_version_in_effect) != min(ocs_catalog_version_in_effect)
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "Nodes disagree about which catalog version is in effect"
+            description: "A publish has not reached every node, or a node is stuck. Different nodes are pricing differently."
+    {{- end }}
+    {{- if .Values.catalog.enabled }}
+    - name: ocs-catalog-service
+      rules:
+        - alert: OcsCatalogPublishFailing
+          expr: sum(increase(ocs_catalog_publishes_total{result="error"}[15m])) > 0
+          for: 0m
+          labels: {severity: warning}
+          annotations:
+            summary: "A catalog publish failed for a server-side reason"
+            description: "Redis may be unavailable; the editor was told to try again."
+        - alert: OcsCatalogPublishDenied
+          expr: sum(increase(ocs_catalog_publishes_total{result="forbidden"}[15m])) > 0
+          for: 0m
+          labels: {severity: info}
+          annotations:
+            summary: "A client that may not publish tried to"
+            description: "A certificate that is not on the publisher list called the publish endpoint."
+    {{- end }}
+    {{- if .Values.provisioning.enabled }}
+    - name: ocs-provisioning
+      rules:
+        - alert: OcsProvisioningStalled
+          expr: sum(rate(ocs_prov_submissions_total{result="accepted"}[10m])) > 0 and sum(rate(ocs_prov_commands_total[10m])) == 0
+          for: 10m
+          labels: {severity: critical}
+          annotations:
+            summary: "Provisioning commands are accepted but none finish"
+            description: "The workers are not consuming: Kafka, Redis or the worker pods are down."
+        - alert: OcsProvisioningLagHigh
+          expr: histogram_quantile(0.99, sum by (le) (rate(ocs_prov_command_lag_seconds_bucket[10m]))) > {{ $a.provisioningLagP99Seconds }}
+          for: 10m
+          labels: {severity: warning}
+          annotations:
+            summary: "Provisioning commands take long to take effect"
+            description: "P99 from acceptance to recorded outcome is above {{ $a.provisioningLagP99Seconds }} s."
+        - alert: OcsProvisioningDeadLetters
+          expr: sum(increase(ocs_prov_dead_lettered_total[15m])) > 0
+          for: 0m
+          labels: {severity: warning}
+          annotations:
+            summary: "Provisioning messages were dead-lettered"
+            description: "A message could not be decoded or had the wrong key. Inspect the dead-letter topic."
+        - alert: OcsProvisioningWorkerRetrying
+          expr: sum(rate(ocs_prov_worker_retries_total[5m])) > 0
+          for: 10m
+          labels: {severity: warning}
+          annotations:
+            summary: "Provisioning workers keep retrying infrastructure calls"
+            description: "Redis or Kafka is failing; that partition is held up rather than skipped."
+        - alert: OcsProvisioningAPIErrors
+          expr: sum(rate(ocs_prov_http_requests_total{code="5xx"}[5m])) / sum(rate(ocs_prov_http_requests_total[5m])) > 0.01
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "More than 1% of provisioning API requests fail with a server error"
+            description: "Check Redis and Kafka; refusals for a retryable reason are 503."
+        - alert: OcsProvisioningUnavailable
+          expr: sum(rate(ocs_prov_submissions_total{result="unavailable"}[5m])) > 0
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "Commands cannot be queued"
+            description: "The status store, Kafka or the catalog is unavailable; callers are told to retry."
+    {{- end }}
+    {{- if .Values.mediation.enabled }}
+    - name: ocs-mediation
+      rules:
+        - alert: OcsMediationRejects
+          expr: sum(rate(ocs_mediation_records_total{outcome=~"suspense|rejected"}[30m])) / sum(rate(ocs_mediation_records_total{outcome="received"}[30m])) > {{ $a.rejectRatio }}
+          for: 30m
+          labels: {severity: warning}
+          annotations:
+            summary: "Mediation is sending a large share of records to suspense or rejects"
+            description: "More than {{ mulf $a.rejectRatio 100 }}% of records. Look at the mapping, unknown subscribers or a malformed feed."
+        - alert: OcsMediationLedgerUnreplicated
+          expr: sum(rate(ocs_mediation_ledger_unreplicated_total[10m])) > 0
+          for: 5m
+          labels: {severity: critical}
+          annotations:
+            summary: "Mediation ledger commits are not confirmed by a replica"
+            description: "A primary failure could lose the position that makes output exactly-once."
+        - alert: OcsMappingRejected
+          expr: sum(increase(ocs_mapping_rejected_total[1h])) > 0
+          for: 0m
+          labels: {severity: warning}
+          annotations:
+            summary: "A mapping change was rejected"
+            description: "The previous mapping is still in use; fix the ConfigMap."
+    {{- end }}
+{{- end }}

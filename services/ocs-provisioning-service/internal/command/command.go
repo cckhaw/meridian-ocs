@@ -32,6 +32,9 @@ const (
 	AttachOffering   Type = "attach_offering"
 )
 
+// Types lists every command type (for per-type metrics).
+var Types = []Type{CreateSubscriber, TopUp, AdjustBalance, AddBundle, ReloadBucket, RemoveBucket, ChangeLifecycle, AttachOffering}
+
 // Privileged commands move or destroy value in ways routine CRM flows do not
 // (corrections, removals, termination), so they need a privileged caller.
 func (t Type) Privileged() bool {

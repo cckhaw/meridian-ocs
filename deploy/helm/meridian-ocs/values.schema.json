@@ -226,6 +226,56 @@
       },
       "additionalProperties": false
     },
+    "alerts": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "labels": {
+          "type": "object"
+        },
+        "latencyP99Seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "latencyP99CriticalSeconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "provisioningLagP99Seconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "catalogStaleSeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rejectRatio": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "dashboard": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "labels": {
+          "type": "object",
+          "properties": {
+            "grafana_dashboard": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "gateway": {
       "type": "object",
       "properties": {
