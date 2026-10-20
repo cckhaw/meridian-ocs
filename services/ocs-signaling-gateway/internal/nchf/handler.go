@@ -572,6 +572,10 @@ func (h *Handler) fill(ctx context.Context, op operation, refSub, ref string, in
 	case opRelease:
 		out.Type = canonical.TypeTerminate
 	}
+	// 3GPP TS 32.290 5.5.1.2: an update or termination the CHF cannot associate with any charging session "shall be
+	// handled as a valid request with the associated resource creation and quota usage handling": its usage is
+	// charged, not refused. (A session that was terminated stays closed: that is a session, not an unknown one.)
+	out.AcceptUnknownSession = op == opUpdate || op == opRelease
 
 	if len(in.MultipleUnitUsage) > h.cfg.MaxUnits {
 		return errTooManyUnits
