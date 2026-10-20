@@ -165,6 +165,9 @@ func (a *DataApplier) create(ctx context.Context, c *command.Command, op datalay
 	}
 
 	op.Op, op.Payment = datalayer.ProvCreate, c.Payment
+	for _, id := range ids {
+		op.Identifiers = append(op.Identifiers, id.Type.String()+":"+id.Value)
+	}
 	out, err := a.provision(ctx, op)
 	if err != nil || out.State != status.Applied {
 		return out, err

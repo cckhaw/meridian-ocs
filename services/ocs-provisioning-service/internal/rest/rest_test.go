@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/catalog"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer/redistest"
+	"github.com/cckhaw/meridian-ocs/pkg/identity"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/auth"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/command"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/service"
@@ -61,6 +63,7 @@ type rig struct {
 	prod *capturingProducer
 	st   *status.Store
 	data *datalayer.Client
+	dir  *identity.RedisDirectory
 }
 
 var lim = command.Limits{Currency: "EUR", MaxTopUp: 100_000, MaxAdjust: 5_000}
@@ -71,8 +74,9 @@ func newRig(t *testing.T, az *auth.Authorizer) *rig {
 	st := status.New(rdb, "", 0)
 	prod := &capturingProducer{}
 	data := datalayer.New(rdb)
-	svc := service.New(service.Config{Limits: lim, Catalog: testCatalog(t)}, st, prod, data)
-	return &rig{h: New(svc, az), prod: prod, st: st, data: data}
+	dir := identity.NewRedisDirectory(rdb, "")
+	svc := service.New(service.Config{Limits: lim, Catalog: testCatalog(t), Directory: dir}, st, prod, data)
+	return &rig{h: New(svc, az), prod: prod, st: st, data: data, dir: dir}
 }
 
 func asClient(r *http.Request, cn string) *http.Request {
@@ -405,5 +409,132 @@ func TestOfferingErrorsAndRead(t *testing.T) {
 	}
 	if m := obj(t, g.do("GET", "/v1/subscribers/acct-2", "", "", "")); m["offering"] != "gold-offer" {
 		t.Fatalf("%v", m)
+	}
+}
+
+func TestFindSubscriberByIdentifier(t *testing.T) {
+	g := newRig(t, auth.Off())
+	ctx := context.Background()
+	// Bind through the same directory the service reads.
+	dir := g.dir
+	create := datalayer.ProvisionOp{Op: datalayer.ProvCreate, Key: "acct-9", Token: "c9", Payment: "prepaid", Now: time.Now(), Fingerprint: "c9",
+		Identifiers: []string{"msisdn:491701234567", "imsi:262011234567890"}}
+	if res, err := g.data.Provision(ctx, create); err != nil || res.Code != datalayer.ProvApplied {
+		t.Fatalf("%v %+v", err, res)
+	}
+	if err := dir.Bind(ctx, identity.Identity{Type: identity.MSISDN, Value: "491701234567"}, "acct-9"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dir.Bind(ctx, identity.Identity{Type: identity.IMSI, Value: "262011234567890"}, "acct-9"); err != nil {
+		t.Fatal(err)
+	}
+	// A bound identity whose subscriber has no profile.
+	dir.Bind(ctx, identity.Identity{Type: identity.MSISDN, Value: "491700000000"}, "no-profile")
+
+	for _, q := range []string{"msisdn=491701234567", "msisdn=%2B491701234567", "imsi=262011234567890"} {
+		w := g.do("GET", "/v1/subscribers?"+q, "", "", "")
+		m := obj(t, w)
+		ids, _ := m["identifiers"].([]any)
+		if w.Code != 200 || m["subscriberKey"] != "acct-9" || len(ids) != 2 {
+			t.Errorf("%s: %d %v", q, w.Code, m)
+		}
+	}
+	for name, c := range map[string]struct {
+		q    string
+		code int
+	}{
+		"unknown number":    {"msisdn=491709999999", 404},
+		"bound, no profile": {"msisdn=491700000000", 404},
+		"malformed msisdn":  {"msisdn=12ab", 400},
+		"none given":        {"", 400},
+		"two given":         {"msisdn=491701234567&imsi=262011234567890", 400},
+		"same given twice":  {"msisdn=491701234567&msisdn=491701234568", 400},
+		"unknown parameter": {"gpsi=49170", 400},
+	} {
+		if w := g.do("GET", "/v1/subscribers?"+c.q, "", "", ""); w.Code != c.code {
+			t.Errorf("%s: %d %s", name, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestLookupNeedsReadPermissionAndAConfiguredDirectory(t *testing.T) {
+	g := newRig(t, auth.New([]string{"crm"}, nil))
+	if w := g.do("GET", "/v1/subscribers?msisdn=491701234567", "", "", "stranger"); w.Code != http.StatusForbidden {
+		t.Fatalf("a client outside the allow-list: %d", w.Code)
+	}
+	if w := g.do("GET", "/v1/subscribers?msisdn=491701234567", "", "", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("no certificate: %d", w.Code)
+	}
+	// No directory configured.
+	rdb := redistest.Start(t)
+	h := New(service.New(service.Config{Limits: lim}, status.New(rdb, "", 0), &capturingProducer{}, datalayer.New(rdb)), auth.Off())
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/v1/subscribers?msisdn=491701234567", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("%d", w.Code)
+	}
+}
+
+func TestMetaDescribesTheDeployment(t *testing.T) {
+	g := newRig(t, auth.New([]string{"crm"}, nil))
+	w := g.do("GET", "/v1/meta", "", "", "crm")
+	m := obj(t, w)
+	offs, _ := m["offerings"].([]any)
+	if w.Code != 200 || m["principal"] != "crm" || m["currency"] != "EUR" || m["maxTopUp"] != float64(100000) || m["catalogVersion"] != float64(1) || len(offs) != 1 {
+		t.Fatalf("%d %v", w.Code, m)
+	}
+	if w := g.do("GET", "/v1/meta", "", "", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("meta must not be public: %d", w.Code)
+	}
+}
+
+func TestStateChangesFromAnotherOriginAreRefused(t *testing.T) {
+	g := newRig(t, auth.Off())
+	body := `{"subscriberKey":"acct-1","paymentType":"prepaid","identifiers":[{"type":"msisdn","value":"491701234567"}]}`
+	do := func(origin string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "/v1/subscribers", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Idempotency-Key", fmt.Sprintf("k-%d", len(origin)))
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		w := httptest.NewRecorder()
+		g.h.ServeHTTP(w, r)
+		return w
+	}
+	if w := do("https://evil.example"); w.Code != http.StatusForbidden || errCode(t, w) != "cross_origin" {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if g.prod.count() != 0 {
+		t.Fatal("a cross-origin request was queued")
+	}
+	if w := do("http://example.com"); w.Code != http.StatusAccepted { // httptest requests have Host example.com
+		t.Fatalf("same origin refused: %d", w.Code)
+	}
+	if w := do(""); w.Code != http.StatusAccepted { // non-browser clients send no Origin
+		t.Fatalf("no origin refused: %d", w.Code)
+	}
+}
+
+func TestConsoleIsServedWithStrictHeaders(t *testing.T) {
+	g := newRig(t, auth.New([]string{"crm"}, nil))
+	for _, path := range []string{"/ui/", "/ui/app.js", "/ui/style.css"} {
+		w := g.do("GET", path, "", "", "crm")
+		if w.Code != 200 || len(w.Body.Bytes()) == 0 {
+			t.Fatalf("%s: %d", path, w.Code)
+		}
+		csp := w.Header().Get("Content-Security-Policy")
+		if !strings.Contains(csp, "default-src 'none'") || !strings.Contains(csp, "script-src 'self'") || strings.Contains(csp, "unsafe-") ||
+			w.Header().Get("X-Frame-Options") != "DENY" || w.Header().Get("X-Content-Type-Options") != "nosniff" {
+			t.Fatalf("%s: weak headers %v", path, w.Header())
+		}
+	}
+	if w := g.do("GET", "/", "", "", "crm"); w.Code != http.StatusFound || w.Header().Get("Location") != "/ui/" {
+		t.Fatalf("%d %q", w.Code, w.Header().Get("Location"))
+	}
+	// The console page contains no inline script or handler (the policy would block it).
+	page := g.do("GET", "/ui/", "", "", "crm").Body.String()
+	if strings.Contains(page, "onclick=") || strings.Contains(strings.ReplaceAll(page, `<script src="app.js"></script>`, ""), "<script") {
+		t.Fatal("inline script in the console page")
 	}
 }

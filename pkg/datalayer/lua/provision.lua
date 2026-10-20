@@ -3,7 +3,8 @@
 --
 -- KEYS[1] = subscriber prefix (as for charge.lua)
 -- ARGV: op, token, fingerprint, nowMs, idemTtlMs, then per op (from ARGV[6]):
---   C  payment, status
+--   C  payment, status, ids   (ids: comma separated "type:value" list, may be empty; kept on the
+--      profile so a subscriber can be displayed with its identifiers)
 --   L  target, untilMs                      (untilMs > 0 only used for grace)
 --   T  bucketId, amount, order, allowNeg    (credit a cash bucket; created if missing)
 --   A  bucketId, delta, order, allowNeg     (credit or debit any bucket)
@@ -55,10 +56,11 @@ end
 local function bump() return redis.call('HINCRBY', pk, 'ver', 1) end
 
 if op == 'C' then
-  local payment, status = ARGV[6], ARGV[7]
+  local payment, status, ids = ARGV[6], ARGV[7], ARGV[8]
   if redis.call('EXISTS', pk) == 1 then return finish(3) end
   redis.call('HSET', pk, 'payment', payment, 'status', status,
              'createdAt', fmt(now), 'statusAt', fmt(now), 'ver', '1')
+  if ids and ids ~= '' then redis.call('HSET', pk, 'ids', ids) end
   ledger(P, 'type', 'create', 'payment', payment, 'token', token, 'at', fmt(now))
   return finish(0, { '1' })
 end

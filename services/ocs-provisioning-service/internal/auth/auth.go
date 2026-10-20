@@ -63,7 +63,11 @@ func (a *Authorizer) Principal(commonName string) string {
 	return commonName
 }
 
-// Read checks that the caller may read.
+// Read checks that the caller may read subscriber data (profiles, balances,
+// identifiers, command outcomes). When an allow-list of standard clients is
+// configured, a verified client that is not on it, and not privileged, may not
+// read either: subscriber data is personal data and "has a certificate from our
+// CA" is not a reason to see it.
 func (a *Authorizer) Read(principal string) error {
 	if a.off {
 		return nil
@@ -71,7 +75,16 @@ func (a *Authorizer) Read(principal string) error {
 	if principal == "" {
 		return ErrUnauthenticated
 	}
-	return nil
+	if len(a.standard) == 0 {
+		return nil
+	}
+	if _, ok := a.standard[principal]; ok {
+		return nil
+	}
+	if _, ok := a.privileged[principal]; ok {
+		return nil
+	}
+	return ErrForbidden
 }
 
 // Allow checks that the caller may submit a command of type t.

@@ -7,6 +7,8 @@ package grpcapi
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -201,8 +203,59 @@ func (s *Server) GetSubscriber(ctx context.Context, r *ocsv1.GetSubscriberReques
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	return subscriberMessage(v), nil
+}
+
+// FindSubscriber looks a subscriber up by an identifier. Like the REST lookup it
+// is logged with the caller and the identifier type, the identifier masked.
+func (s *Server) FindSubscriber(ctx context.Context, r *ocsv1.FindSubscriberRequest) (*ocsv1.Subscriber, error) {
+	principal := s.principal(ctx)
+	if err := s.az.Read(principal); err != nil {
+		return nil, toStatus(err)
+	}
+	kind := ""
+	switch r.Type {
+	case ocsv1.IdentifierType_IDENTIFIER_TYPE_MSISDN:
+		kind = "msisdn"
+	case ocsv1.IdentifierType_IDENTIFIER_TYPE_IMSI:
+		kind = "imsi"
+	case ocsv1.IdentifierType_IDENTIFIER_TYPE_NAI:
+		kind = "nai"
+	}
+	v, err := s.svc.FindSubscriber(ctx, kind, r.Value)
+	slog.Info("subscriber lookup", "principal", principal, "by", kind, "identifier", mask(r.Value), "found", err == nil)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return subscriberMessage(v), nil
+}
+
+func mask(s string) string {
+	if len(s) <= 4 {
+		return "****"
+	}
+	return strings.Repeat("*", len(s)-4) + s[len(s)-4:]
+}
+
+func subscriberMessage(v service.SubscriberView) *ocsv1.Subscriber {
 	out := &ocsv1.Subscriber{SubscriberKey: v.Key, Version: v.Profile.Version, OfferingId: v.Profile.Offering,
 		CreatedAt: tsOrNil(v.Profile.CreatedAt), StatusAt: tsOrNil(v.Profile.StatusAt), GraceUntil: tsOrNil(v.Profile.GraceUntil)}
+	for _, id := range v.Profile.Identifiers {
+		typ, val, ok := strings.Cut(id, ":")
+		if !ok {
+			continue
+		}
+		pb := &ocsv1.Identifier{Value: val}
+		switch typ {
+		case "msisdn":
+			pb.Type = ocsv1.IdentifierType_IDENTIFIER_TYPE_MSISDN
+		case "imsi":
+			pb.Type = ocsv1.IdentifierType_IDENTIFIER_TYPE_IMSI
+		case "nai":
+			pb.Type = ocsv1.IdentifierType_IDENTIFIER_TYPE_NAI
+		}
+		out.Identifiers = append(out.Identifiers, pb)
+	}
 	switch v.Profile.Payment {
 	case "prepaid":
 		out.PaymentType = ocsv1.PaymentType_PAYMENT_TYPE_PREPAID
@@ -234,7 +287,7 @@ func (s *Server) GetSubscriber(ctx context.Context, r *ocsv1.GetSubscriberReques
 		}
 		out.Buckets = append(out.Buckets, pb)
 	}
-	return out, nil
+	return out
 }
 
 func tsOrNil(t time.Time) *timestamppb.Timestamp {

@@ -56,7 +56,10 @@ concurrently.
 | change lifecycle | `POST /v1/subscribers/{key}/lifecycle` | **yes** |
 | attach offering | `POST /v1/subscribers/{key}/offering` | no |
 | command status | `GET /v1/commands/{id}` | no |
-| read subscriber | `GET /v1/subscribers/{key}` | no |
+| read subscriber by key | `GET /v1/subscribers/{key}` | no |
+| **find subscriber by MSISDN / IMSI / NAI** | `GET /v1/subscribers?msisdn=…` (or `imsi=`, `nai=`; exactly one) | no |
+| form metadata (principal, currency, limits, offerings) | `GET /v1/meta` | no |
+| web console | `GET /ui/` | no |
 
 The same operations exist on the gRPC `ProvisioningService`
 (`api/proto/ocs/v1/provisioning.proto`, generated code in `pkg/gen`).
@@ -72,6 +75,70 @@ Creating a subscriber binds its identifiers (MSISDN, IMSI, NAI) in the
 directory (doc 06). A conflict (an identifier already owned by another
 subscriber) fails the command with `identifier_conflict` and releases only the
 bindings this command had just made, so a retry is clean.
+
+### Finding a subscriber by identifier
+
+`GET /v1/subscribers?msisdn=491701234567` (or `imsi=`, `nai=`; gRPC `FindSubscriber`)
+resolves the identifier through the identity directory (doc 06) and returns the
+same view as a read by key. An unknown identifier, or one bound to a subscriber
+with no profile, is `404`; a malformed one or not exactly one parameter is `400`.
+Values are normalised as everywhere else (an MSISDN is digits, a leading `+` is
+accepted); the console strips spaces and punctuation before sending.
+
+The view now lists the subscriber's **identifiers**. They are recorded on the
+profile when the subscriber is created (the directory still decides what
+resolves; the copy is for display). Subscribers created before this change show
+none.
+
+Because a lookup by phone number reads personal data, two rules apply:
+- **Reading honours the allow-list.** If `OCS_PROV_CLIENTS` is set, a verified
+  client that is neither listed nor privileged can no longer read either (before,
+  any client with a certificate from the CA could). With no list, any verified
+  client may read, as before.
+- **Every lookup is logged** with the caller's identity, the identifier type,
+  whether it matched, and the identifier **masked** to its last four characters.
+  Reads by key are not logged yet.
+
+### Web console
+
+`/ui/` serves a single-page console (plain HTML, CSS and JavaScript embedded in
+the binary; no build step, no third-party code) with two sections:
+
+- **Find subscriber**: search by MSISDN, IMSI or NAI; shows status, payment
+  type, offering, identifiers and buckets with readable units.
+- **Create subscriber**: MSISDN / IMSI / NAI, optional subscriber key (generated
+  if empty), payment type, optional product offering (picked from the catalog
+  version in effect) and an optional initial top-up. Creation is several
+  asynchronous commands, so the page runs them in order (create, attach
+  offering, top up), follows each to its outcome, shows the server's reason when
+  one fails, and offers **Retry**. Each submission has one idempotency key base,
+  so a retry never applies a step twice.
+
+How it is secured: it is served by the same listener as the API, so it sits
+behind the same mTLS client-certificate authentication and the same
+authorisation: it can do exactly what its user's certificate may do through the
+API. There is no login page and no session: the browser presents the client
+certificate. Specific defences:
+- A strict Content-Security-Policy (`default-src 'none'; script-src 'self'; ...`,
+  no `unsafe-*`), `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy:
+  no-referrer`. The page has no inline script.
+- All data from the API is written with `textContent`, never as HTML (verified
+  in a real browser with a key containing markup, and by a deliberate
+  `innerHTML` regression that the check catches).
+- **Cross-site request forgery.** Browsers attach client certificates to any
+  request, so state-changing requests carrying an `Origin` header for another
+  host are refused (`403 cross_origin`). The JSON content type and the custom
+  `Idempotency-Key` header already force a CORS pre-flight that is never granted.
+
+The console is checked in a real Chromium with Playwright:
+`internal/ui/browser-check/console.mjs` (run by hand, not in CI, against
+`OCS_UI_DEV_ADDR=127.0.0.1:8443 go test -run ServeConsoleForManualTesting
+-timeout 1h ./services/ocs-provisioning-service`, which serves the console on an
+in-memory stack with authentication off). It checks validation, a full create
+with offering and top-up, find by MSISDN (typed with `+` and a space) and by
+IMSI, not-found, a duplicate MSISDN refused with the reason, markup shown as
+text, no console errors or CSP violations, and no horizontal scrolling at phone
+width. Light, dark and phone layouts were looked at.
 
 ### Offerings (price plan and allowances)
 
@@ -177,3 +244,8 @@ Durability env (replica `WAIT`) is shared with the gateway through
   the hot store is the source of truth.
 - Events are at least once, not exactly once.
 - Offering changes reach gateways after their profile cache expires (no push invalidation), and a subscriber cannot be moved to another offering without also creating that offering's allowances (no 'switch plan only' command).
+- The console has no login of its own (it relies on browser client certificates; a production deployment
+  would normally put SSO/OIDC in front), and covers only find and create: no top-up, lifecycle change or
+  offering change screens, no list or search by name, and no transaction or usage history.
+- Lookup by identifier shows balances and identifiers but not sessions, usage or ledger entries.
+- Reads by key are not logged (lookups by identifier are).

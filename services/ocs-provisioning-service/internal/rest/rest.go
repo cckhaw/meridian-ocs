@@ -9,7 +9,10 @@
 //	POST   /v1/subscribers/{key}/lifecycle              change lifecycle state (privileged)
 //	POST   /v1/subscribers/{key}/offering               put the subscriber on a catalog offering
 //	GET    /v1/commands/{id}                            outcome of a command
-//	GET    /v1/subscribers/{key}                        profile and buckets
+//	GET    /v1/subscribers/{key}                        profile, identifiers and buckets
+//	GET    /v1/subscribers?msisdn=|imsi=|nai=           the same, found by an identifier
+//	GET    /v1/meta                                     currency, limits and the offerings that can be attached
+//	GET    /ui/                                         the web console (create and look up subscribers)
 //
 // Every write needs an Idempotency-Key header and answers 202 Accepted: the
 // command is queued and applied asynchronously, in order per subscriber; read
@@ -22,7 +25,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -31,6 +36,7 @@ import (
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/command"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/service"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/status"
+	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/ui"
 )
 
 // MaxBody is the largest accepted request body.
@@ -56,11 +62,36 @@ func New(svc *service.Service, az *auth.Authorizer) *Handler {
 	h.mux.HandleFunc("POST /v1/subscribers/{key}/offering", handle(h, command.AttachOffering, true, fillOffering))
 	h.mux.HandleFunc("GET /v1/commands/{id}", h.getCommand)
 	h.mux.HandleFunc("GET /v1/subscribers/{key}", h.getSubscriber)
+	h.mux.HandleFunc("GET /v1/subscribers", h.findSubscriber)
+	h.mux.HandleFunc("GET /v1/meta", h.getMeta)
+	h.mux.Handle("GET /ui/", ui.Handler())
+	h.mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/ui/", http.StatusFound) })
 	return h
 }
 
-// ServeHTTP implements http.Handler.
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.ServeHTTP(w, r) }
+// ServeHTTP implements http.Handler. Requests that change state are refused
+// when a browser says they come from another origin: with client-certificate
+// authentication the browser attaches the certificate to any request, so
+// without this check a page on another site could drive the API for a user who
+// has a certificate installed. (The JSON content type and the custom
+// Idempotency-Key header already force a CORS pre-flight that is never granted;
+// this is the second layer.)
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+	default:
+		if o := r.Header.Get("Origin"); o != "" {
+			if u, err := url.Parse(o); err != nil || u.Host != r.Host {
+				fail(w, errCrossOrigin)
+				return
+			}
+		}
+	}
+	h.mux.ServeHTTP(w, r)
+}
+
+var errCrossOrigin = errors.New("rest: cross-origin request refused")
 
 // ---- request bodies --------------------------------------------------------
 
@@ -292,6 +323,52 @@ func (h *Handler) getSubscriber(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, subscriberJSON(v))
+}
+
+// findSubscriber looks a subscriber up by exactly one of ?msisdn= ?imsi= ?nai=.
+// Reading personal data this way is logged with the caller and the identifier
+// type; the identifier itself is masked.
+func (h *Handler) findSubscriber(w http.ResponseWriter, r *http.Request) {
+	principal := h.principal(r)
+	if err := h.az.Read(principal); err != nil {
+		fail(w, err)
+		return
+	}
+	q := r.URL.Query()
+	var kind, value string
+	for _, k := range []string{"msisdn", "imsi", "nai"} {
+		if vs, ok := q[k]; ok {
+			if kind != "" || len(vs) != 1 {
+				fail(w, &command.ValidationError{Msg: "give exactly one of msisdn, imsi or nai"})
+				return
+			}
+			kind, value = k, vs[0]
+		}
+	}
+	if kind == "" {
+		fail(w, &command.ValidationError{Msg: "give one of msisdn, imsi or nai"})
+		return
+	}
+	v, err := h.svc.FindSubscriber(r.Context(), kind, value)
+	slog.Info("subscriber lookup", "principal", principal, "by", kind, "identifier", mask(value), "found", err == nil)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, subscriberJSON(v))
+}
+
+// mask keeps the last four characters so a log line can be matched to a
+// complaint without storing the number.
+func mask(s string) string {
+	if len(s) <= 4 {
+		return "****"
+	}
+	return strings.Repeat("*", len(s)-4) + s[len(s)-4:]
+}
+
+func subscriberJSON(v service.SubscriberView) map[string]any {
 	ts := func(t time.Time) any {
 		if t.IsZero() {
 			return nil
@@ -303,9 +380,31 @@ func (h *Handler) getSubscriber(w http.ResponseWriter, r *http.Request) {
 		buckets = append(buckets, map[string]any{"id": b.ID, "class": b.Class, "kind": b.Kind, "balance": b.Balance,
 			"expiresAt": ts(b.ExpiresAt), "priority": b.Order})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"subscriberKey": v.Key, "paymentType": v.Profile.Payment, "status": v.Profile.Status,
+	ids := make([]map[string]string, 0, len(v.Profile.Identifiers))
+	for _, s := range v.Profile.Identifiers {
+		if t, val, ok := strings.Cut(s, ":"); ok {
+			ids = append(ids, map[string]string{"type": t, "value": val})
+		}
+	}
+	return map[string]any{"subscriberKey": v.Key, "paymentType": v.Profile.Payment, "status": v.Profile.Status,
 		"version": v.Profile.Version, "createdAt": ts(v.Profile.CreatedAt), "statusAt": ts(v.Profile.StatusAt),
-		"graceUntil": ts(v.Profile.GraceUntil), "offering": v.Profile.Offering, "buckets": buckets})
+		"graceUntil": ts(v.Profile.GraceUntil), "offering": v.Profile.Offering, "identifiers": ids, "buckets": buckets}
+}
+
+// getMeta tells a client (the UI) what it needs to build forms.
+func (h *Handler) getMeta(w http.ResponseWriter, r *http.Request) {
+	principal := h.principal(r)
+	if err := h.az.Read(principal); err != nil {
+		fail(w, err)
+		return
+	}
+	m := h.svc.Meta()
+	offerings := make([]map[string]any, 0, len(m.Offerings))
+	for _, o := range m.Offerings {
+		offerings = append(offerings, map[string]any{"id": o.ID, "name": o.Name, "planId": o.PlanID, "allowances": len(o.Allowances)})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"principal": principal, "currency": m.Currency, "maxTopUp": m.MaxTopUp,
+		"catalogVersion": m.CatalogVersion, "offerings": offerings})
 }
 
 // ---- responses -------------------------------------------------------------
@@ -323,6 +422,8 @@ func fail(w http.ResponseWriter, err error) {
 	switch {
 	case command.IsValidation(err):
 		status, code, msg = http.StatusBadRequest, "invalid_request", err.Error()
+	case errors.Is(err, errCrossOrigin):
+		status, code, msg = http.StatusForbidden, "cross_origin", "requests from another origin are not accepted"
 	case errors.Is(err, errUnsupportedMedia):
 		status, code, msg = http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json"
 	case errors.Is(err, errTooLarge):
