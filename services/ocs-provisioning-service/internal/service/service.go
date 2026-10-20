@@ -11,6 +11,7 @@ import (
 
 	"github.com/cckhaw/meridian-ocs/pkg/catalog"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
+	"github.com/cckhaw/meridian-ocs/pkg/identity"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/bus"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/command"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/status"
@@ -42,6 +43,9 @@ type Config struct {
 	// Catalog supplies the offerings for attach_offering (optional: without it
 	// that command is refused with ErrNoCatalog).
 	Catalog *catalog.Store
+	// Directory resolves an MSISDN, IMSI or NAI to a subscriber key for
+	// FindSubscriber (optional: without it lookups answer ErrUnavailable).
+	Directory identity.Directory
 }
 
 // Service accepts commands and answers reads.
@@ -169,6 +173,62 @@ func (s *Service) GetCommand(ctx context.Context, id string) (status.Record, err
 		return status.Record{}, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	return rec, nil
+}
+
+// FindSubscriber looks a subscriber up by one of its identifiers. kind is
+// "msisdn", "imsi" or "nai". A malformed identifier is a validation error; an
+// identifier that is not bound, or bound to a subscriber with no profile, is
+// ErrNotFound.
+func (s *Service) FindSubscriber(ctx context.Context, kind, value string) (SubscriberView, error) {
+	if s.cfg.Directory == nil {
+		return SubscriberView{}, fmt.Errorf("%w: subscriber lookup by identifier is not configured", ErrUnavailable)
+	}
+	t, ok := command.IdentityType(kind)
+	if !ok {
+		return SubscriberView{}, &command.ValidationError{Msg: "identifier type must be msisdn, imsi or nai"}
+	}
+	v, ok := identity.Normalize(t, value)
+	if !ok {
+		return SubscriberView{}, &command.ValidationError{Msg: "malformed " + kind}
+	}
+	key, err := s.cfg.Directory.Lookup(ctx, identity.Identity{Type: t, Value: v})
+	switch {
+	case errors.Is(err, identity.ErrUnknown):
+		return SubscriberView{}, ErrNotFound
+	case err != nil:
+		return SubscriberView{}, fmt.Errorf("%w: %w", ErrUnavailable, err)
+	}
+	return s.GetSubscriber(ctx, key)
+}
+
+// OfferingInfo is an offering of the catalog version in effect, for pickers.
+type OfferingInfo struct {
+	ID, Name, PlanID string
+	Allowances       []catalog.AllowanceBucket
+}
+
+// Meta is what a client needs to build a form: the deployment currency and
+// limits, and the offerings that can be attached right now.
+type Meta struct {
+	Currency       string
+	MaxTopUp       int64
+	CatalogVersion int64 // 0 = no catalog version in effect
+	Offerings      []OfferingInfo
+}
+
+// Meta reports the deployment's settings and the current offerings.
+func (s *Service) Meta() Meta {
+	m := Meta{Currency: s.cfg.Limits.Currency, MaxTopUp: s.cfg.Limits.MaxTopUp}
+	if s.cfg.Catalog == nil {
+		return m
+	}
+	if sn := s.cfg.Catalog.At(s.cfg.Now()); sn != nil {
+		m.CatalogVersion = sn.Version
+		for _, o := range sn.Document().Offerings {
+			m.Offerings = append(m.Offerings, OfferingInfo{ID: o.ID, Name: o.Name, PlanID: o.PlanID, Allowances: o.Allowances})
+		}
+	}
+	return m
 }
 
 // SubscriberView is a subscriber's profile and buckets.

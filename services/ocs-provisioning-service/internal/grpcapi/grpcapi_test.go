@@ -2,6 +2,8 @@ package grpcapi
 
 import (
 	"context"
+	"github.com/cckhaw/meridian-ocs/pkg/identity"
+	"github.com/redis/go-redis/v9"
 	"net"
 	"sync"
 	"testing"
@@ -55,6 +57,7 @@ type rig struct {
 	prod *capturingProducer
 	st   *cmdstatus.Store
 	data *datalayer.Client
+	rdb  *redis.Client
 	addr string
 	pki  *tlstest.PKI
 }
@@ -65,8 +68,8 @@ var lim = command.Limits{Currency: "EUR", MaxTopUp: 100_000, MaxAdjust: 5_000}
 func newRig(t *testing.T, az *auth.Authorizer, mtls bool) *rig {
 	t.Helper()
 	rdb := redistest.Start(t)
-	g := &rig{prod: &capturingProducer{}, st: cmdstatus.New(rdb, "", 0), data: datalayer.New(rdb)}
-	svc := service.New(service.Config{Limits: lim, Catalog: testCatalog(t)}, g.st, g.prod, g.data)
+	g := &rig{prod: &capturingProducer{}, st: cmdstatus.New(rdb, "", 0), data: datalayer.New(rdb), rdb: rdb}
+	svc := service.New(service.Config{Limits: lim, Catalog: testCatalog(t), Directory: identity.NewRedisDirectory(rdb, "")}, g.st, g.prod, g.data)
 	var opts []grpc.ServerOption
 	if mtls {
 		g.pki = tlstest.New(t)
@@ -325,4 +328,39 @@ func testCatalog(t testing.TB) *catalog.Store {
 		t.Fatal(err)
 	}
 	return s
+}
+
+func TestFindSubscriberOverGRPC(t *testing.T) {
+	g := newRig(t, auth.New([]string{"crm"}, nil), true)
+	ctx, cancel := ctx5()
+	defer cancel()
+	op := datalayer.ProvisionOp{Op: datalayer.ProvCreate, Key: "acct-7", Token: "c7", Fingerprint: "c7", Now: time.Now(), Payment: "postpaid",
+		Identifiers: []string{"msisdn:491701234567", "imsi:262011234567890"}}
+	if res, err := g.data.Provision(ctx, op); err != nil || res.Code != datalayer.ProvApplied {
+		t.Fatalf("%v %+v", err, res)
+	}
+	dir := identity.NewRedisDirectory(g.rdb, "")
+	if err := dir.Bind(ctx, identity.Identity{Type: identity.MSISDN, Value: "491701234567"}, "acct-7"); err != nil {
+		t.Fatal(err)
+	}
+	c := g.client(t, "crm")
+	got, err := c.FindSubscriber(ctx, &ocsv1.FindSubscriberRequest{Type: ocsv1.IdentifierType_IDENTIFIER_TYPE_MSISDN, Value: "491701234567"})
+	if err != nil || got.SubscriberKey != "acct-7" || got.PaymentType != ocsv1.PaymentType_PAYMENT_TYPE_POSTPAID || len(got.Identifiers) != 2 {
+		t.Fatalf("%v %v", got, err)
+	}
+	for name, c2 := range map[string]struct {
+		req  *ocsv1.FindSubscriberRequest
+		want codes.Code
+	}{
+		"unknown":   {&ocsv1.FindSubscriberRequest{Type: ocsv1.IdentifierType_IDENTIFIER_TYPE_MSISDN, Value: "491709999999"}, codes.NotFound},
+		"malformed": {&ocsv1.FindSubscriberRequest{Type: ocsv1.IdentifierType_IDENTIFIER_TYPE_MSISDN, Value: "12ab"}, codes.InvalidArgument},
+		"no type":   {&ocsv1.FindSubscriberRequest{Value: "491701234567"}, codes.InvalidArgument},
+	} {
+		if _, err := c.FindSubscriber(ctx, c2.req); code(err) != c2.want {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := g.client(t, "stranger").FindSubscriber(ctx, &ocsv1.FindSubscriberRequest{Type: ocsv1.IdentifierType_IDENTIFIER_TYPE_MSISDN, Value: "491701234567"}); code(err) != codes.PermissionDenied {
+		t.Fatalf("a client off the allow-list: %v", err)
+	}
 }

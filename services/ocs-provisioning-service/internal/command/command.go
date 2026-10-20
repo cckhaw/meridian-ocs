@@ -286,6 +286,9 @@ func (c *Command) Validate(l Limits) error {
 	return nil
 }
 
+// IdentityType parses an identifier type name (msisdn, imsi, nai).
+func IdentityType(s string) (identity.Type, bool) { return identityType(s) }
+
 func identityType(s string) (identity.Type, bool) {
 	switch s {
 	case "msisdn":

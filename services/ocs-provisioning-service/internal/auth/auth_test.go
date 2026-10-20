@@ -82,3 +82,22 @@ func TestDescribe(t *testing.T) {
 		t.Fatal(d)
 	}
 }
+
+func TestReadHonoursTheAllowList(t *testing.T) {
+	open := New(nil, []string{"care"}) // no standard list: any verified client may read
+	if err := open.Read("anyone"); err != nil {
+		t.Fatalf("%v", err)
+	}
+	if err := open.Read(""); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("%v", err)
+	}
+	listed := New([]string{"crm"}, []string{"care"})
+	for who, want := range map[string]error{"crm": nil, "care": nil, "stranger": ErrForbidden, "": ErrUnauthenticated} {
+		if err := listed.Read(who); !errors.Is(err, want) && !(err == nil && want == nil) {
+			t.Errorf("%q: %v, want %v", who, err, want)
+		}
+	}
+	if err := Off().Read(""); err != nil {
+		t.Fatal(err)
+	}
+}

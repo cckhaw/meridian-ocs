@@ -29,6 +29,7 @@ const (
 	ProvisioningService_AttachOffering_FullMethodName   = "/ocs.v1.ProvisioningService/AttachOffering"
 	ProvisioningService_GetCommand_FullMethodName       = "/ocs.v1.ProvisioningService/GetCommand"
 	ProvisioningService_GetSubscriber_FullMethodName    = "/ocs.v1.ProvisioningService/GetSubscriber"
+	ProvisioningService_FindSubscriber_FullMethodName   = "/ocs.v1.ProvisioningService/FindSubscriber"
 )
 
 // ProvisioningServiceClient is the client API for ProvisioningService service.
@@ -58,6 +59,8 @@ type ProvisioningServiceClient interface {
 	AttachOffering(ctx context.Context, in *AttachOfferingRequest, opts ...grpc.CallOption) (*CommandAccepted, error)
 	GetCommand(ctx context.Context, in *GetCommandRequest, opts ...grpc.CallOption) (*CommandStatus, error)
 	GetSubscriber(ctx context.Context, in *GetSubscriberRequest, opts ...grpc.CallOption) (*Subscriber, error)
+	// Look a subscriber up by one of its identifiers (MSISDN, IMSI or NAI).
+	FindSubscriber(ctx context.Context, in *FindSubscriberRequest, opts ...grpc.CallOption) (*Subscriber, error)
 }
 
 type provisioningServiceClient struct {
@@ -168,6 +171,16 @@ func (c *provisioningServiceClient) GetSubscriber(ctx context.Context, in *GetSu
 	return out, nil
 }
 
+func (c *provisioningServiceClient) FindSubscriber(ctx context.Context, in *FindSubscriberRequest, opts ...grpc.CallOption) (*Subscriber, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Subscriber)
+	err := c.cc.Invoke(ctx, ProvisioningService_FindSubscriber_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProvisioningServiceServer is the server API for ProvisioningService service.
 // All implementations must embed UnimplementedProvisioningServiceServer
 // for forward compatibility
@@ -195,6 +208,8 @@ type ProvisioningServiceServer interface {
 	AttachOffering(context.Context, *AttachOfferingRequest) (*CommandAccepted, error)
 	GetCommand(context.Context, *GetCommandRequest) (*CommandStatus, error)
 	GetSubscriber(context.Context, *GetSubscriberRequest) (*Subscriber, error)
+	// Look a subscriber up by one of its identifiers (MSISDN, IMSI or NAI).
+	FindSubscriber(context.Context, *FindSubscriberRequest) (*Subscriber, error)
 	mustEmbedUnimplementedProvisioningServiceServer()
 }
 
@@ -231,6 +246,9 @@ func (UnimplementedProvisioningServiceServer) GetCommand(context.Context, *GetCo
 }
 func (UnimplementedProvisioningServiceServer) GetSubscriber(context.Context, *GetSubscriberRequest) (*Subscriber, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetSubscriber not implemented")
+}
+func (UnimplementedProvisioningServiceServer) FindSubscriber(context.Context, *FindSubscriberRequest) (*Subscriber, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FindSubscriber not implemented")
 }
 func (UnimplementedProvisioningServiceServer) mustEmbedUnimplementedProvisioningServiceServer() {}
 
@@ -425,6 +443,24 @@ func _ProvisioningService_GetSubscriber_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ProvisioningService_FindSubscriber_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FindSubscriberRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProvisioningServiceServer).FindSubscriber(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ProvisioningService_FindSubscriber_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProvisioningServiceServer).FindSubscriber(ctx, req.(*FindSubscriberRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ProvisioningService_ServiceDesc is the grpc.ServiceDesc for ProvisioningService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -471,6 +507,10 @@ var ProvisioningService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetSubscriber",
 			Handler:    _ProvisioningService_GetSubscriber_Handler,
+		},
+		{
+			MethodName: "FindSubscriber",
+			Handler:    _ProvisioningService_FindSubscriber_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

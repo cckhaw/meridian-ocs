@@ -343,3 +343,16 @@ func TestAttachOfferingCommand(t *testing.T) {
 		t.Fatalf("%+v", out)
 	}
 }
+
+func TestCreateKeepsTheIdentifiersOnTheProfileForDisplay(t *testing.T) {
+	a, data, _ := newApplier(t)
+	apply(t, a, create("c", "acct-1", imsi, msisdn))
+	p, err := data.GetProfile(context.Background(), "acct-1")
+	if err != nil || len(p.Identifiers) != 2 {
+		t.Fatalf("%+v %v", p, err)
+	}
+	got := map[string]bool{p.Identifiers[0]: true, p.Identifiers[1]: true}
+	if !got["msisdn:491701234567"] || !got["imsi:262011234567890"] {
+		t.Fatalf("%v", p.Identifiers)
+	}
+}

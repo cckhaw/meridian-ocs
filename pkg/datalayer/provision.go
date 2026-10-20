@@ -80,9 +80,13 @@ type ProvisionOp struct {
 	IdemTTL     time.Duration // default 7 days
 
 	Payment string // ProvCreate: "prepaid" | "postpaid"
-	Status  string // ProvCreate: initial state (default "active")
-	Target  string // ProvLifecycle: new state
-	Until   time.Time
+	// Identifiers (ProvCreate) are recorded on the profile as "type:value"
+	// (for example "msisdn:491701234567"), at most MaxIdentifiers. The identity
+	// directory remains what resolves them; this copy is for display.
+	Identifiers []string
+	Status      string // ProvCreate: initial state (default "active")
+	Target      string // ProvLifecycle: new state
+	Until       time.Time
 
 	BucketID      string
 	Class         Class
@@ -99,6 +103,9 @@ type ProvisionOp struct {
 	Renew      bool        // ProvOffering: reset allowance buckets that already exist
 	Allowances []Allowance // ProvOffering
 }
+
+// MaxIdentifiers is the most identifiers a profile records.
+const MaxIdentifiers = 8
 
 // MaxAllowances is the most allowances one offering attachment may create.
 const MaxAllowances = 32
@@ -184,7 +191,15 @@ func (o *ProvisionOp) args() ([]any, error) {
 		if (o.Payment != "prepaid" && o.Payment != "postpaid") || st != "active" && st != "grace" && st != "suspended" {
 			return nil, fmt.Errorf("%w: payment or status", ErrInvalid)
 		}
-		a = append(a, o.Payment, st)
+		if len(o.Identifiers) > MaxIdentifiers {
+			return nil, fmt.Errorf("%w: too many identifiers", ErrInvalid)
+		}
+		for _, id := range o.Identifiers {
+			if id == "" || len(id) > 128 || strings.ContainsAny(id, ",\r\n") {
+				return nil, fmt.Errorf("%w: identifier %q", ErrInvalid, id)
+			}
+		}
+		a = append(a, o.Payment, st, strings.Join(o.Identifiers, ","))
 	case ProvLifecycle:
 		if o.Target != "active" && o.Target != "grace" && o.Target != "suspended" && o.Target != "terminated" {
 			return nil, fmt.Errorf("%w: target state", ErrInvalid)
@@ -346,6 +361,9 @@ type Profile struct {
 	StatusAt   time.Time
 	GraceUntil time.Time // zero unless in grace with a deadline
 	Offering   string    // the product offering the subscriber is on ("" = none)
+	// Identifiers recorded at creation as "type:value" (empty for subscribers
+	// created before they were recorded).
+	Identifiers []string
 }
 
 // ErrNoSubscriber is returned by reads for a subscriber without a profile.
@@ -373,7 +391,7 @@ func (c *Client) GetProfile(ctx context.Context, key string) (Profile, error) {
 	}
 	ver, _ := strconv.ParseInt(m["ver"], 10, 64)
 	return Profile{Payment: m["payment"], Status: m["status"], Version: ver,
-		CreatedAt: unixMilli(m["createdAt"]), StatusAt: unixMilli(m["statusAt"]), GraceUntil: unixMilli(m["graceUntil"]), Offering: m["offering"]}, nil
+		CreatedAt: unixMilli(m["createdAt"]), StatusAt: unixMilli(m["statusAt"]), GraceUntil: unixMilli(m["graceUntil"]), Offering: m["offering"], Identifiers: splitIDs(m["ids"])}, nil
 }
 
 // BucketInfo is a bucket as stored.
@@ -434,4 +452,11 @@ func (c *Client) Offering(ctx context.Context, key string) (string, error) {
 	}
 	s, _ := vals[1].(string)
 	return s, nil
+}
+
+func splitIDs(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
 }

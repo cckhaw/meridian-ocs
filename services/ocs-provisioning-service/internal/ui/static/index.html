@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meridian OCS Console</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <h1>Meridian OCS <span class="muted">Console</span></h1>
+  <div class="who" id="who" aria-live="polite"></div>
+</header>
+
+<main>
+  <div class="tabs" role="tablist" aria-label="Console sections">
+    <button role="tab" id="tab-find" aria-controls="panel-find" aria-selected="true">Find subscriber</button>
+    <button role="tab" id="tab-create" aria-controls="panel-create" aria-selected="false" tabindex="-1">Create subscriber</button>
+  </div>
+
+  <section id="panel-find" role="tabpanel" aria-labelledby="tab-find">
+    <form id="find-form" class="card" novalidate>
+      <h2>Find a subscriber</h2>
+      <p class="hint">Look up by any identifier the subscriber was created with.</p>
+      <div class="row">
+        <label class="field narrow">Identifier type
+          <select id="find-type" name="type">
+            <option value="msisdn">MSISDN (phone number)</option>
+            <option value="imsi">IMSI (SIM)</option>
+            <option value="nai">NAI (network access identifier)</option>
+          </select>
+        </label>
+        <label class="field grow">Value
+          <input id="find-value" name="value" autocomplete="off" inputmode="text" required placeholder="491701234567">
+        </label>
+        <button class="primary" type="submit" id="find-submit">Search</button>
+      </div>
+      <p class="error" id="find-error" role="alert" hidden></p>
+    </form>
+    <div id="find-result" aria-live="polite"></div>
+  </section>
+
+  <section id="panel-create" role="tabpanel" aria-labelledby="tab-create" hidden>
+    <form id="create-form" class="card" novalidate>
+      <h2>Create a subscriber</h2>
+      <p class="hint">The subscriber is created in the background; this page follows each step and reports the outcome.</p>
+
+      <fieldset>
+        <legend>Identity</legend>
+        <div class="row">
+          <label class="field grow">MSISDN
+            <input id="c-msisdn" autocomplete="off" inputmode="numeric" placeholder="491701234567" aria-describedby="c-msisdn-err">
+            <span class="field-error" id="c-msisdn-err" hidden></span>
+          </label>
+          <label class="field grow">IMSI
+            <input id="c-imsi" autocomplete="off" inputmode="numeric" placeholder="262011234567890" aria-describedby="c-imsi-err">
+            <span class="field-error" id="c-imsi-err" hidden></span>
+          </label>
+        </div>
+        <label class="field"><span>NAI <span class="muted">(optional)</span></span>
+          <input id="c-nai" autocomplete="off" placeholder="user@realm.example" aria-describedby="c-nai-err">
+          <span class="field-error" id="c-nai-err" hidden></span>
+        </label>
+        <p class="hint">At least one identifier is required. A number or SIM that already belongs to another subscriber is refused.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Account</legend>
+        <div class="row">
+          <label class="field grow"><span>Subscriber key <span class="muted">(optional)</span></span>
+            <input id="c-key" autocomplete="off" placeholder="generated if left empty" aria-describedby="c-key-err">
+            <span class="field-error" id="c-key-err" hidden></span>
+          </label>
+          <label class="field narrow">Payment type
+            <select id="c-payment">
+              <option value="prepaid">Prepaid</option>
+              <option value="postpaid">Postpaid</option>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <label class="field grow"><span>Product offering <span class="muted">(optional)</span></span>
+            <select id="c-offering"><option value="">None (default plan)</option></select>
+          </label>
+          <label class="field narrow"><span>Initial top-up <span class="muted" id="c-currency"></span></span>
+            <input id="c-topup" autocomplete="off" inputmode="numeric" placeholder="minor units, e.g. 1000" aria-describedby="c-topup-err">
+            <span class="field-error" id="c-topup-err" hidden></span>
+          </label>
+        </div>
+        <p class="hint" id="offering-hint"></p>
+      </fieldset>
+
+      <div class="actions">
+        <button class="primary" type="submit" id="create-submit">Create subscriber</button>
+        <button type="button" id="create-reset">Clear form</button>
+      </div>
+      <p class="error" id="create-error" role="alert" hidden></p>
+    </form>
+
+    <div class="card" id="progress-card" hidden>
+      <h2>Progress</h2>
+      <ol class="steps" id="steps"></ol>
+      <div class="actions" id="progress-actions" hidden>
+        <button type="button" class="primary" id="view-created" hidden>View subscriber</button>
+        <button type="button" id="retry" hidden>Retry</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="muted">Changes are queued and applied in order; nothing here bypasses the API's permissions.</footer>
+<script src="app.js"></script>
+</body>
+</html>

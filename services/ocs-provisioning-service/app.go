@@ -109,7 +109,7 @@ func NewApp(ctx context.Context, cfg Config, g svcenv.Getenv, logf func(string, 
 		} else {
 			logf("no catalog version in effect yet; attach_offering is unavailable until one is published")
 		}
-		svc := service.New(service.Config{Limits: cfg.Limits, CommandsTopic: cfg.Bus.CommandsTopic, Catalog: store}, st, a.prod, data)
+		svc := service.New(service.Config{Limits: cfg.Limits, CommandsTopic: cfg.Bus.CommandsTopic, Catalog: store, Directory: identity.NewRedisDirectory(a.rdb, cfg.IdentityPrefix)}, st, a.prod, data)
 
 		if cfg.RESTAddr != "off" {
 			a.restSrv = &http.Server{Handler: rest.New(svc, az), ReadHeaderTimeout: 5 * time.Second,

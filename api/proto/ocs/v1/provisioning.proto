@@ -31,6 +31,8 @@ service ProvisioningService {
 
   rpc GetCommand(GetCommandRequest) returns (CommandStatus);
   rpc GetSubscriber(GetSubscriberRequest) returns (Subscriber);
+  // Look a subscriber up by one of its identifiers (MSISDN, IMSI or NAI).
+  rpc FindSubscriber(FindSubscriberRequest) returns (Subscriber);
 }
 
 enum PaymentType {
@@ -191,6 +193,11 @@ message Bucket {
   double priority = 6;
 }
 
+message FindSubscriberRequest {
+  IdentifierType type = 1;       // MSISDN, IMSI or NAI
+  string value = 2;
+}
+
 message Subscriber {
   string subscriber_key = 1;
   PaymentType payment_type = 2;
@@ -201,4 +208,5 @@ message Subscriber {
   google.protobuf.Timestamp grace_until = 7;
   repeated Bucket buckets = 8;
   string offering_id = 9;        // empty = none (priced on the default plan)
+  repeated Identifier identifiers = 10;  // as recorded at creation (empty for older subscribers)
 }

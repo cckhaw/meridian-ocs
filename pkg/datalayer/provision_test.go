@@ -564,3 +564,31 @@ func TestAttachOfferingGuards(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateRecordsIdentifiersOnTheProfile(t *testing.T) {
+	c, ctx := setup(t)
+	r := prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvCreate, Key: "id1", Token: "c-id1", Payment: "prepaid",
+		Identifiers: []string{"msisdn:491701234567", "imsi:262011234567890"}})
+	if r.Code != datalayer.ProvApplied {
+		t.Fatalf("%+v", r)
+	}
+	p, err := c.GetProfile(ctx, "id1")
+	if err != nil || len(p.Identifiers) != 2 || p.Identifiers[0] != "msisdn:491701234567" || p.Identifiers[1] != "imsi:262011234567890" {
+		t.Fatalf("%+v %v", p, err)
+	}
+	// A subscriber created without identifiers reads back with none.
+	create(t, c, "id2", "postpaid")
+	if p, _ := c.GetProfile(ctx, "id2"); len(p.Identifiers) != 0 {
+		t.Fatalf("%+v", p)
+	}
+	for name, ids := range map[string][]string{
+		"comma":    {"msisdn:1,imsi:2"},
+		"empty":    {""},
+		"too many": {"a:1", "a:2", "a:3", "a:4", "a:5", "a:6", "a:7", "a:8", "a:9"},
+	} {
+		op := datalayer.ProvisionOp{Op: datalayer.ProvCreate, Key: "id3", Token: "c-" + name, Fingerprint: "fp", Now: t0, Payment: "prepaid", Identifiers: ids}
+		if _, err := c.Provision(ctx, op); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

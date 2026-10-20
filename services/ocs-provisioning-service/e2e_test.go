@@ -5,8 +5,11 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -178,6 +181,19 @@ func TestProvisioningThroughTheWholeSystem(t *testing.T) {
 	bs, _ := m["buckets"].([]any)
 	if code != 200 || m["status"] != "active" || len(bs) != 1 || bs[0].(map[string]any)["balance"] != float64(10000) {
 		t.Fatalf("%d %v", code, m)
+	}
+
+	// 3b. Found by MSISDN (as a care agent would), and the console is served to the same client.
+	code, m = s.call(t, "crm", "GET", "/v1/subscribers?msisdn=491701234567", "", nil)
+	ids, _ := m["identifiers"].([]any)
+	if code != 200 || m["subscriberKey"] != "acct-1" || len(ids) != 2 {
+		t.Fatalf("lookup by MSISDN: %d %v", code, m)
+	}
+	if code, _ = s.call(t, "crm", "GET", "/v1/subscribers?msisdn=491700000001", "", nil); code != 404 {
+		t.Fatalf("unknown MSISDN: %d", code)
+	}
+	if resp, err := s.http(t, "crm").Get(s.rest + "/ui/"); err != nil || resp.StatusCode != 200 || resp.Header.Get("Content-Security-Policy") == "" {
+		t.Fatalf("console over mTLS: %v %v", resp, err)
 	}
 
 	// 4. Over gRPC with a bundle; the permissions differ by caller.
@@ -369,4 +385,71 @@ func TestOfferingsThroughTheWholeSystem(t *testing.T) {
 	if bal, _ := s.data.Balance(context.Background(), "gold-sub", "data"); bal != 600 {
 		t.Fatalf("the allowance should have paid: %d", bal)
 	}
+}
+
+// TestServeConsoleForManualTesting runs the whole service against in-memory
+// Kafka and a throwaway Redis, with authentication off, and serves the web
+// console so it can be tried in a browser or driven by a browser test:
+//
+//	OCS_UI_DEV_ADDR=127.0.0.1:8443 go test -run ServeConsoleForManualTesting -timeout 1h ./services/ocs-provisioning-service
+//
+// then open http://127.0.0.1:8443/ui/. It stops after OCS_UI_DEV_SECONDS
+// (default 3600). It is skipped when OCS_UI_DEV_ADDR is not set.
+func TestServeConsoleForManualTesting(t *testing.T) {
+	addr := os.Getenv("OCS_UI_DEV_ADDR")
+	if addr == "" {
+		t.Skip("set OCS_UI_DEV_ADDR (for example 127.0.0.1:8443) to serve the console")
+	}
+	rdb := redistest.Start(t)
+	bc := bus.Config{}.WithDefaults()
+	cluster, err := kfake.NewCluster(kfake.NumBrokers(1), kfake.SeedTopics(3, bc.CommandsTopic, bc.EventsTopic, bc.DLQTopic))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cluster.Close)
+
+	pub := &catalog.Replicator{Redis: rdb, Store: catalog.NewStore(0)}
+	doc := catalog.Document{EffectiveFrom: time.Now().Add(-time.Hour),
+		Plans: []catalog.PricePlan{
+			{ID: "basic", Rules: []catalog.ChargeRule{{ID: "r", Cash: &catalog.Price{Num: 4, Den: 1}}}},
+			{ID: "gold", Rules: []catalog.ChargeRule{{ID: "r", Cash: &catalog.Price{Num: 1, Den: 1}}}},
+		},
+		Offerings: []catalog.ProductOffering{
+			{ID: "gold-offer", Name: "Gold 10 GB", PlanID: "gold", Allowances: []catalog.AllowanceBucket{
+				{ID: "data10g", Class: "bundle", Unit: "bytes", Amount: 10 << 30, ValidityDays: 30},
+				{ID: "welcome-sms", Class: "promo", Unit: "events", Amount: 50}}},
+			{ID: "basic-offer", Name: "Basic", PlanID: "basic"},
+		}}
+	if _, _, err := pub.Publish(context.Background(), doc, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	env := map[string]string{
+		"OCS_KAFKA_BROKERS": cluster.ListenAddrs()[0], "OCS_REDIS_ADDR": rdb.Options().Addr, "OCS_CURRENCY": "EUR",
+		"OCS_PROVISIONING_AUTH": "off", "OCS_PROV_REST_ADDR": addr, "OCS_PROV_GRPC_ADDR": "off", "OCS_REDIS_REPLICAS": "0",
+	}
+	g := func(k string) string { return env[k] }
+	cfg, err := LoadConfig(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := NewApp(context.Background(), cfg, g, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), devDuration())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- app.Run(ctx) }()
+	fmt.Printf("console ready: http://%s/ui/\n", app.RESTAddr())
+	<-ctx.Done()
+	<-done
+	app.Close()
+}
+
+func devDuration() time.Duration {
+	if s, err := strconv.Atoi(os.Getenv("OCS_UI_DEV_SECONDS")); err == nil && s > 0 {
+		return time.Duration(s) * time.Second
+	}
+	return time.Hour
 }
