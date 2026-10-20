@@ -10,7 +10,7 @@ with web consoles, metrics, alert rules, a Helm chart and a one-command local st
 99.999 % availability, zero double-spend. None of these has been demonstrated yet; see
 [What is not built yet](#what-is-not-built-yet).
 
-*Last updated: 2026-10-20, after the reconciler was extended to updates refused while Redis was down. This README is kept current with every
+*Last updated: 2026-10-20, after the automatic Grace → Suspended timer was added. This README is kept current with every
 change: see [Keeping this up to date](#keeping-this-up-to-date).*
 
 ## Try it
@@ -64,6 +64,7 @@ mean production-ready). The list of what does not exist yet is [further down](#w
 | Area | What exists | Doc |
 |---|---|---|
 | Provisioning | asynchronous commands over REST and gRPC (mTLS), through Kafka to workers; create, top-up, adjust, bundles, buckets, lifecycle, attach offering; idempotency keys; privileged vs standard callers; lookup by MSISDN/IMSI/NAI | [08](docs/architecture/08-provisioning.md) |
+| Grace expiry | with `OCS_PROV_GRACE_SWEEP` set, a subscriber whose grace period (given a deadline) has ended is suspended by the service itself: an index kept atomically with the profile, a guarded step that cannot suspend a subscriber who was restored or given longer, safe with several instances and after a crash, `lifecycle.changed` event, five metrics; off by default | [08](docs/architecture/08-provisioning.md#the-end-of-a-grace-period) |
 | Two-person approval | privileged changes (large balance corrections, terminations, bucket removals: chosen by one policy setting) wait until a *different* authorised person approves exactly what was requested; decided atomically in Redis, enforced again by the worker, expiring, audited on the events topic, over REST, gRPC and the console | [08](docs/architecture/08-provisioning.md#two-person-approval) |
 | Subscriber console (web) | find a subscriber, create one (with offering and top-up), top up, change offering, correct a balance, change status (termination needs the key typed in), and for approvers an Approvals tab; shows only what the caller's certificate allows | [08](docs/architecture/08-provisioning.md) |
 | Catalog editor (web) | create and configure offerings and price plans, validate, compare prices against the live version, publish, history and rollback drafts | [09](docs/architecture/09-catalog.md) |
@@ -106,7 +107,7 @@ one I would build first.
   no GPSI or feature negotiation; scopes are service-level only.
 - Pricing is per request attribute only: no tiered or volume pricing across a billing period, no subscriber-state
   inputs to rules; cash prices are `num/den` with `den ≤ 4096`.
-- No automatic Grace → Suspended timer; no reconciler for usage left unsettled when a session is barred mid-flight;
+- The Grace → Suspended timer is off by default, covers only grace periods given a deadline after it was deployed, has no alert rule and was not run in the Docker smoke test or a cluster ([08](docs/architecture/08-provisioning.md#known-gaps)); no reconciler for usage left unsettled when a session is barred mid-flight;
   no profile cache feeding the postpaid fail-open path (with Redis down every request is denied).
 - Offering changes reach gateways after a 30 s cache TTL (no push invalidation), and a plan cannot be switched
   without re-creating the offering's allowances.

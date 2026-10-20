@@ -138,3 +138,26 @@ func devOff(m map[string]string) {
 	delete(m, "OCS_PROV_CLIENT_CA")
 	delete(m, "OCS_PROV_PRIVILEGED")
 }
+
+func TestGraceSweepSetting(t *testing.T) {
+	base := map[string]string{"OCS_KAFKA_BROKERS": "k:9092", "OCS_CURRENCY": "EUR", "OCS_PROVISIONING_AUTH": "off", "OCS_PROV_APPROVAL": "off"}
+	for v, want := range map[string]struct {
+		d   time.Duration
+		err string
+	}{
+		"": {0, ""}, "off": {0, ""}, "30s": {30 * time.Second, ""}, "1h": {time.Hour, ""},
+		"500ms": {0, "between 1s and 1h"}, "2h": {0, "between 1s and 1h"}, "soon": {0, "positive duration"}, "-5s": {0, "positive duration"},
+	} {
+		m := map[string]string{"OCS_PROV_GRACE_SWEEP": v}
+		for k, x := range base {
+			m[k] = x
+		}
+		c, err := LoadConfig(func(k string) string { return m[k] })
+		if want.err == "" && (err != nil || c.GraceSweep != want.d) {
+			t.Errorf("%q: %v %v", v, c.GraceSweep, err)
+		}
+		if want.err != "" && (err == nil || !strings.Contains(err.Error(), want.err)) {
+			t.Errorf("%q: %v, want an error mentioning %q", v, err, want.err)
+		}
+	}
+}

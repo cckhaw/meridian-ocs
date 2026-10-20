@@ -180,6 +180,7 @@ provisioning:
   maxTopUp: ""
   maxAdjust: ""
   workers: ""
+  graceSweep: ""             # "off" (default) or how often to suspend subscribers whose grace period has ended, e.g. 30s (worker pods)
   restPort: 8443
   grpcPort: 9443
   split: true                # separate API and worker Deployments (OCS_PROV_MODE=api / worker)

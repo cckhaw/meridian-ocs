@@ -14,6 +14,7 @@
 {{- include "ocs.opt" (dict "name" "OCS_PROV_MAX_TOPUP" "value" $p.maxTopUp) }}
 {{- include "ocs.opt" (dict "name" "OCS_PROV_MAX_ADJUST" "value" $p.maxAdjust) }}
 {{- include "ocs.opt" (dict "name" "OCS_PROV_WORKERS" "value" $p.workers) }}
+{{- include "ocs.opt" (dict "name" "OCS_PROV_GRACE_SWEEP" "value" $p.graceSweep) }}
 - {name: OCS_PROV_APPROVAL, value: {{ $p.approval.policy | quote }}}
 {{- include "ocs.opt" (dict "name" "OCS_PROV_APPROVERS" "value" (join "," $p.approval.approvers)) }}
 {{- include "ocs.opt" (dict "name" "OCS_PROV_APPROVAL_TTL" "value" $p.approval.ttl) }}

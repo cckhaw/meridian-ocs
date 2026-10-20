@@ -36,6 +36,8 @@ import (
 //	                         adjust_balance>5000,change_lifecycle:terminated,remove_bucket (package approval)
 //	OCS_PROV_APPROVERS       common names that may approve and reject without being privileged
 //	OCS_PROV_APPROVAL_TTL    how long a request waits for approval (default 24h)
+//	OCS_PROV_GRACE_SWEEP     "off" (default) or how often to suspend subscribers whose grace period has ended, e.g. 30s
+//	                         (runs where the command worker runs; any number of instances is safe)
 //	OCS_PROV_APPROVAL_SELF   "true" lets a requester approve their own request: development with authentication off only
 type Config struct {
 	Mode           string
@@ -57,6 +59,8 @@ type Config struct {
 	Approvers    []string
 	ApprovalTTL  time.Duration
 	ApprovalSelf bool
+
+	GraceSweep time.Duration // 0 = off
 }
 
 var currencyRe = regexp.MustCompile(`^[A-Z]{3}$`)
@@ -130,6 +134,17 @@ func LoadConfig(g svcenv.Getenv) (Config, error) {
 		c.ApprovalSelf = true
 	default:
 		return c, fmt.Errorf(`OCS_PROV_APPROVAL_SELF must be "true" or "false", got %q`, g("OCS_PROV_APPROVAL_SELF"))
+	}
+
+	switch v := g("OCS_PROV_GRACE_SWEEP"); v {
+	case "", "off":
+	default:
+		if c.GraceSweep, err = g.Duration("OCS_PROV_GRACE_SWEEP", 0); err != nil {
+			return c, fmt.Errorf(`%w (or "off")`, err)
+		}
+		if c.GraceSweep < time.Second || c.GraceSweep > time.Hour {
+			return c, errors.New(`OCS_PROV_GRACE_SWEEP must be "off" or between 1s and 1h`)
+		}
 	}
 
 	switch c.Auth {

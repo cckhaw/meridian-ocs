@@ -70,7 +70,9 @@ mediation already exported metrics ([11](11-aiops.md)); this part adds the rest:
   `conflict`, `unavailable`), accepted by command type, commands finished by outcome,
   dead-lettered messages, worker retries and commits, **command lag** (acceptance to
   recorded outcome, a histogram), API requests by status class and their duration,
-  and the data-tier durability counters (provisioning moves money too).
+  and the data-tier durability counters (provisioning moves money too); with `provisioning.graceSweep` set, the
+  grace-expiry counters and the overdue gauges ([08](08-provisioning.md#the-end-of-a-grace-period); no alert rule or
+  dashboard panel uses them yet, and the value was added without rendering the chart because the sandbox has no `helm`).
 - **Catalog** (every node that reads it: gateway, provisioning, catalog service,
   mediation): version in effect, latest version, **seconds since the shared catalog
   was last read**, replication errors; the catalog service adds publishes by result

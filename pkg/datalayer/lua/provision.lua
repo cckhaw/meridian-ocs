@@ -2,10 +2,12 @@
 -- adjust, add / reload / remove a bucket, change lifecycle state.
 --
 -- KEYS[1] = subscriber prefix (as for charge.lua)
+-- KEYS[2] = the grace-deadline index (a sorted set; a single key, so not for Redis Cluster)
 -- ARGV: op, token, fingerprint, nowMs, idemTtlMs, then per op (from ARGV[6]):
 --   C  payment, status, ids   (ids: comma separated "type:value" list, may be empty; kept on the
 --      profile so a subscriber can be displayed with its identifiers)
 --   L  target, untilMs                      (untilMs > 0 only used for grace)
+--   E  expectedUntilMs                      (end of grace: suspend if still in that grace period)
 --   T  bucketId, amount, order, allowNeg    (credit a cash bucket; created if missing)
 --   A  bucketId, delta, order, allowNeg     (credit or debit any bucket)
 --   B  bucketId, class, kind, amount, expMs, order
@@ -23,6 +25,7 @@
 --   7 no such bucket | 8 subscriber terminated | 9 balance overflow
 --   10 bucket not empty (balance) | 11 not a cash bucket
 --   12 allowance bucket already exists (bucket id), nothing applied
+--   13 grace period changed since the request was made | 14 grace period has not ended
 --
 -- The outcome of every request, failures included, is stored under the token,
 -- so a redelivered command gets the same answer even if state has changed.
@@ -30,6 +33,7 @@
 local P = KEYS[1]
 local op, token, fp = ARGV[1], ARGV[2], ARGV[3]
 local now, idemTtl = tonumber(ARGV[4]), tonumber(ARGV[5])
+local due = KEYS[2] -- index of subscribers in grace with a deadline: member = prefix, score = deadline (ms)
 local pk = P .. ':profile'
 local ik = P .. ':idem:' .. token
 local MAXBAL = 4503599627370496 -- 2^52: balances stay exact in a Lua double
@@ -80,12 +84,36 @@ if op == 'L' then
   redis.call('HSET', pk, 'status', to, 'statusAt', fmt(now))
   if to == 'grace' and untilMs > 0 then
     redis.call('HSET', pk, 'graceUntil', fmt(untilMs))
+    redis.call('ZADD', due, untilMs, P)
   else
     redis.call('HDEL', pk, 'graceUntil')
+    redis.call('ZREM', due, P)
   end
   local ver = bump()
   ledger(P, 'type', 'lifecycle', 'from', status, 'to', to, 'token', token, 'at', fmt(now))
   return finish(0, { status, to, fmt(ver) })
+end
+
+if op == 'E' then
+  -- The grace period ended: grace -> suspended, but only if the subscriber is still in the grace
+  -- period this request was made for. A top-up, a recovery or a longer grace in between wins.
+  local expected = tonumber(ARGV[6])
+  local cur = tonumber(redis.call('HGET', pk, 'graceUntil') or '')
+  if status ~= 'grace' then
+    redis.call('ZREM', due, P)
+    return { 4, status, 'suspended' } -- refusals are not remembered under the token: a later request must see the state then
+  end
+  if not cur or cur ~= expected then
+    -- The index disagrees with the profile: repair it and leave the subscriber alone.
+    if cur then redis.call('ZADD', due, cur, P) else redis.call('ZREM', due, P) end
+    return { 13 }
+  end
+  if cur > now then return { 14 } end
+  redis.call('HSET', pk, 'status', 'suspended', 'statusAt', fmt(now))
+  redis.call('HDEL', pk, 'graceUntil')
+  local ver = bump()
+  ledger(P, 'type', 'lifecycle', 'from', 'grace', 'to', 'suspended', 'token', token, 'at', fmt(now))
+  return finish(0, { 'grace', 'suspended', fmt(ver) })
 end
 
 if status == 'terminated' then return finish(8) end
