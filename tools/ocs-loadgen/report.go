@@ -8,6 +8,15 @@ import (
 	"time"
 )
 
+// TimelineSecond is what happened to the sessions that were due in one second of the measured window.
+type TimelineSecond struct {
+	T           int    `json:"t"`
+	Started     uint64 `json:"started"`
+	OK          uint64 `json:"ok"`
+	Failed      uint64 `json:"failed"`
+	MaxCreateUs uint64 `json:"maxCreateFromDueUs"`
+}
+
 // LatencySummary is one histogram, in microseconds.
 type LatencySummary struct {
 	Count uint64 `json:"count"`
@@ -46,9 +55,11 @@ type Report struct {
 	GatewayCounted     *float64                  `json:"gatewayCountedRequests,omitempty"`
 	ClientSent         uint64                    `json:"clientSentRequests"`
 	RefCollisions      uint64                    `json:"referenceCollisions"`
+	Timeline           []TimelineSecond          `json:"timeline,omitempty"`
 	Verification       *Verification             `json:"verification,omitempty"`
 	SLO                []string                  `json:"sloViolations,omitempty"`
 	Pass               bool                      `json:"pass"`
+	showTimeline       bool
 }
 
 func (r *runner) report(measured time.Duration) Report {
@@ -75,6 +86,12 @@ func (r *runner) report(measured time.Duration) Report {
 	m.mu.Unlock()
 	rp.ClientSent = r.ct.requests.Load()
 	rp.RefCollisions = r.collisions.Load()
+	for i := range r.tl {
+		s := &r.tl[i]
+		if s.started.Load() > 0 {
+			rp.Timeline = append(rp.Timeline, TimelineSecond{i, s.started.Load(), s.ok.Load(), s.failed.Load(), s.maxCreateUs.Load()})
+		}
+	}
 	rp.Latency = map[string]LatencySummary{
 		"create": summarize(&r.lat.create), "createFromDue": summarize(&r.lat.createCorrected),
 		"update": summarize(&r.lat.update), "release": summarize(&r.lat.release),
@@ -131,12 +148,22 @@ func (rp *Report) write(w io.Writer) {
 		p("%-15s %9d %9.2f %9.2f %9.2f %9.2f %9.2f %9.2f\n", k, l.Count, ms(l.Mean), ms(l.P50), ms(l.P90), ms(l.P99), ms(l.P999), ms(l.Max))
 	}
 	p("(createFromDue counts from the moment the arrival was due, so a backlog shows up; the others from sending)\n")
+	if r := rp.Timeline; r != nil && rp.showTimeline {
+		p("\nper second (by when each session was due): t, started, finished as expected, failed, slowest create from due (ms)\n")
+		for _, s := range r {
+			mark := ""
+			if s.Failed > 0 {
+				mark = "  <-- failures"
+			}
+			p("  t=%-3d %5d %5d %5d %8.1f%s\n", s.T, s.Started, s.OK, s.Failed, float64(s.MaxCreateUs)/1000, mark)
+		}
+	}
 	if rp.GatewayCounted != nil {
 		p("\ncross-check  client sent %d requests; the gateway's counter rose by %.0f\n", rp.ClientSent, *rp.GatewayCounted)
 	}
 	if v := rp.Verification; v != nil {
 		p("\nbalances     checked %d subscribers:", v.Checked)
-		for _, k := range []string{verdictExact, verdictWithin, verdictOverspend, verdictCreated, verdictNegative, verdictUnread} {
+		for _, k := range []string{verdictExact, verdictWithin, verdictUnsettled, verdictOverspend, verdictCreated, verdictNegative, verdictUnread} {
 			if v.Verdicts[k] > 0 {
 				p("  %s %d", k, v.Verdicts[k])
 			}
@@ -144,6 +171,10 @@ func (rp *Report) write(w io.Writer) {
 		p("\n")
 		if v.Overflowed > 0 {
 			p("             %d subscribers spent their whole bundle: usage beyond it is charged to other buckets, which are not checked\n", v.Overflowed)
+		}
+		if v.UnsettledTerminates > 0 {
+			p("             the gateway counted %.0f terminates acknowledged without settling (data tier down): up to %d bytes may be uncharged or held; deviations explained by them: %d bytes\n",
+				v.UnsettledTerminates, v.Budget, v.Explained)
 		}
 		for _, s := range v.Violations {
 			p("  VIOLATION  %s\n", s)

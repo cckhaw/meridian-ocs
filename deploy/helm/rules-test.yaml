@@ -18,6 +18,22 @@ tests:
               summary: "Requests are being answered without the data tier"
               description: "The fail policy is answering instead of the balance store (prepaid fail-closed, postpaid fail-open with caps). Redis is unreachable or slow."
 
+  - name: usage released without being charged
+    interval: 1m
+    input_series:
+      - series: 'ocs_engine_unsettled_terminates_total{pod="g0"}'
+        values: '0+0x5 0+1x3 3+0x10'
+    alert_rule_test:
+      - {eval_time: 4m, alertname: OcsUsageNotSettled, exp_alerts: []}
+      - eval_time: 7m
+        alertname: OcsUsageNotSettled
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "Sessions were released without their last usage being charged"
+              description: "A terminate arrived while the data tier was down and was acknowledged; the usage it reported was not charged and its reservation will expire and be refunded. There is no reconciler yet: the affected sessions are in the engine audit events."
+      - {eval_time: 20m, alertname: OcsUsageNotSettled, exp_alerts: []}
+
   - name: a commit acknowledged by too few replicas
     interval: 1m
     input_series:

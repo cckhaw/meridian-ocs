@@ -105,6 +105,11 @@ type Stats struct {
 	// Unpriced counts units the tariff could not price (barred by a policy
 	// filter, no matching rule, unknown plan). They are sent with no rates.
 	Unpriced uint64
+	// UnsettledTerminates counts terminates that reported usage and were acknowledged while the data tier was
+	// unavailable: the session is released but the usage it reported was not
+	// charged (its reservation expires and is refunded). Each one is revenue
+	// that only a reconciler could recover; see AuditUnsettledUsage.
+	UnsettledTerminates uint64
 }
 
 type job struct {
@@ -128,7 +133,7 @@ type Engine struct {
 	closed      atomic.Bool
 	wg          sync.WaitGroup
 
-	requests, degraded, overloaded, auditDropped, unreplicated, unpriced atomic.Uint64
+	requests, degraded, overloaded, auditDropped, unreplicated, unpriced, unsettled atomic.Uint64
 }
 
 // New builds and starts an engine.
@@ -178,7 +183,7 @@ func (e *Engine) Close() {
 
 // Stats returns a snapshot of the counters.
 func (e *Engine) Stats() Stats {
-	return Stats{e.requests.Load(), e.degraded.Load(), e.overloaded.Load(), e.auditDropped.Load(), e.unreplicated.Load(), e.unpriced.Load()}
+	return Stats{e.requests.Load(), e.degraded.Load(), e.overloaded.Load(), e.auditDropped.Load(), e.unreplicated.Load(), e.unpriced.Load(), e.unsettled.Load()}
 }
 
 // Rate processes one request and fills resp. It blocks until the answer is
@@ -459,6 +464,12 @@ func (w *worker) degrade(req *canonical.Request, resp *canonical.Response, now t
 		for i := range req.Units {
 			u := &req.Units[i]
 			resp.Grants = append(resp.Grants, canonical.UnitGrant{RatingGroup: u.RatingGroup, Result: canonical.ResultGranted, Degraded: true})
+		}
+		for i := range req.Units {
+			if req.Units[i].Used > 0 { // a terminate that reported no usage loses nothing
+				e.unsettled.Add(1)
+				break
+			}
 		}
 		w.audit(AuditUnsettledUsage, req, resp, now)
 		return

@@ -46,7 +46,7 @@ Each granted reservation is registered in the worker's timing wheel (1 s slots) 
 
 ## Fail policy integration
 
-The engine wraps the data-tier call in `failpolicy.Breaker`. When the call fails or the breaker is open, requests go to `failpolicy.Engine` (see doc 02): prepaid are denied (`ResultUnavailable`), postpaid get a capped, journalled, short grant (`Degraded=true`). A terminate during an outage is acknowledged and emits `AuditUnsettledUsage`; the reservation expires and is refunded, so **usage reported only in that terminate is not charged until reconciliation consumes the audit event**. That reconciler does not exist yet.
+The engine wraps the data-tier call in `failpolicy.Breaker`. When the call fails or the breaker is open, requests go to `failpolicy.Engine` (see doc 02): prepaid are denied (`ResultUnavailable`), postpaid get a capped, journalled, short grant (`Degraded=true`). A terminate during an outage is acknowledged and emits `AuditUnsettledUsage`; the reservation expires and is refunded, so **usage reported only in that terminate is not charged until reconciliation consumes the audit event**. That reconciler does not exist yet. The loss is counted: `Stats.UnsettledTerminates` / `ocs_engine_unsettled_terminates_total` rises for every such terminate that reported usage (one that reported none loses nothing and is not counted), and the chart alerts on it (`OcsUsageNotSettled`). It was first measured by the failure-injection runs in [14](14-load-test.md): about 0.8 MB of usage left uncharged in one run that stopped Redis for 8 s under load.
 
 ## Measured numbers (this sandbox, not a benchmark environment)
 

@@ -41,6 +41,7 @@ type config struct {
 	SLOOK    float64       // minimum share of sessions that completed, 0 = not checked
 	NoVerify bool
 	Audit    bool
+	Timeline bool
 }
 
 func (c config) validate() error {
@@ -96,6 +97,26 @@ func (c *counters) status(s string) {
 	c.mu.Unlock()
 }
 
+// second is one second of the measured window.
+type second struct {
+	started, ok, failed atomic.Uint64
+	maxCreateUs         atomic.Uint64
+}
+
+func (r *runner) slot(due time.Time) *second {
+	if len(r.tl) == 0 {
+		return nil
+	}
+	i := int(due.Sub(r.start) / time.Second)
+	if i < 0 {
+		i = 0
+	}
+	if i >= len(r.tl) {
+		i = len(r.tl) - 1
+	}
+	return &r.tl[i]
+}
+
 type latencies struct {
 	create, update, release Hist
 	createCorrected         Hist // from the moment the create was due, not sent: includes queueing delay
@@ -110,8 +131,10 @@ type runner struct {
 	refs       sync.Map      // charging references handed out in this run
 	collisions atomic.Uint64 // creates that returned a reference another session already holds
 	measuring  atomic.Bool
-	ct         counters // the whole run
-	mt         counters // the measured window
+	start      time.Time // when the measured window began (set before measuring turns on)
+	tl         []second  // outcomes per second of the measured window, by when each session was due
+	ct         counters  // the whole run
+	mt         counters  // the measured window
 	lat        latencies
 }
 
@@ -155,6 +178,15 @@ func (r *runner) body(imsi string, pdu uint32, seq uint32, request int64, used i
 
 // grantOf extracts the granted total volume of the one rating group, and whether the answer says SUCCESS.
 func grantOf(body []byte) (int64, bool) {
+	g, ok, _ := grantResult(body)
+	return g, ok
+}
+
+// resultDenied is what the gateway answers for a unit it refused because the subscriber is barred or the
+// data tier is unavailable. A barred subscriber's usage is still settled; with the data tier down it is not.
+const resultDenied = "END_USER_SERVICE_DENIED"
+
+func grantResult(body []byte) (granted int64, success bool, code string) {
 	var a struct {
 		Units []struct {
 			Result  string `json:"resultCode"`
@@ -164,13 +196,13 @@ func grantOf(body []byte) (int64, bool) {
 		} `json:"multipleUnitInformation"`
 	}
 	if json.Unmarshal(body, &a) != nil || len(a.Units) == 0 {
-		return 0, false
+		return 0, false, ""
 	}
 	u := a.Units[0]
 	if u.Granted == nil {
-		return 0, u.Result == "SUCCESS"
+		return 0, u.Result == "SUCCESS", u.Result
 	}
-	return u.Granted.Total, u.Result == "SUCCESS"
+	return u.Granted.Total, u.Result == "SUCCESS", u.Result
 }
 
 func refPath(location string) (string, bool) {
@@ -192,6 +224,12 @@ func (r *runner) session(ctx context.Context, due time.Time, s *subscriber) {
 		}
 	}
 	both(func(k *counters) { k.started.Add(1) })
+	var sec *second
+	if rec {
+		if sec = r.slot(due); sec != nil {
+			sec.started.Add(1)
+		}
+	}
 	tick := func(h *Hist, from time.Time) {
 		if rec {
 			h.Record(time.Since(from))
@@ -199,6 +237,9 @@ func (r *runner) session(ctx context.Context, due time.Time, s *subscriber) {
 	}
 	fail := func(what string) {
 		both(func(k *counters) { k.failed.Add(1); k.status(what) })
+		if sec != nil {
+			sec.failed.Add(1)
+		}
 	}
 	call := func(h *Hist, path string, body []byte) reply {
 		both(func(k *counters) { k.requests.Add(1) })
@@ -217,6 +258,11 @@ func (r *runner) session(ctx context.Context, due time.Time, s *subscriber) {
 	rep := call(&r.lat.create, "/nchf-convergedcharging/v3/chargingdata", r.body(s.imsi, pdu, 1, c.RequestSize, 0))
 	if rec && rep.err == nil {
 		r.lat.createCorrected.Record(time.Since(due))
+		if sec != nil {
+			if us := uint64(time.Since(due) / time.Microsecond); us > sec.maxCreateUs.Load() {
+				sec.maxCreateUs.Store(us) // approximate under races: a display value
+			}
+		}
 	}
 	if rep.err != nil {
 		s.note(c.Audit, "create: no answer (%v)", rep.err)
@@ -280,10 +326,19 @@ func (r *runner) session(ctx context.Context, due time.Time, s *subscriber) {
 			}
 			return
 		}
+		prev := grant
+		var code string
+		grant, _, code = grantResult(up.body)
 		s.mu.Lock()
-		s.used += used
+		if code == resultDenied {
+			// Refused: with the data tier down nothing was settled (the previous reservation stays until it
+			// expires); for a barred subscriber the usage was settled. The answer does not say which.
+			s.unsure += used
+			s.held += prev
+		} else {
+			s.used += used
+		}
 		s.mu.Unlock()
-		grant, _ = grantOf(up.body)
 		both(func(k *counters) { k.granted.Add(grant) })
 	}
 
@@ -307,6 +362,9 @@ func (r *runner) session(ctx context.Context, due time.Time, s *subscriber) {
 	s.used += used
 	s.sessions++
 	s.mu.Unlock()
+	if sec != nil {
+		sec.ok.Add(1)
+	}
 	if success && grant > 0 {
 		both(func(k *counters) { k.completed.Add(1) })
 	} else {
@@ -332,6 +390,8 @@ func (r *runner) drive(ctx context.Context) (measured time.Duration) {
 		now := time.Now()
 		if !r.measuring.Load() && !now.Before(warmEnd) {
 			measureFrom = now
+			r.start = now
+			r.tl = make([]second, int(r.c.Duration/time.Second)+2)
 			r.measuring.Store(true)
 		}
 		if !now.Before(end) || ctx.Err() != nil {
@@ -368,6 +428,11 @@ func (r *runner) drive(ctx context.Context) (measured time.Duration) {
 
 // engineRequests reads the gateway's own request counter, to cross-check what the client believes it sent.
 func engineRequests(ctx context.Context, admin string) (float64, error) {
+	return scrape(ctx, admin, "ocs_engine_requests_total")
+}
+
+// scrape reads one unlabelled counter from a service's /metrics.
+func scrape(ctx context.Context, admin, name string) (float64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(admin, "/")+"/metrics", nil)
 	if err != nil {
 		return 0, err
@@ -379,9 +444,9 @@ func engineRequests(ctx context.Context, admin string) (float64, error) {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	for _, line := range strings.Split(string(b), "\n") {
-		if v, ok := strings.CutPrefix(line, "ocs_engine_requests_total "); ok {
+		if v, ok := strings.CutPrefix(line, name+" "); ok {
 			return strconv.ParseFloat(strings.TrimSpace(v), 64)
 		}
 	}
-	return 0, errors.New("ocs_engine_requests_total not found")
+	return 0, errors.New(name + " not found")
 }
