@@ -64,7 +64,7 @@
 
   // ---- tabs ---------------------------------------------------------------
 
-  const tabs = [$('#tab-find'), $('#tab-create')];
+  const tabs = [$('#tab-find'), $('#tab-create'), $('#tab-approvals')];
   function showTab(tab) {
     for (const t of tabs) {
       const on = t === tab;
@@ -72,12 +72,15 @@
       t.tabIndex = on ? 0 : -1;
       $('#' + t.getAttribute('aria-controls')).hidden = !on;
     }
+    if (tab.id === 'tab-approvals') loadApprovals();
   }
   tabs.forEach((t, i) => {
     t.addEventListener('click', () => showTab(t));
     t.addEventListener('keydown', (ev) => {
       if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
-      const next = tabs[(i + (ev.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+      const visible = tabs.filter((x) => !x.hidden);
+      const at = visible.indexOf(t);
+      const next = visible[(at + (ev.key === 'ArrowRight' ? 1 : visible.length - 1)) % visible.length];
       showTab(next);
       next.focus();
     });
@@ -85,7 +88,7 @@
 
   // ---- meta (who am I, currency, offerings) -------------------------------
 
-  let meta = { currency: '', maxTopUp: 0, maxAdjust: 0, can: {}, offerings: [] };
+  let meta = { currency: '', maxTopUp: 0, maxAdjust: 0, can: {}, offerings: [], approvals: { enabled: false } };
 
   async function loadMeta() {
     try {
@@ -106,6 +109,9 @@
       ? 'Choosing an offering sets the price plan and creates its allowance buckets.'
       : 'No offerings are available: no catalog version is in effect.';
     if (meta.maxTopUp) $('#c-topup').setAttribute('placeholder', `minor units, up to ${meta.maxTopUp}`);
+    // Approvers get a tab for the requests that wait for a second person.
+    $('#tab-approvals').hidden = !(meta.approvals && meta.approvals.enabled && meta.can.approve);
+    if (!$('#tab-approvals').hidden) refreshApprovalCount();
   }
 
   // ---- formatting ---------------------------------------------------------
@@ -200,9 +206,17 @@
         attempts.delete(name);
         status.className = 'action-status error';
         status.textContent = `${rec.message || 'The request was refused.'} (${rec.outcome})`;
+      } else if (rec.state === 'pending_approval') {
+        // Nothing has happened yet: a second person has to approve it first.
+        attempts.delete(name);
+        const by = rec.approval && rec.approval.expiresAt ? ` It expires ${when(rec.approval.expiresAt)}.` : '';
+        flash = { cls: 'warn-text', text: `Submitted for approval, not applied yet. A different authorised person has to approve it (rule ${rec.approval ? rec.approval.rule : ''}).${by}` };
+        await viewByKey(currentKey);
+        refreshApprovalCount();
+        return;
       } else {
         attempts.delete(name);
-        flash = describe(rec);
+        flash = { cls: 'ok-text', text: describe(rec) };
         await viewByKey(currentKey);
         return;
       }
@@ -227,8 +241,11 @@
     currentKey = s.subscriberKey;
     const card = el('div', { class: 'card', id: 'manage' }, el('h2', { text: 'Manage' }));
     if (flash) {
-      card.append(el('p', { class: 'ok-text', id: 'action-flash', role: 'status', text: flash }));
+      card.append(el('p', { class: flash.cls, id: 'action-flash', role: 'status', text: flash.text }));
       flash = null;
+    }
+    if (meta.approvals && meta.approvals.enabled && (meta.can.adjustBalance || meta.can.changeLifecycle)) {
+      card.append(el('p', { class: 'hint', id: 'approval-hint', text: `Corrections and status changes that match the approval policy (${meta.approvals.policy}) wait for a second person before they are applied.` }));
     }
     const can = meta.can || {};
     const key = encodeURIComponent(s.subscriberKey);
@@ -352,6 +369,98 @@
     if (!any) card.append(el('p', { class: 'hint', text: 'Your certificate allows looking subscribers up only; it does not allow changes.' }));
     into.append(card);
   }
+
+  // ---- approvals ----------------------------------------------------------
+
+  async function refreshApprovalCount() {
+    try {
+      const res = await api('GET', '/v1/approvals');
+      const n = res.approvals.length;
+      $('#tab-approvals').textContent = n ? `Approvals (${n})` : 'Approvals';
+      return res.approvals;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  let approvalFlash = null;
+
+  async function loadApprovals() {
+    const host = $('#approvals-list');
+    const err = $('#approvals-error');
+    err.hidden = true;
+    let list;
+    try {
+      list = (await api('GET', '/v1/approvals')).approvals;
+    } catch (e) {
+      err.textContent = e.message;
+      err.hidden = false;
+      return;
+    }
+    $('#tab-approvals').textContent = list.length ? `Approvals (${list.length})` : 'Approvals';
+    host.replaceChildren();
+    if (approvalFlash) {
+      host.append(el('p', { class: approvalFlash.cls, id: 'approval-flash', role: 'status', text: approvalFlash.text }));
+      approvalFlash = null;
+    }
+    if (!list.length) {
+      host.append(el('p', { class: 'hint', id: 'approvals-empty', text: 'Nothing is waiting for approval.' }));
+      return;
+    }
+    for (const a of list) host.append(approvalCard(a));
+  }
+
+  function approvalCard(a) {
+    const mine = a.requestedBy === meta.principal;
+    const card = el('div', { class: 'card approval', 'data-id': a.commandId });
+    card.append(el('h3', { text: a.summary }));
+    const kv = el('dl', { class: 'kv' });
+    const add = (k, v) => { kv.append(el('dt', { text: k }), el('dd', { text: v })); };
+    add('Requested by', a.requestedBy);
+    add('Requested', when(a.requestedAt));
+    add('Expires', when(a.expiresAt));
+    add('Rule', a.rule);
+    add('Request id', a.commandId);
+    card.append(kv);
+    const status = el('p', { class: 'action-status hint', role: 'status', 'aria-live': 'polite' });
+    const approve = el('button', { class: 'primary', type: 'button', text: 'Approve', 'aria-label': `Approve: ${a.summary}` });
+    const why = el('input', { autocomplete: 'off', maxlength: '256', placeholder: 'why (optional)', 'aria-label': 'Reason for rejecting' });
+    const reject = el('button', { type: 'button', class: 'danger', text: mine ? 'Withdraw' : 'Reject', 'aria-label': `${mine ? 'Withdraw' : 'Reject'}: ${a.summary}` });
+    if (mine && !(meta.approvals && meta.approvals.allowSelf)) {
+      approve.disabled = true;
+      card.append(el('p', { class: 'hint self-note', text: 'You made this request: a different person has to approve it. You can withdraw it.' }));
+    }
+    const run = async (fn) => {
+      approve.disabled = reject.disabled = true;
+      status.className = 'action-status hint';
+      status.textContent = 'Working...';
+      try { await fn(); } catch (e) {
+        status.className = 'action-status error';
+        status.textContent = e.message;
+        approve.disabled = mine && !(meta.approvals && meta.approvals.allowSelf);
+        reject.disabled = false;
+      }
+    };
+    approve.addEventListener('click', () => run(async () => {
+      const acc = await api('POST', `/v1/commands/${encodeURIComponent(a.commandId)}/approve`);
+      const rec = await waitForOutcome(acc.commandId);
+      const text = !rec ? 'Approved and queued; it is still being applied.'
+        : rec.state === 'applied' ? 'Approved and applied.'
+        : rec.state === 'failed' ? `Approved, but it could not be applied: ${rec.message || rec.outcome}`
+        : 'Approved.';
+      approvalFlash = { cls: rec && rec.state === 'failed' ? 'error' : 'ok-text', text };
+      await loadApprovals();
+    }));
+    reject.addEventListener('click', () => run(async () => {
+      await api('POST', `/v1/commands/${encodeURIComponent(a.commandId)}/reject`, { reason: why.value.trim() });
+      approvalFlash = { cls: 'ok-text', text: mine ? 'Request withdrawn.' : 'Request rejected.' };
+      await loadApprovals();
+    }));
+    card.append(el('div', { class: 'row' }, el('label', { class: 'field grow' }, 'Reason for rejecting', why), approve, reject), status);
+    return card;
+  }
+
+  $('#approvals-refresh').addEventListener('click', loadApprovals);
 
   // ---- find ---------------------------------------------------------------
 
@@ -489,7 +598,7 @@
     let delay = 150;
     while (Date.now() < deadline) {
       const rec = await api('GET', `/v1/commands/${encodeURIComponent(commandId)}`);
-      if (rec.state === 'applied' || rec.state === 'failed') return rec;
+      if (['applied', 'failed', 'pending_approval', 'rejected', 'expired'].includes(rec.state)) return rec;
       await sleep(delay);
       delay = Math.min(delay * 1.5, 1000);
     }

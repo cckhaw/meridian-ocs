@@ -17,6 +17,7 @@
   <div class="tabs" role="tablist" aria-label="Console sections">
     <button role="tab" id="tab-find" aria-controls="panel-find" aria-selected="true">Find subscriber</button>
     <button role="tab" id="tab-create" aria-controls="panel-create" aria-selected="false" tabindex="-1">Create subscriber</button>
+    <button role="tab" id="tab-approvals" aria-controls="panel-approvals" aria-selected="false" tabindex="-1" hidden>Approvals</button>
   </div>
 
   <section id="panel-find" role="tabpanel" aria-labelledby="tab-find">
@@ -106,6 +107,15 @@
         <button type="button" id="retry" hidden>Retry</button>
       </div>
     </div>
+  </section>
+
+  <section id="panel-approvals" role="tabpanel" aria-labelledby="tab-approvals" hidden>
+    <div class="card">
+      <div class="row"><h2 class="grow">Waiting for approval</h2><button type="button" id="approvals-refresh">Refresh</button></div>
+      <p class="hint">Requests that need a second person. You can decide on requests made by someone else; you can only withdraw your own.</p>
+      <p class="error" id="approvals-error" role="alert" hidden></p>
+    </div>
+    <div id="approvals-list" aria-live="polite"></div>
   </section>
 </main>
 

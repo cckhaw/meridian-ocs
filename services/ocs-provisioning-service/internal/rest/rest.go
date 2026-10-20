@@ -61,6 +61,9 @@ func New(svc *service.Service, az *auth.Authorizer) *Handler {
 	h.mux.HandleFunc("POST /v1/subscribers/{key}/lifecycle", handle(h, command.ChangeLifecycle, true, fillLifecycle))
 	h.mux.HandleFunc("POST /v1/subscribers/{key}/offering", handle(h, command.AttachOffering, true, fillOffering))
 	h.mux.HandleFunc("GET /v1/commands/{id}", h.getCommand)
+	h.mux.HandleFunc("GET /v1/approvals", h.listApprovals)
+	h.mux.HandleFunc("POST /v1/commands/{id}/approve", h.approve)
+	h.mux.HandleFunc("POST /v1/commands/{id}/reject", h.reject)
 	h.mux.HandleFunc("GET /v1/subscribers/{key}", h.getSubscriber)
 	h.mux.HandleFunc("GET /v1/subscribers", h.findSubscriber)
 	h.mux.HandleFunc("GET /v1/meta", h.getMeta)
@@ -248,7 +251,11 @@ func handle[B any](h *Handler, typ command.Type, hasBody bool, fill func(*http.R
 			return
 		}
 		w.Header().Set("Location", "/v1/commands/"+acc.CommandID)
-		writeJSON(w, http.StatusAccepted, map[string]any{"commandId": acc.CommandID, "state": acc.State, "duplicate": acc.Duplicate})
+		out := map[string]any{"commandId": acc.CommandID, "state": acc.State, "duplicate": acc.Duplicate}
+		if acc.State == status.PendingApproval {
+			out["approval"] = map[string]any{"required": true, "rule": acc.Rule, "expiresAt": acc.ExpiresAt.UTC().Format(time.RFC3339)}
+		}
+		writeJSON(w, http.StatusAccepted, out)
 	}
 }
 
@@ -289,7 +296,19 @@ func (h *Handler) getCommand(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]any{"commandId": rec.ID, "type": rec.Type, "subscriberKey": rec.Key, "state": rec.State,
 		"acceptedAt": rec.AcceptedAt.UTC().Format(time.RFC3339Nano)}
-	if rec.Final() {
+	if rec.Rule != "" { // the command needed a second person
+		ap := map[string]any{"rule": rec.Rule, "requestedBy": rec.RequestedBy}
+		switch {
+		case rec.ApprovedBy != "":
+			ap["approvedBy"], ap["approvedAt"] = rec.ApprovedBy, rec.ApprovedAt.UTC().Format(time.RFC3339)
+		case rec.RejectedBy != "":
+			ap["rejectedBy"], ap["reason"] = rec.RejectedBy, rec.RejectReason
+		case !rec.ExpiresAt.IsZero():
+			ap["expiresAt"] = rec.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+		out["approval"] = ap
+	}
+	if rec.State == status.Applied || rec.State == status.Failed {
 		out["outcome"], out["version"] = rec.Outcome, rec.Version
 		out["completedAt"] = rec.CompletedAt.UTC().Format(time.RFC3339Nano)
 		if rec.Message != "" {
@@ -412,8 +431,85 @@ func (h *Handler) getMeta(w http.ResponseWriter, r *http.Request) {
 	} {
 		can[name] = h.az.Allow(principal, typ) == nil
 	}
+	can["approve"] = h.az.CanApprove(principal) == nil
+	ap := h.svc.Approval()
 	writeJSON(w, http.StatusOK, map[string]any{"principal": principal, "currency": m.Currency, "maxTopUp": m.MaxTopUp,
-		"maxAdjust": h.svc.Limits().MaxAdjust, "can": can, "catalogVersion": m.CatalogVersion, "offerings": offerings})
+		"maxAdjust": h.svc.Limits().MaxAdjust, "can": can, "catalogVersion": m.CatalogVersion, "offerings": offerings,
+		"approvals": map[string]any{"enabled": ap.Enabled, "policy": ap.Policy, "ttlSeconds": int64(ap.TTL.Seconds()), "allowSelf": ap.AllowSelf}})
+}
+
+// ---- approvals -------------------------------------------------------------
+
+type rejectBody struct {
+	Reason string `json:"reason"`
+}
+
+func (h *Handler) listApprovals(w http.ResponseWriter, r *http.Request) {
+	if err := h.az.CanApprove(h.principal(r)); err != nil {
+		fail(w, err)
+		return
+	}
+	list, err := h.svc.PendingApprovals(r.Context(), 100)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	out := make([]map[string]any, 0, len(list))
+	for _, p := range list {
+		item := map[string]any{"commandId": p.CommandID, "type": p.Type, "subscriberKey": p.Key, "requestedBy": p.RequestedBy,
+			"requestedAt": p.RequestedAt.UTC().Format(time.RFC3339), "expiresAt": p.ExpiresAt.UTC().Format(time.RFC3339),
+			"rule": p.Rule, "summary": p.Summary}
+		if p.BucketID != "" {
+			item["bucketId"] = p.BucketID
+		}
+		if p.Amount != 0 {
+			item["amount"] = p.Amount
+		}
+		if p.Currency != "" {
+			item["currency"] = p.Currency
+		}
+		if p.Reason != "" {
+			item["reason"] = p.Reason
+		}
+		if p.Target != "" {
+			item["target"] = p.Target
+		}
+		out = append(out, item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"approvals": out})
+}
+
+func (h *Handler) approve(w http.ResponseWriter, r *http.Request) {
+	principal := h.principal(r)
+	if err := h.az.CanApprove(principal); err != nil {
+		fail(w, err)
+		return
+	}
+	acc, err := h.svc.Approve(r.Context(), r.PathValue("id"), principal)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	w.Header().Set("Location", "/v1/commands/"+acc.CommandID)
+	writeJSON(w, http.StatusOK, map[string]any{"commandId": acc.CommandID, "state": acc.State})
+}
+
+func (h *Handler) reject(w http.ResponseWriter, r *http.Request) {
+	principal := h.principal(r)
+	if err := h.az.CanApprove(principal); err != nil {
+		fail(w, err)
+		return
+	}
+	var body rejectBody
+	if err := decode(w, r, &body); err != nil {
+		fail(w, err)
+		return
+	}
+	if err := h.svc.Reject(r.Context(), r.PathValue("id"), principal, body.Reason); err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"commandId": r.PathValue("id"), "state": status.Rejected})
 }
 
 // ---- responses -------------------------------------------------------------
@@ -443,6 +539,12 @@ func fail(w http.ResponseWriter, err error) {
 		status, code, msg = http.StatusForbidden, "forbidden", "this client may not perform this operation"
 	case errors.Is(err, service.ErrNotFound):
 		status, code, msg = http.StatusNotFound, "not_found", "not found"
+	case errors.Is(err, service.ErrSelfApproval):
+		status, code, msg = http.StatusForbidden, "self_approval", "a request cannot be approved by the person who made it"
+	case errors.Is(err, service.ErrNotPending):
+		status, code, msg = http.StatusConflict, "not_pending", "the request is not waiting for approval (it was decided already, or it never needed one)"
+	case errors.Is(err, service.ErrApprovalExpired):
+		status, code, msg = http.StatusConflict, "approval_expired", "nobody approved the request in time; make it again"
 	case errors.Is(err, service.ErrIdempotencyConflict):
 		status, code, msg = http.StatusConflict, "idempotency_conflict", "this Idempotency-Key was already used for a different request"
 	case errors.Is(err, service.ErrNoCatalog):

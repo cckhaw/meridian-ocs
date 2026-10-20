@@ -119,3 +119,33 @@ tests:
         values: '0+600x30'
     alert_rule_test:
       - {eval_time: 25m, alertname: OcsChargingLatencyHigh, exp_alerts: []}
+
+  - name: a request waiting too long for approval
+    interval: 1m
+    input_series:
+      - series: 'ocs_prov_approvals_oldest_age_seconds{pod="p0"}'
+        values: '0+600x40'     # ages by ten minutes a minute: crosses 4 hours (14400 s) after 24 minutes
+    alert_rule_test:
+      - {eval_time: 10m, alertname: OcsApprovalWaiting, exp_alerts: []}
+      - eval_time: 35m
+        alertname: OcsApprovalWaiting
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "A provisioning request has waited a long time for approval"
+              description: "A privileged change (balance correction, bucket removal or termination) has been waiting for a second person for more than 4 hours. It expires if nobody decides."
+
+  - name: an attempt to approve one's own request
+    interval: 1m
+    input_series:
+      - series: 'ocs_prov_approvals_total{result="refused_self",pod="p0"}'
+        values: '0 0 0 1 1 1 1 1'
+    alert_rule_test:
+      - {eval_time: 2m, alertname: OcsSelfApprovalAttempted, exp_alerts: []}
+      - eval_time: 5m
+        alertname: OcsSelfApprovalAttempted
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Someone tried to approve their own request"
+              description: "The attempt was refused. Look for a shared certificate or a person using two identities."

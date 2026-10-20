@@ -65,6 +65,11 @@ ROWS = [
             ('histogram_quantile(0.99, sum by (le) (rate(ocs_prov_command_lag_seconds_bucket[$__rate_interval])))', "P99")],
          30, "A growing lag means the workers are behind."),
         ("API requests", "reqps", [('sum by (code) (rate(ocs_prov_http_requests_total[$__rate_interval]))', "{{code}}")], None, "By status class."),
+        ("Waiting for approval", "short", [
+            ('max(ocs_prov_approvals_pending)', "requests waiting"),
+            ('max(ocs_prov_approvals_oldest_age_seconds) / 3600', "oldest, hours")],
+         4, "Privileged changes held for a second person."),
+        ("Approval decisions", "ops", [('sum by (result) (rate(ocs_prov_approvals_total[$__rate_interval]))', "{{result}}")], None, "requested, approved, declined, and refusals (self-approval, expired, not pending)."),
         ("Worker retries", "ops", [('sum(rate(ocs_prov_worker_retries_total[$__rate_interval]))', "retries")], None, "Infrastructure failures while applying."),
     ]),
     ("Mediation", [

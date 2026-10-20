@@ -31,6 +31,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/approval"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/bus"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/command"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/status"
@@ -48,6 +49,12 @@ type Config struct {
 	Logf       func(format string, args ...any)
 	// Lag, when set, observes the time from acceptance to a recorded outcome.
 	Lag interface{ Observe(time.Duration) }
+	// Policy is enforced a second time here, as defence in depth: a command that the policy says
+	// needs approval is applied only if it carries an approval by someone other than its requester,
+	// whatever put it on the topic. (It cannot stop a writer who can forge the approval field; it
+	// stops an API bug or a message that skipped the approval step.)
+	Policy            approval.Policy
+	AllowSelfApproval bool
 }
 
 func (c *Config) setDefaults() {
@@ -241,6 +248,18 @@ func (w *Worker) process(ctx context.Context, rec *kgo.Record) {
 		w.finish(ctx, c, Outcome{State: status.Failed, Code: "invalid", Message: err.Error()})
 		return
 	}
+	if need, rule := w.cfg.Policy.Required(c); need {
+		switch {
+		case c.ApprovedBy == "":
+			w.finish(ctx, c, Outcome{State: status.Failed, Code: "approval_required",
+				Message: "this command needs a second person's approval (rule " + rule + ") and carries none"})
+			return
+		case c.ApprovedBy == c.Principal && !w.cfg.AllowSelfApproval:
+			w.finish(ctx, c, Outcome{State: status.Failed, Code: "self_approval",
+				Message: "the approver is the person who made the request"})
+			return
+		}
+	}
 	var out Outcome
 	if err := w.retry(ctx, "apply "+c.ID, func(ctx context.Context) error {
 		var e error
@@ -265,7 +284,7 @@ func (w *Worker) finish(ctx context.Context, c *command.Command, out Outcome) {
 	}) != nil {
 		return
 	}
-	raw, err := eventFor(c, out).encode()
+	raw, err := eventFor(c, out).Encode()
 	if err != nil {
 		w.cfg.Logf("worker: encode event for %s: %v", c.ID, err)
 		return

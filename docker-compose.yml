@@ -159,6 +159,11 @@ services:
       OCS_PROVISIONING_AUTH: "off"
       OCS_PROV_REST_ADDR: ":8443"
       OCS_PROV_GRPC_ADDR: ":9443"
+      # Two-person approval: large corrections and terminations wait for approval. With authentication
+      # off everyone is "anonymous", so self-approval is allowed here to let you try the flow in the console
+      # (Approvals tab); with mutual TLS it is refused and a different person must approve.
+      OCS_PROV_APPROVAL: "adjust_balance>1000,change_lifecycle:terminated"
+      OCS_PROV_APPROVAL_SELF: "true"
     ports: ["127.0.0.1:8443:8443", "127.0.0.1:9443:9443", "127.0.0.1:9081:8080"]
     volumes: *certs-ro
     depends_on:

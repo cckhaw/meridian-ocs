@@ -8,6 +8,21 @@
 {{- if not (or $p.clients $p.privileged) }}{{ fail "provisioning.auth=mtls needs provisioning.clients and/or provisioning.privileged: with neither, every client of the CA could change subscribers" }}{{ end }}
 {{- else if or $p.clients $p.privileged }}{{ fail "provisioning.clients/privileged have no effect with auth=off: refusing a configuration that looks restricted but is not" }}
 {{- end }}
+{{- $ap := $p.approval }}
+{{- if not $ap.policy }}{{ fail "provisioning.approval.policy is required: \"off\", or the rules that need a second person's approval, for example adjust_balance>5000,change_lifecycle:terminated,remove_bucket" }}{{ end }}
+{{- if ne $ap.policy "off" }}
+{{- range (splitList "," $ap.policy) }}
+{{- if not (regexMatch "^ *(adjust_balance(>[0-9]+)?|change_lifecycle(:(active|grace|suspended|terminated)(\\|(active|grace|suspended|terminated))*)?|remove_bucket) *$" .) }}{{ fail (printf "provisioning.approval.policy: unknown rule %q (want adjust_balance[>N], change_lifecycle[:state|state], remove_bucket)" .) }}{{ end }}
+{{- end }}
+{{- if eq $auth "mtls" }}
+{{- if lt (len (uniq (concat ($p.privileged | default list) ($ap.approvers | default list)))) 2 }}{{ fail "provisioning.approval needs at least two different callers who can approve (provisioning.privileged and provisioning.approval.approvers together): otherwise nobody could ever approve a request" }}{{ end }}
+{{- else if not $ap.allowSelf }}{{ fail "provisioning.approval with provisioning.auth=off: every caller is the same person, so nobody could approve a request; set provisioning.approval.allowSelf=true to try the flow in development" }}
+{{- end }}
+{{- else }}
+{{- if or $ap.approvers $ap.allowSelf }}{{ fail "provisioning.approval.approvers and allowSelf have no effect with policy \"off\": refusing a configuration that looks restricted but is not" }}{{ end }}
+{{- end }}
+{{- if and $ap.allowSelf (eq $auth "mtls") }}{{ fail "provisioning.approval.allowSelf is refused with provisioning.auth=mtls: it would let one person approve their own request" }}{{ end }}
+{{- if and $ap.approvers (eq $auth "off") }}{{ fail "provisioning.approval.approvers has no effect with provisioning.auth=off" }}{{ end }}
 {{- $vols := list }}{{- $mounts := list }}
 {{- if eq $auth "mtls" }}
 {{- $vols = append $vols (dict "name" "tls" "secret" (dict "secretName" $p.tls.secretName "defaultMode" 288)) }}

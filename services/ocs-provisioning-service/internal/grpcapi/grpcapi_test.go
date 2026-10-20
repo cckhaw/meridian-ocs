@@ -33,7 +33,10 @@ type capturingProducer struct {
 	cmds []*command.Command
 }
 
-func (p *capturingProducer) Produce(_ context.Context, _, _ string, value []byte, _ map[string]string) error {
+func (p *capturingProducer) Produce(_ context.Context, topic, _ string, value []byte, _ map[string]string) error {
+	if topic != "ocs.provisioning.commands" {
+		return nil // the approval trail on the events topic is not a command
+	}
 	c, err := command.Decode(value)
 	if err != nil {
 		return err
@@ -67,9 +70,15 @@ var lim = command.Limits{Currency: "EUR", MaxTopUp: 100_000, MaxAdjust: 5_000}
 // newRig serves over mutual TLS when pki is true, plaintext otherwise.
 func newRig(t *testing.T, az *auth.Authorizer, mtls bool) *rig {
 	t.Helper()
+	return newRigWith(t, az, mtls, service.Config{})
+}
+
+func newRigWith(t *testing.T, az *auth.Authorizer, mtls bool, extra service.Config) *rig {
+	t.Helper()
 	rdb := redistest.Start(t)
 	g := &rig{prod: &capturingProducer{}, st: cmdstatus.New(rdb, "", 0), data: datalayer.New(rdb), rdb: rdb}
-	svc := service.New(service.Config{Limits: lim, Catalog: testCatalog(t), Directory: identity.NewRedisDirectory(rdb, "")}, g.st, g.prod, g.data)
+	extra.Limits, extra.Catalog, extra.Directory = lim, testCatalog(t), identity.NewRedisDirectory(rdb, "")
+	svc := service.New(extra, g.st, g.prod, g.data)
 	var opts []grpc.ServerOption
 	if mtls {
 		g.pki = tlstest.New(t)

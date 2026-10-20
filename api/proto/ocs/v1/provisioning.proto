@@ -33,6 +33,12 @@ service ProvisioningService {
   rpc GetSubscriber(GetSubscriberRequest) returns (Subscriber);
   // Look a subscriber up by one of its identifiers (MSISDN, IMSI or NAI).
   rpc FindSubscriber(FindSubscriberRequest) returns (Subscriber);
+
+  // Approval of privileged commands (when OCS_PROV_APPROVAL holds some back). Callers must be
+  // privileged or named approvers. The approver must differ from the requester.
+  rpc ListApprovals(ListApprovalsRequest) returns (ListApprovalsResponse);
+  rpc ApproveCommand(ApproveCommandRequest) returns (CommandAccepted);
+  rpc RejectCommand(RejectCommandRequest) returns (CommandAccepted);
 }
 
 enum PaymentType {
@@ -68,6 +74,10 @@ enum CommandState {
   COMMAND_STATE_ACCEPTED = 1;  // queued, not yet applied
   COMMAND_STATE_APPLIED = 2;
   COMMAND_STATE_FAILED = 3;    // a final business failure, see CommandStatus.outcome
+  // Approval (OCS_PROV_APPROVAL): a privileged command the policy holds back waits for a second person.
+  COMMAND_STATE_PENDING_APPROVAL = 4;  // nothing has been queued; see CommandStatus.approval
+  COMMAND_STATE_REJECTED = 5;          // declined; it will never be applied
+  COMMAND_STATE_EXPIRED = 6;           // nobody approved it in time; it will never be applied
 }
 
 message Identifier {
@@ -160,6 +170,50 @@ message CommandAccepted {
   string command_id = 1;         // equals the idempotency key
   CommandState state = 2;        // the current state, which may already be final for a repeat
   bool duplicate = 3;            // true when this call repeated an earlier one
+  Approval approval = 4;         // set when the command is waiting for approval
+}
+
+// Approval is what is known about a command that needed a second person.
+message Approval {
+  string rule = 1;               // the policy rule that required it
+  string requested_by = 2;
+  string approved_by = 3;
+  google.protobuf.Timestamp approved_at = 4;
+  string rejected_by = 5;
+  string reject_reason = 6;
+  google.protobuf.Timestamp expires_at = 7;  // while waiting
+}
+
+message ListApprovalsRequest {}
+
+message ListApprovalsResponse {
+  repeated PendingApproval approvals = 1;    // oldest first
+}
+
+// PendingApproval is a request waiting for a decision, with what an approver needs to decide.
+message PendingApproval {
+  string command_id = 1;
+  string type = 2;
+  string subscriber_key = 3;
+  string requested_by = 4;
+  google.protobuf.Timestamp requested_at = 5;
+  google.protobuf.Timestamp expires_at = 6;
+  string rule = 7;
+  string summary = 8;            // what will happen, in words
+  string bucket_id = 9;
+  int64 amount = 10;
+  string currency = 11;
+  string reason = 12;
+  string target = 13;
+}
+
+message ApproveCommandRequest {
+  string command_id = 1;
+}
+
+message RejectCommandRequest {
+  string command_id = 1;
+  string reason = 2;             // at most 256 characters
 }
 
 message CommandStatus {
@@ -182,6 +236,7 @@ message CommandStatus {
   google.protobuf.Timestamp completed_at = 13;
   string from_offering = 14;     // attach_offering: the previous offering (empty if none)
   string to_offering = 15;       // attach_offering: the new offering
+  Approval approval = 16;        // set for a command that needed a second person
 }
 
 message Bucket {

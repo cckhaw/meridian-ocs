@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"time"
+
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/telemetry"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/command"
@@ -43,6 +46,47 @@ func (a *App) registerAPIMetrics(svc *service.Service) {
 		t := t
 		reg.CounterFunc("ocs_prov_accepted_by_type_total", "Accepted commands by type.", telemetry.Labels{"type": string(t)},
 			func() float64 { return f(svc.Stats().ByType[t]) })
+	}
+}
+
+// registerApprovalMetrics exposes what happened to requests that needed a second
+// person, and how many wait now (read from Redis every 30 s, not at scrape time).
+func (a *App) registerApprovalMetrics(svc *service.Service) {
+	reg := a.reg
+	for name, get := range map[string]func(service.ApprovalStats) uint64{
+		"requested":           func(s service.ApprovalStats) uint64 { return s.Requested },
+		"approved":            func(s service.ApprovalStats) uint64 { return s.Approved },
+		"declined":            func(s service.ApprovalStats) uint64 { return s.Declined },
+		"refused_self":        func(s service.ApprovalStats) uint64 { return s.RefusedSelf },
+		"refused_expired":     func(s service.ApprovalStats) uint64 { return s.RefusedExpired },
+		"refused_not_pending": func(s service.ApprovalStats) uint64 { return s.RefusedNotPending },
+	} {
+		get := get
+		reg.CounterFunc("ocs_prov_approvals_total", "Approval requests and decisions by result.", telemetry.Labels{"result": name},
+			func() float64 { return f(get(svc.ApprovalStats())) })
+	}
+	reg.CounterFunc("ocs_prov_approval_event_errors_total", "Approval trail events that could not be published.", nil,
+		func() float64 { return f(svc.ApprovalStats().EventErrors) })
+	reg.GaugeFunc("ocs_prov_approvals_pending", "Requests waiting for a second person's approval.", nil,
+		func() float64 { return float64(a.pending.Load()) })
+	reg.GaugeFunc("ocs_prov_approvals_oldest_age_seconds", "How long the oldest waiting request has waited.", nil,
+		func() float64 { return float64(a.pendingOldest.Load()) })
+}
+
+// refreshPending keeps the pending-approval gauges current.
+func (a *App) refreshPending(ctx context.Context, svc *service.Service) {
+	tick := time.NewTicker(30 * time.Second)
+	defer tick.Stop()
+	for {
+		if n, age, err := svc.PendingStats(ctx); err == nil {
+			a.pending.Store(n)
+			a.pendingOldest.Store(int64(age.Seconds()))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
 	}
 }
 

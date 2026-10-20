@@ -34,6 +34,7 @@ type Authorizer struct {
 	off        bool
 	standard   map[string]struct{}
 	privileged map[string]struct{}
+	approvers  map[string]struct{}
 }
 
 // Off returns an Authorizer that lets everyone do everything. For development
@@ -52,6 +53,49 @@ func New(standard, privileged []string) *Authorizer {
 		a.privileged[s] = struct{}{}
 	}
 	return a
+}
+
+// WithApprovers names callers who may approve and reject requests that need a
+// second person without being allowed to make privileged requests themselves
+// (a risk or finance team, for example). Privileged callers may always approve.
+func (a *Authorizer) WithApprovers(names []string) *Authorizer {
+	cp := *a
+	cp.approvers = map[string]struct{}{}
+	for _, n := range names {
+		cp.approvers[n] = struct{}{}
+	}
+	return &cp
+}
+
+// CanApprove checks that the caller may approve, reject and list requests that
+// wait for a second person. The rule that the approver must differ from the
+// requester is enforced where the decision is recorded (package status).
+func (a *Authorizer) CanApprove(principal string) error {
+	if a.off {
+		return nil
+	}
+	if principal == "" {
+		return ErrUnauthenticated
+	}
+	if _, ok := a.privileged[principal]; ok {
+		return nil
+	}
+	if _, ok := a.approvers[principal]; ok {
+		return nil
+	}
+	return ErrForbidden
+}
+
+// Identities counts the distinct callers who can approve (privileged callers and named approvers).
+func (a *Authorizer) Identities() int {
+	seen := map[string]struct{}{}
+	for k := range a.privileged {
+		seen[k] = struct{}{}
+	}
+	for k := range a.approvers {
+		seen[k] = struct{}{}
+	}
+	return len(seen)
 }
 
 // Principal normalises the caller identity: with authentication off everyone
@@ -82,6 +126,9 @@ func (a *Authorizer) Read(principal string) error {
 		return nil
 	}
 	if _, ok := a.privileged[principal]; ok {
+		return nil
+	}
+	if _, ok := a.approvers[principal]; ok { // they have to see what they are asked to decide on
 		return nil
 	}
 	return ErrForbidden

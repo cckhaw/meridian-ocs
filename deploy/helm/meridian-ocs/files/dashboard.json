@@ -967,8 +967,8 @@
   {
    "id": 20,
    "type": "timeseries",
-   "title": "Worker retries",
-   "description": "Infrastructure failures while applying.",
+   "title": "Waiting for approval",
+   "description": "Privileged changes held for a second person.",
    "datasource": {
     "type": "prometheus",
     "uid": "${datasource}"
@@ -978,6 +978,125 @@
     "w": 8,
     "x": 8,
     "y": 52
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "spanNulls": false,
+      "thresholdsStyle": {
+       "mode": "line"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 4
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max(ocs_prov_approvals_pending)",
+     "legendFormat": "requests waiting",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "max(ocs_prov_approvals_oldest_age_seconds) / 3600",
+     "legendFormat": "oldest, hours",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     }
+    }
+   ]
+  },
+  {
+   "id": 21,
+   "type": "timeseries",
+   "title": "Approval decisions",
+   "description": "requested, approved, declined, and refusals (self-approval, expired, not pending).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 52
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "spanNulls": false
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (result) (rate(ocs_prov_approvals_total[$__rate_interval]))",
+     "legendFormat": "{{result}}",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     }
+    }
+   ]
+  },
+  {
+   "id": 22,
+   "type": "timeseries",
+   "title": "Worker retries",
+   "description": "Infrastructure failures while applying.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 60
    },
    "fieldConfig": {
     "defaults": {
@@ -1012,7 +1131,7 @@
    ]
   },
   {
-   "id": 21,
+   "id": 23,
    "type": "row",
    "title": "Mediation",
    "collapsed": false,
@@ -1020,12 +1139,12 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 60
+    "y": 68
    },
    "panels": []
   },
   {
-   "id": 22,
+   "id": 24,
    "type": "timeseries",
    "title": "Records by outcome",
    "description": "received, output, suspense, rejected, duplicate, unrated.",
@@ -1037,7 +1156,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 61
+    "y": 69
    },
    "fieldConfig": {
     "defaults": {
@@ -1072,7 +1191,7 @@
    ]
   },
   {
-   "id": 23,
+   "id": 25,
    "type": "timeseries",
    "title": "Units committed",
    "description": "Files and partition slices.",
@@ -1084,7 +1203,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 61
+    "y": 69
    },
    "fieldConfig": {
     "defaults": {
@@ -1128,7 +1247,7 @@
    ]
   },
   {
-   "id": 24,
+   "id": 26,
    "type": "timeseries",
    "title": "Mapping reloads",
    "description": "A rejected mapping leaves the previous one in force.",
@@ -1140,7 +1259,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 61
+    "y": 69
    },
    "fieldConfig": {
     "defaults": {
@@ -1184,7 +1303,7 @@
    ]
   },
   {
-   "id": 25,
+   "id": 27,
    "type": "row",
    "title": "Process",
    "collapsed": false,
@@ -1192,12 +1311,12 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 69
+    "y": 77
    },
    "panels": []
   },
   {
-   "id": 26,
+   "id": 28,
    "type": "timeseries",
    "title": "Goroutines",
    "description": "",
@@ -1209,7 +1328,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 70
+    "y": 78
    },
    "fieldConfig": {
     "defaults": {
@@ -1244,7 +1363,7 @@
    ]
   },
   {
-   "id": 27,
+   "id": 29,
    "type": "timeseries",
    "title": "Heap in use",
    "description": "",
@@ -1256,7 +1375,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 70
+    "y": 78
    },
    "fieldConfig": {
     "defaults": {
@@ -1291,7 +1410,7 @@
    ]
   },
   {
-   "id": 28,
+   "id": 30,
    "type": "timeseries",
    "title": "GC pause time",
    "description": "Seconds of stop-the-world pause per second.",
@@ -1303,7 +1422,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 70
+    "y": 78
    },
    "fieldConfig": {
     "defaults": {

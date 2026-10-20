@@ -30,11 +30,14 @@ type capturingProducer struct {
 	err  error
 }
 
-func (p *capturingProducer) Produce(_ context.Context, _, key string, value []byte, _ map[string]string) error {
+func (p *capturingProducer) Produce(_ context.Context, topic, key string, value []byte, _ map[string]string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.err != nil {
 		return p.err
+	}
+	if topic != "ocs.provisioning.commands" {
+		return nil // the audit trail on the events topic is not a command
 	}
 	c, err := command.Decode(value)
 	if err != nil {
@@ -70,12 +73,19 @@ var lim = command.Limits{Currency: "EUR", MaxTopUp: 100_000, MaxAdjust: 5_000}
 
 func newRig(t *testing.T, az *auth.Authorizer) *rig {
 	t.Helper()
+	return newRigWith(t, az, service.Config{})
+}
+
+// newRigWith builds a rig around a service with extra configuration (an approval policy, for example).
+func newRigWith(t *testing.T, az *auth.Authorizer, extra service.Config) *rig {
+	t.Helper()
 	rdb := redistest.Start(t)
 	st := status.New(rdb, "", 0)
 	prod := &capturingProducer{}
 	data := datalayer.New(rdb)
 	dir := identity.NewRedisDirectory(rdb, "")
-	svc := service.New(service.Config{Limits: lim, Catalog: testCatalog(t), Directory: dir}, st, prod, data)
+	extra.Limits, extra.Catalog, extra.Directory = lim, testCatalog(t), dir
+	svc := service.New(extra, st, prod, data)
 	return &rig{h: New(svc, az), prod: prod, st: st, data: data, dir: dir}
 }
 
