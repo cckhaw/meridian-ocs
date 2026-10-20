@@ -1,0 +1,197 @@
+# Meridian OCS. Redis and Kafka are NOT part of this chart: a charging system's
+# state store and bus are run by their own operators (or as managed services),
+# with the durability settings in docs/architecture/07-durability.md.
+#
+# Values marked REQUIRED have no default on purpose: the chart refuses to
+# render until you choose, the same way the services refuse to start. Nothing
+# secret belongs here; certificates and keys come from Kubernetes Secrets you
+# create (for example with cert-manager) and name below.
+
+image:
+  repository: ""        # REQUIRED, e.g. registry.example.com/meridian ; images are <repository>/<service>:<tag>
+  tag: ""               # REQUIRED, a release tag or "sha256:<digest>" (build: docker build -f build/Dockerfile --build-arg SERVICE=<service> .)
+  pullPolicy: IfNotPresent
+  pullSecrets: []       # [{name: regcred}]
+
+# Rendering any component with authentication "off" is refused unless this is
+# true. It exists for throwaway development clusters only.
+allowInsecure: false
+
+redis:
+  addr: ""              # REQUIRED, host:port of the primary the services should use (a Sentinel/operator Service)
+  requiredReplicas: 1   # replicas that must acknowledge every commit before the answer (OCS_REDIS_REPLICAS)
+  waitTimeout: 25ms
+  allowNoReplica: false # start without the required replicas; development only, needs allowInsecure
+identityPrefix: "id:"   # must be the same everywhere
+logLevel: info
+
+kafka:
+  brokers: ""           # comma separated host:port; REQUIRED by provisioning and by Kafka-fed mediation
+  commandsTopic: ""     # empty = the service's default
+  eventsTopic: ""
+  dlqTopic: ""
+
+# Applied to every pod unless a component overrides it.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile: {type: RuntimeDefault}
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: {drop: [ALL]}
+terminationGracePeriodSeconds: 30
+nodeSelector: {}
+tolerations: []
+podAnnotations: {}
+serviceAccount:
+  annotations: {}
+
+# Spread replicas over nodes and zones; a charging path must survive losing either.
+spread:
+  enabled: true
+  zoneKey: topology.kubernetes.io/zone
+  whenUnsatisfiable: ScheduleAnyway   # DoNotSchedule for strict placement
+
+networkPolicy:
+  enabled: false
+  # Peers (standard NetworkPolicyPeer objects) allowed to reach the services' own
+  # ports, and the Prometheus peers allowed to scrape the admin port. Both are
+  # REQUIRED when enabled: an empty list would silently cut every client off.
+  allowFrom: []
+  monitoringFrom: []
+  # Egress is not restricted by this chart (see README).
+
+serviceMonitor:
+  enabled: false        # needs the Prometheus Operator CRDs
+  interval: 15s
+  labels: {}
+
+gateway:
+  enabled: true
+  replicas: 3
+  resources:
+    requests: {cpu: "1", memory: 512Mi}
+    limits: {memory: 1Gi}    # no CPU limit: throttling shows up as latency on a charging path
+  maxTps: 0                  # admission rate limit for the whole pod, 0 = unlimited
+  maxInflight: 10000
+  tariff: static             # static | catalog
+  defaultPlan: ""            # REQUIRED when tariff=catalog
+  cashBytesRate: ""          # static tariff num/den; empty = the gateway's default
+  planCacheTTL: ""
+  region: r1
+  identity:
+    mode: directory          # directory | direct
+    cacheTTL: ""
+    onConflict: ""           # reject | prefer-first; empty = reject
+  diameter:
+    enabled: true
+    port: 3868
+    realm: ""                # REQUIRED when enabled, the Diameter realm
+    originHostSuffix: ""     # REQUIRED when enabled; each pod is <pod-name>.<suffix>, e.g. ocs.example.net
+    service:
+      type: ClusterIP        # LoadBalancer / NodePort for peers outside the cluster
+      annotations: {}
+      loadBalancerIP: ""
+      externalTrafficPolicy: ""
+  nchf:
+    enabled: true
+    port: 8000
+    oauth: ""                # REQUIRED: "required" or "off"
+    tls:
+      secretName: ""         # REQUIRED unless the mesh terminates TLS (then set tls.mesh=true)
+      mesh: false
+      requireClientCert: false   # mount ca.crt from the secret and demand client certificates
+    oauthKeys:
+      secretName: ""         # Secret with the NRF access-token signing certificate(s); REQUIRED with oauth=required
+      key: nrf.pem
+    audience: ""             # comma separated; empty = the gateway's default (CHF)
+    issuers: ""
+    scope: ""
+    nfInstanceId: ""
+    service:
+      type: ClusterIP
+      annotations: {}
+  control:                   # guarded AI Ops control plane (docs/architecture/11-aiops.md)
+    enabled: false
+    port: 9445
+    auth: ""                 # REQUIRED when enabled: mtls | off
+    tls: {secretName: ""}
+    agents: []               # certificate common names
+    approvers: []
+  autoscaling:
+    enabled: false
+    minReplicas: 3
+    maxReplicas: 12
+    targetCPUUtilizationPercentage: 60
+  pdb: {maxUnavailable: 1}
+
+provisioning:
+  enabled: true
+  auth: ""                   # REQUIRED: mtls | off
+  tls: {secretName: ""}      # Secret with tls.crt, tls.key and ca.crt (the client CA); REQUIRED with mtls
+  currency: ""               # REQUIRED, e.g. EUR
+  clients: []                # certificate common names of standard callers; empty = any client of the CA
+  privileged: []             # may adjust balances, remove buckets and change lifecycle state
+  maxTopUp: ""
+  maxAdjust: ""
+  workers: ""
+  restPort: 8443
+  grpcPort: 9443
+  split: true                # separate API and worker Deployments (OCS_PROV_MODE=api / worker)
+  api:
+    replicas: 2
+    resources: {requests: {cpu: 250m, memory: 256Mi}, limits: {memory: 512Mi}}
+    service: {type: ClusterIP, annotations: {}}
+  worker:
+    replicas: 2
+    resources: {requests: {cpu: 250m, memory: 256Mi}, limits: {memory: 512Mi}}
+  pdb: {maxUnavailable: 1}
+
+catalog:
+  enabled: true
+  auth: ""                   # REQUIRED: mtls | off
+  tls: {secretName: ""}
+  publishers: []             # certificate common names allowed to publish; REQUIRED with mtls
+  retain: ""
+  resync: ""
+  port: 8444
+  replicas: 2
+  resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 256Mi}}
+  service: {type: ClusterIP, annotations: {}}
+  pdb: {maxUnavailable: 1}
+
+mediation:
+  enabled: false
+  # One pod: the ledger that makes output exactly-once is per output directory.
+  resources: {requests: {cpu: 250m, memory: 256Mi}, limits: {memory: 1Gi}}
+  persistence:
+    size: 20Gi
+    storageClass: ""
+  input:
+    enabled: true            # watch /data/in for CDR files (mount it from your file transfer, or write to it through a sidecar)
+  kafka:
+    enabled: false           # consume normalized JSON CDRs; needs kafka.brokers
+    topic: ""
+    group: ""
+  scanInterval: ""
+  settle: ""
+  maxFileBytes: ""
+  dedupWindow: ""
+  rating: "off"              # off | catalog
+  defaultPlan: ""            # REQUIRED with rating=catalog
+  mapping: ""                # inline YAML/JSON mapping (pkg/mapping); hot-reloaded when the ConfigMap changes
+  mappingReload: ""
+  cdrMapping: ""             # inline JSON overriding the PGW BER field mapping
+
+aiops:
+  enabled: false
+  auth: ""                   # REQUIRED when enabled: mtls | off
+  tls: {secretName: ""}
+  port: 8445
+  replicas: 2
+  resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 128Mi}}
+  service: {type: ClusterIP, annotations: {}}
+  pdb: {maxUnavailable: 1}

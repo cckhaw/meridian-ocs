@@ -1,0 +1,78 @@
+# A production-shaped install: every listener authenticated, everything enabled.
+image: {repository: registry.example.com/meridian, tag: "0.1.0"}
+redis: {addr: redis-primary.data:6379}
+kafka: {brokers: "kafka-0.kafka:9092,kafka-1.kafka:9092"}
+networkPolicy:
+  enabled: true
+  allowFrom: [{namespaceSelector: {matchLabels: {role: network-functions}}}]
+  monitoringFrom: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}}]
+serviceMonitor: {enabled: true}
+gateway:
+  tariff: catalog
+  defaultPlan: std
+  diameter:
+    realm: example.net
+    originHostSuffix: ocs.example.net
+    service: {type: LoadBalancer, annotations: {metallb.universe.tf/address-pool: diameter}}
+  nchf:
+    oauth: required
+    tls: {secretName: nchf-tls, requireClientCert: true}
+    oauthKeys: {secretName: nrf-keys}
+  control:
+    enabled: true
+    auth: mtls
+    tls: {secretName: control-tls}
+    agents: [aiops-agent]
+    approvers: [noc-approver]
+  autoscaling: {enabled: true}
+provisioning:
+  auth: mtls
+  tls: {secretName: prov-tls}
+  currency: EUR
+  clients: [crm]
+  privileged: [care]
+catalog:
+  auth: mtls
+  tls: {secretName: catalog-tls}
+  publishers: [pricing]
+mediation:
+  enabled: true
+  kafka: {enabled: true}
+  rating: catalog
+  defaultPlan: std
+  mapping: |
+    # Example: translate a packet gateway's JSON export into the OCS normalized CDR.
+    # Drop a file like this into the mediation pipeline's mapping ConfigMap
+    # (OCS_MED_MAPPING); it is picked up without a restart. Test it first with
+    # POST /v1/mappings/test on ocs-aiops-layer.
+    version: 1
+    name: acme-pgw
+    description: Acme packet gateway JSON export -> normalized PGW record
+    rules:
+      - id: acme-pgw
+        match:
+          - path: $.recordType
+            in: ["pgw", "PGW"]
+          - path: $.subscriber.imsi
+            exists: true
+        output:
+          type: {const: PGW}
+          nodeId: {path: $.node.name, required: true}
+          chargingId: {path: $.chargingId, as: integer, required: true}
+          sequence: {path: $.recordSequence, as: integer, default: 0}
+          imsi: {path: $.subscriber.imsi}
+          msisdn: {path: $.subscriber.msisdn, strip: "+"}
+          apn: {path: $.apn, lower: true}
+          ratType: {path: $.rat, lookup: {"6": NR, "1": UTRAN, "2": GERAN, "6e": LTE}, default: unknown}
+          openTime: {path: $.openedAtMs, as: time_unix_ms, required: true}
+          durationSeconds: {path: $.durationMs, divide: 1000, as: integer, default: 0}
+          containers:
+            each: $.usage
+            item:
+              ratingGroup: {path: $.ratingGroup, as: integer}
+              uplink: {path: $.uplinkBytes, as: integer, default: 0}
+              downlink: {path: $.downlinkBytes, as: integer, default: 0}
+aiops:
+  enabled: true
+  auth: mtls
+  tls: {secretName: aiops-tls}

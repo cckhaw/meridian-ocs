@@ -29,3 +29,19 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Lint the protos and check the generated code is current
         run: make proto-check
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install helm and kubeconform (pinned, checksum-verified)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/helm.tgz https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz
+          echo "11400fecfc07fd6f034863e4e0c4c4445594673fd2a129e701fe41f31170cfa9  /tmp/helm.tgz" | sha256sum -c -
+          tar -xzf /tmp/helm.tgz -C /tmp
+          curl -fsSL -o /tmp/kc.tgz https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          echo "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73  /tmp/kc.tgz" | sha256sum -c -
+          mkdir -p /tmp/bin && tar -xzf /tmp/kc.tgz -C /tmp/bin kubeconform
+          echo "/tmp/linux-amd64" >> "$GITHUB_PATH"
+          echo "/tmp/bin" >> "$GITHUB_PATH"
+      - run: deploy/helm/test.sh

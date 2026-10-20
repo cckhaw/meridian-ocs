@@ -1,0 +1,46 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy }}
+{{- if not $np.allowFrom }}{{ fail "networkPolicy.allowFrom is required when networkPolicy.enabled: an empty list would cut every client off" }}{{ end }}
+{{- if not $np.monitoringFrom }}{{ fail "networkPolicy.monitoringFrom is required when networkPolicy.enabled (who may scrape the admin port)" }}{{ end }}
+# One policy for the release: ingress to the services' own ports only from
+# allowFrom, to the admin port only from monitoringFrom. Pods of the release
+# need no ingress from each other (they talk through Redis and Kafka).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app.kubernetes.io/part-of: meridian-ocs
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: meridian-ocs
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Ingress]
+  ingress:
+    - from: {{- toYaml $np.allowFrom | nindent 8 }}
+      ports:
+        {{- if and .Values.gateway.enabled .Values.gateway.diameter.enabled }}
+        - {protocol: TCP, port: {{ .Values.gateway.diameter.port }}}
+        {{- end }}
+        {{- if and .Values.gateway.enabled .Values.gateway.nchf.enabled }}
+        - {protocol: TCP, port: {{ .Values.gateway.nchf.port }}}
+        {{- end }}
+        {{- if and .Values.gateway.enabled .Values.gateway.control.enabled }}
+        - {protocol: TCP, port: {{ .Values.gateway.control.port }}}
+        {{- end }}
+        {{- if .Values.provisioning.enabled }}
+        - {protocol: TCP, port: {{ .Values.provisioning.restPort }}}
+        - {protocol: TCP, port: {{ .Values.provisioning.grpcPort }}}
+        {{- end }}
+        {{- if .Values.catalog.enabled }}
+        - {protocol: TCP, port: {{ .Values.catalog.port }}}
+        {{- end }}
+        {{- if .Values.aiops.enabled }}
+        - {protocol: TCP, port: {{ .Values.aiops.port }}}
+        {{- end }}
+    - from: {{- toYaml $np.monitoringFrom | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: 8080}
+{{- end }}

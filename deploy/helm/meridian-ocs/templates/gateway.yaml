@@ -1,0 +1,55 @@
+{{- if .Values.gateway.enabled }}
+{{- $g := .Values.gateway }}
+{{- $realm := required "gateway.diameter.realm is required (the gateway needs a Diameter identity even if Gy is off)" $g.diameter.realm }}
+{{- $suffix := required "gateway.diameter.originHostSuffix is required (each pod is <pod-name>.<suffix>)" $g.diameter.originHostSuffix }}
+{{- if not (has $g.tariff (list "static" "catalog")) }}{{ fail "gateway.tariff must be static or catalog" }}{{ end }}
+{{- if and (eq $g.tariff "catalog") (not $g.defaultPlan) }}{{ fail "gateway.tariff=catalog needs gateway.defaultPlan" }}{{ end }}
+{{- $oauth := "" }}
+{{- if $g.nchf.enabled }}
+{{- if not (has $g.nchf.oauth (list "required" "off")) }}{{ fail (printf "gateway.nchf.oauth must be \"required\" or \"off\" (got %q): the gateway will not start the Nchf listener until you choose" $g.nchf.oauth) }}{{ end }}
+{{- if and (eq $g.nchf.oauth "off") (not .Values.allowInsecure) }}{{ fail "gateway.nchf.oauth=off is refused unless allowInsecure=true (development clusters only)" }}{{ end }}
+{{- if and (eq $g.nchf.oauth "required") (not $g.nchf.oauthKeys.secretName) }}{{ fail "gateway.nchf.oauth=required needs gateway.nchf.oauthKeys.secretName (the NRF's token-signing certificate)" }}{{ end }}
+{{- if and (not $g.nchf.tls.secretName) (not $g.nchf.tls.mesh) (not .Values.allowInsecure) }}{{ fail "gateway.nchf needs gateway.nchf.tls.secretName, or tls.mesh=true when a service mesh terminates TLS: bearer tokens must not cross the network in clear" }}{{ end }}
+{{- if and $g.nchf.tls.requireClientCert (not $g.nchf.tls.secretName) }}{{ fail "gateway.nchf.tls.requireClientCert needs gateway.nchf.tls.secretName (ca.crt is read from it)" }}{{ end }}
+{{- $oauth = $g.nchf.oauth }}
+{{- end }}
+{{- if $g.control.enabled }}
+{{- $_ := include "ocs.auth" (dict "root" $ "what" "gateway.control.auth" "value" $g.control.auth) }}
+{{- if and (eq $g.control.auth "mtls") (not $g.control.tls.secretName) }}{{ fail "gateway.control.auth=mtls needs gateway.control.tls.secretName" }}{{ end }}
+{{- if and (eq $g.control.auth "mtls") (not (or $g.control.agents $g.control.approvers)) }}{{ fail "gateway.control.auth=mtls needs agents and/or approvers: nobody would be allowed in" }}{{ end }}
+{{- end }}
+{{- $env := include "gateway.env" . }}
+{{- $ports := list }}
+{{- if $g.diameter.enabled }}{{ $ports = append $ports (dict "name" "diameter" "port" $g.diameter.port) }}{{ end }}
+{{- if $g.nchf.enabled }}{{ $ports = append $ports (dict "name" "nchf" "port" $g.nchf.port) }}{{ end }}
+{{- if $g.control.enabled }}{{ $ports = append $ports (dict "name" "control" "port" $g.control.port) }}{{ end }}
+{{- $vols := list }}{{- $mounts := list }}
+{{- if and $g.nchf.enabled $g.nchf.tls.secretName }}
+{{- $vols = append $vols (dict "name" "nchf-tls" "secret" (dict "secretName" $g.nchf.tls.secretName "defaultMode" 288)) }}
+{{- $mounts = append $mounts (dict "name" "nchf-tls" "mountPath" "/tls/nchf" "readOnly" true) }}
+{{- end }}
+{{- if and $g.nchf.enabled (eq $g.nchf.oauth "required") }}
+{{- $vols = append $vols (dict "name" "nrf-keys" "secret" (dict "secretName" $g.nchf.oauthKeys.secretName "defaultMode" 288)) }}
+{{- $mounts = append $mounts (dict "name" "nrf-keys" "mountPath" "/oauth" "readOnly" true) }}
+{{- end }}
+{{- if and $g.control.enabled $g.control.tls.secretName }}
+{{- $vols = append $vols (dict "name" "control-tls" "secret" (dict "secretName" $g.control.tls.secretName "defaultMode" 288)) }}
+{{- $mounts = append $mounts (dict "name" "control-tls" "mountPath" "/tls/control" "readOnly" true) }}
+{{- end }}
+{{ include "ocs.component" (dict "root" . "name" "gateway" "service" "ocs-signaling-gateway" "kind" "Deployment"
+    "replicas" $g.replicas "resources" $g.resources "ports" $ports "env" $env
+    "volumes" (ternary (toYaml $vols) "" (gt (len $vols) 0)) "mounts" (ternary (toYaml $mounts) "" (gt (len $mounts) 0))
+    "pdb" $g.pdb "autoscaling" $g.autoscaling) }}
+{{- if $g.diameter.enabled }}
+---
+{{ include "ocs.service" (dict "root" . "name" "gateway" "suffix" "diameter" "svc" $g.diameter.service "ports" (list (dict "name" "diameter" "port" $g.diameter.port))) }}
+{{- end }}
+{{- if $g.nchf.enabled }}
+---
+{{ include "ocs.service" (dict "root" . "name" "gateway" "suffix" "nchf" "svc" $g.nchf.service "ports" (list (dict "name" "nchf" "port" $g.nchf.port))) }}
+{{- end }}
+{{- if $g.control.enabled }}
+---
+{{ include "ocs.service" (dict "root" . "name" "gateway" "suffix" "control" "svc" (dict "type" "ClusterIP") "ports" (list (dict "name" "control" "port" $g.control.port))) }}
+{{- end }}
+{{- end }}

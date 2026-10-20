@@ -1,0 +1,12 @@
+# A throwaway development install: no authentication, no replica requirement.
+allowInsecure: true
+image: {repository: localhost:5000/meridian, tag: dev}
+redis: {addr: redis:6379, requiredReplicas: 0, allowNoReplica: true}
+kafka: {brokers: kafka:9092}
+spread: {enabled: false}
+gateway:
+  replicas: 1
+  diameter: {realm: dev.local, originHostSuffix: ocs.dev.local}
+  nchf: {oauth: "off"}
+provisioning: {auth: "off", currency: EUR, split: false}
+catalog: {auth: "off"}

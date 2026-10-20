@@ -1,0 +1,32 @@
+{{- if .Values.provisioning.enabled }}
+{{- $p := .Values.provisioning }}
+{{- $auth := include "ocs.auth" (dict "root" . "what" "provisioning.auth" "value" $p.auth) }}
+{{- $_ := required "provisioning.currency is required (the deployment currency, e.g. EUR)" $p.currency }}
+{{- $_ := required "kafka.brokers is required by provisioning" .Values.kafka.brokers }}
+{{- if eq $auth "mtls" }}
+{{- if not $p.tls.secretName }}{{ fail "provisioning.auth=mtls needs provisioning.tls.secretName (tls.crt, tls.key and ca.crt, the client CA)" }}{{ end }}
+{{- if not (or $p.clients $p.privileged) }}{{ fail "provisioning.auth=mtls needs provisioning.clients and/or provisioning.privileged: with neither, every client of the CA could change subscribers" }}{{ end }}
+{{- else if or $p.clients $p.privileged }}{{ fail "provisioning.clients/privileged have no effect with auth=off: refusing a configuration that looks restricted but is not" }}
+{{- end }}
+{{- $vols := list }}{{- $mounts := list }}
+{{- if eq $auth "mtls" }}
+{{- $vols = append $vols (dict "name" "tls" "secret" (dict "secretName" $p.tls.secretName "defaultMode" 288)) }}
+{{- $mounts = append $mounts (dict "name" "tls" "mountPath" "/tls" "readOnly" true) }}
+{{- end }}
+{{- $roles := list }}
+{{- if $p.split }}{{ $roles = list (dict "name" "provisioning-api" "mode" "api" "cfg" $p.api) (dict "name" "provisioning-worker" "mode" "worker" "cfg" $p.worker) }}{{ else }}{{ $roles = list (dict "name" "provisioning" "mode" "all" "cfg" $p.api) }}{{ end }}
+{{- range $roles }}
+{{- $role := . }}
+{{- $ports := list }}
+{{- if ne $role.mode "worker" }}{{ $ports = list (dict "name" "rest" "port" $p.restPort) (dict "name" "grpc" "port" $p.grpcPort) }}{{ end }}
+{{- $env := include "provisioning.env" (dict "root" $ "mode" $role.mode) }}
+{{ include "ocs.component" (dict "root" $ "name" $role.name "service" "ocs-provisioning-service" "kind" "Deployment"
+    "replicas" $role.cfg.replicas "resources" $role.cfg.resources "ports" $ports "env" $env
+    "volumes" (ternary (toYaml $vols) "" (gt (len $vols) 0)) "mounts" (ternary (toYaml $mounts) "" (gt (len $mounts) 0))
+    "pdb" $p.pdb) }}
+{{- if ne $role.mode "worker" }}
+---
+{{ include "ocs.service" (dict "root" $ "name" $role.name "svc" $p.api.service "ports" (list (dict "name" "rest" "port" $p.restPort) (dict "name" "grpc" "port" $p.grpcPort))) }}
+{{- end }}
+{{- end }}
+{{- end }}
