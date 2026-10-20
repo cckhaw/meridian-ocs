@@ -36,7 +36,17 @@ type fakeSystem struct {
 	rel   atomic.Int64
 	upd   atomic.Int64
 	unset atomic.Int64 // terminates acknowledged without settling that the fake admits to
-	n     atomic.Int64
+	// the fake's reconciler (modes repaired, stuck, lost)
+	pend    []pendItem
+	settled atomic.Int64
+	unrec   atomic.Int64
+	scrapes atomic.Int64
+	n       atomic.Int64
+}
+
+type pendItem struct {
+	s    *fakeSession
+	used int64
 }
 
 type fakeSession struct {
@@ -195,10 +205,18 @@ func (f *fakeSystem) nchf() http.Handler {
 	mux.HandleFunc("POST /nchf-convergedcharging/v3/chargingdata/{ref}/release", func(w http.ResponseWriter, r *http.Request) {
 		f.reqs.Add(1)
 		_, _, used := parse(r)
-		if (f.mode == "unsettled" || f.mode == "unsettledsilent") && f.rel.Add(1)%5 == 0 {
+		if (f.mode == "unsettled" || f.mode == "unsettledsilent" || f.reconciler()) && f.rel.Add(1)%5 == 0 {
 			// Data tier down: the terminate is acknowledged but nothing is settled (the reservation stays).
-			if f.mode == "unsettled" {
+			if f.mode != "unsettledsilent" {
 				f.unset.Add(1)
+			}
+			switch f.mode {
+			case "repaired", "stuck":
+				f.mu.Lock()
+				f.pend = append(f.pend, pendItem{f.held[r.PathValue("ref")], used})
+				f.mu.Unlock()
+			case "lost":
+				f.unrec.Add(1)
 			}
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -216,9 +234,31 @@ func (f *fakeSystem) nchf() http.Handler {
 	return h2c.NewHandler(mux, &http2.Server{})
 }
 
+func (f *fakeSystem) reconciler() bool {
+	return f.mode == "repaired" || f.mode == "stuck" || f.mode == "lost"
+}
+
 func (f *fakeSystem) admin() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := f.scrapes.Add(1)
+		if f.mode == "repaired" && n >= 3 { // the reconciler catches up a moment after the load ends
+			f.mu.Lock()
+			for _, p := range f.pend {
+				f.bal[p.s.key] += p.s.held - p.used
+				p.s.held = 0
+				f.settled.Add(1)
+			}
+			f.pend = nil
+			f.mu.Unlock()
+		}
 		fmt.Fprintf(w, "# HELP x\nocs_engine_requests_total %d\nocs_engine_unsettled_terminates_total %d\n", f.reqs.Load(), f.unset.Load())
+		if f.reconciler() {
+			f.mu.Lock()
+			pending := len(f.pend)
+			f.mu.Unlock()
+			fmt.Fprintf(w, "ocs_engine_unsettled_recorded_total %d\nocs_engine_unsettled_unrecorded_total %d\nocs_unsettled_pending %d\nocs_unsettled_settled_total %d\nocs_unsettled_dead_total 0\n",
+				f.unset.Load()-f.unrec.Load(), f.unrec.Load(), pending, f.settled.Load())
+		}
 	})
 }
 
@@ -227,7 +267,7 @@ func testConfig(nchf, prov, admin string) config {
 		Nchf: nchf, Prov: prov, GatewayAdmin: admin,
 		Subscribers: 20, SeedConcurrency: 8, Offering: "gold-offer", Bucket: "data10g", RatingGroup: 100,
 		Rate: 400, Duration: time.Second, Warmup: 200 * time.Millisecond, Conns: 2, MaxInflight: 5000,
-		Timeout: 2 * time.Second, RequestSize: 1_000_000, UsedPercent: 80, Updates: 1, Seed: 7,
+		Timeout: 2 * time.Second, DrainTimeout: 2 * time.Second, RequestSize: 1_000_000, UsedPercent: 80, Updates: 1, Seed: 7,
 	}
 }
 
@@ -423,5 +463,36 @@ func TestRefusedUpdatesAreNotCountedAsSettled(t *testing.T) {
 	rp, out := exercise(t, newFake("deniedupdate"), nil)
 	if !rp.Pass || rp.Verification.Verdicts[verdictWithin] == 0 {
 		t.Fatalf("refused updates must widen the bounds, not break them:\n%s", out)
+	}
+}
+
+func TestUsageTheReconcilerChargedAfterwardsLeavesNoDeviation(t *testing.T) {
+	rp, out := exercise(t, newFake("repaired"), nil)
+	v := rp.Verification
+	if !rp.Pass || !v.Reconciler || v.Recorded == 0 || v.Settled != v.Recorded || v.StillPending != 0 || v.Lost != 0 || v.Budget != 0 {
+		t.Fatalf("a reconciler that charges everything must pass with a zero budget:\n%s", out)
+	}
+	if v.Verdicts[verdictOverspend]+v.Verdicts[verdictCreated]+v.Verdicts[verdictUnsettled] != 0 {
+		t.Fatalf("after the drain every balance must be inside the bounds, none outside:\n%s", out)
+	}
+	if !strings.Contains(out, "charged afterwards by its reconciler") {
+		t.Fatalf("the report must say what the reconciler did:\n%s", out)
+	}
+}
+
+func TestABacklogThatNeverDrainsFailsTheRun(t *testing.T) {
+	rp, out := exercise(t, newFake("stuck"), func(c *config) { c.DrainTimeout = time.Second })
+	if rp.Pass || rp.Verification.StillPending == 0 || !strings.Contains(out, "reconciler has not caught up") {
+		t.Fatalf("a reconciler that does not catch up must fail the run:\n%s", out)
+	}
+}
+
+func TestUsageTheGatewayCouldNotRecordFailsTheRun(t *testing.T) {
+	rp, out := exercise(t, newFake("lost"), nil)
+	if rp.Pass || rp.Verification.Lost == 0 || !strings.Contains(out, "could not be recovered") {
+		t.Fatalf("usage lost for good must fail the run, even though the deviation is accounted for:\n%s", out)
+	}
+	if rp.Verification.Verdicts[verdictOverspend]+rp.Verification.Verdicts[verdictCreated] != 0 && rp.Verification.Explained == 0 {
+		t.Fatalf("the deviation itself is explained by the lost terminates:\n%s", out)
 	}
 }

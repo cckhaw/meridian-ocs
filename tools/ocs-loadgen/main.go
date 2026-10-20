@@ -47,6 +47,8 @@ func parseFlags(args []string, errOut io.Writer) (config, error) {
 	fs.Float64Var(&c.SLOOK, "slo-completed", 0, "fail when fewer than this share of sessions finish as expected (e.g. 0.999); 0 = not checked")
 	fs.BoolVar(&c.Audit, "audit", false, "keep every subscriber's history and print it for those that fail the balance check")
 	fs.BoolVar(&c.Timeline, "timeline", false, "print outcomes for every second of the run (shows when a fault started and how long recovery took)")
+	fs.DurationVar(&c.DrainTimeout, "drain-timeout", 90*time.Second, "how long to wait, after the load, for the gateway to charge usage it released while the data tier was down")
+	fs.DurationVar(&c.Hold, "hold", 0, "how long each session lasts (spread over its updates and release); with it, sessions are in flight when a fault strikes")
 	fs.BoolVar(&c.NoVerify, "no-verify", false, "skip the balance check afterwards")
 	if err := fs.Parse(args); err != nil {
 		return c, err
@@ -98,13 +100,15 @@ func execute(ctx context.Context, c config, w io.Writer) (*Report, error) {
 		return nil, fmt.Errorf("bucket %q starts empty: check --bucket and --offering", c.Bucket)
 	}
 
-	var before, unsettledBefore float64
 	haveGW := c.GatewayAdmin != ""
+	var gwBefore map[string]float64
 	if haveGW {
-		if before, err = engineRequests(ctx, c.GatewayAdmin); err != nil {
+		if gwBefore, err = scrapeAll(ctx, c.GatewayAdmin); err != nil {
 			return nil, fmt.Errorf("--gateway-admin: %w", err)
 		}
-		unsettledBefore, _ = scrape(ctx, c.GatewayAdmin, "ocs_engine_unsettled_terminates_total")
+		if _, ok := gwBefore["ocs_engine_requests_total"]; !ok {
+			return nil, fmt.Errorf("--gateway-admin: ocs_engine_requests_total not found at %s", c.GatewayAdmin)
+		}
 	}
 	r := &runner{c: c, pool: pool, subs: subs}
 	out("driving %.0f sessions/s: %s warm-up, then %s measured\n", c.Rate, c.Warmup, c.Duration)
@@ -114,25 +118,39 @@ func execute(ctx context.Context, c config, w io.Writer) (*Report, error) {
 	}
 	rp := r.report(measured)
 	rp.showTimeline = c.Timeline
-	var unsettled float64
+	var gw gwView
 	if haveGW {
-		if after, err := engineRequests(ctx, c.GatewayAdmin); err == nil {
-			d := after - before
-			if d < 0 { // the gateway restarted during the run: its counters began again at zero
-				d = after
+		// Usage the gateway released without charging is saved and charged when the data tier is back: give the
+		// reconciler time to finish before the balances are read.
+		after, err := scrapeAll(ctx, c.GatewayAdmin)
+		if err == nil {
+			if _, ok := after["ocs_unsettled_pending"]; ok && after["ocs_unsettled_pending"] > 0 {
+				out("waiting up to %s for %.0f unsettled terminates to be charged\n", c.DrainTimeout, after["ocs_unsettled_pending"])
+				deadline := time.Now().Add(c.DrainTimeout)
+				for after["ocs_unsettled_pending"] > 0 && time.Now().Before(deadline) {
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(500 * time.Millisecond):
+					}
+					if m, err := scrapeAll(ctx, c.GatewayAdmin); err == nil {
+						after = m
+					}
+				}
 			}
+			d := gwDelta(gwBefore, after, "ocs_engine_requests_total")
 			rp.GatewayCounted = &d
-		}
-		if after, err := scrape(ctx, c.GatewayAdmin, "ocs_engine_unsettled_terminates_total"); err == nil {
-			unsettled = after - unsettledBefore
-			if unsettled < 0 {
-				unsettled = after
-			}
+			_, gw.Reconciler = after["ocs_unsettled_pending"]
+			gw.Unsettled = gwDelta(gwBefore, after, "ocs_engine_unsettled_terminates_total")
+			gw.Recorded = gwDelta(gwBefore, after, "ocs_engine_unsettled_recorded_total")
+			gw.Settled = gwDelta(gwBefore, after, "ocs_unsettled_settled_total")
+			gw.Lost = gwDelta(gwBefore, after, "ocs_engine_unsettled_unrecorded_total") + gwDelta(gwBefore, after, "ocs_unsettled_dead_total")
+			gw.StillPending = after["ocs_unsettled_pending"]
 		}
 	}
 	if !c.NoVerify {
 		out("checking every balance\n")
-		v := verify(ctx, prov, c, subs, unsettled)
+		v := verify(ctx, prov, c, subs, gw)
 		rp.Verification = &v
 	}
 	rp.judge(c)

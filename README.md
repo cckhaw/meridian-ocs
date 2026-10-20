@@ -10,7 +10,7 @@ with web consoles, metrics, alert rules, a Helm chart and a one-command local st
 99.999 % availability, zero double-spend. None of these has been demonstrated yet; see
 [What is not built yet](#what-is-not-built-yet).
 
-*Last updated: 2026-10-20, after failure injection under load. This README is kept current with every
+*Last updated: 2026-10-20, after the reconciler for usage released while Redis was down. This README is kept current with every
 change: see [Keeping this up to date](#keeping-this-up-to-date).*
 
 ## Try it
@@ -72,6 +72,7 @@ mean production-ready). The list of what does not exist yet is [further down](#w
 | Helm chart | gateway, provisioning (api and worker), catalog, mediation, AI Ops; autoscaling, disruption budgets, spread, optional NetworkPolicy, ServiceMonitor, alert rules, dashboard; refuses insecure choices; values schema; checked in CI | [12](docs/architecture/12-deployment.md) |
 | Local stack | `docker-compose.yml` plus a smoke test that runs in CI | [13](docs/architecture/13-local-stack.md) |
 | Load test and reconciliation | `tools/ocs-loadgen`: seeds subscribers, drives Nchf sessions at a constant arrival rate (open loop, latency counted from when the arrival was due), then checks every balance against the usage it reported, so lost or created money fails the run; a short run is part of CI; `dev/chaos.sh` repeats it while the Redis replica or primary or the gateway is frozen, stopped or killed (development stack only, not in CI) | [14](docs/architecture/14-load-test.md) |
+| Unsettled-usage reconciler | a terminate that arrives while Redis is down is still acknowledged, but its usage is first saved to a local fsynced log and charged when Redis returns, by replaying the original terminate (idempotent per session and request number); metrics, three alerts, dead letters kept; found and measured by the failure injection | [03](docs/architecture/03-rating-engine.md#usage-released-while-the-data-tier-is-down-and-its-reconciler) |
 
 Architecture and decisions: [01](docs/architecture/01-system-architecture.md),
 [02](docs/architecture/02-decisions-and-failure-policy.md).
@@ -85,9 +86,11 @@ one I would build first.
 - **Capacity is unproven.** A load generator exists ([14](docs/architecture/14-load-test.md)) but has only been
   run with the generator and the whole stack sharing one 4-vCPU sandbox, where the system sustained roughly
   1,800 charging requests/s before shedding load. 50k TPS and P99 < 10 ms are untested on real infrastructure; the generator has no
-  Diameter Gy mode and no soak, and fault injection covers four faults on the local stack only (no failover, partition or Kafka outage). **(next candidate: a run on dedicated hardware or a cluster)**
-- **Usage reported in a terminate that arrives while Redis is down is acknowledged but not charged**, and no reconciler recovers it
-  (measured under fault injection; now counted by `ocs_engine_unsettled_terminates_total` and alerted on, see [03](docs/architecture/03-rating-engine.md)).
+  Diameter Gy mode and no soak, and fault injection covers five faults on the local stack only (no failover, partition or Kafka outage). **(next candidate: a run on dedicated hardware or a cluster)**
+- **Unsettled-usage reconciler gaps**: it records and replays *terminates* only (usage in an update refused during an outage is still not
+  charged, and the load test cannot see it); the spool is node-local (an `emptyDir`: lost with the pod or node, no persistent-volume
+  option); a replay is rated at the tariff in effect then; dead letters (sessions that no longer exist) need a human; with
+  `OCS_UNSETTLED_SPOOL=off` the usage is lost (alerted on). See [03](docs/architecture/03-rating-engine.md).
 - **No Redis Cluster support** (`WAIT` is not available on Cluster) and no Sentinel/operator integration (the address is a single endpoint).
 - Redis access control is coarse: one user and password per release (no least-privilege ACL profile per service), and a rotated CA certificate is read at start-up only.
 - **No multi-region active-active replication** (design only, doc 01 §6).
@@ -217,13 +220,14 @@ Smallest useful gateway run (a local Redis, no replicas, no auth: development on
 ```sh
 redis-server --port 6379 &
 OCS_ORIGIN_HOST=ocs1.example.net OCS_ORIGIN_REALM=example.net OCS_HOST_IP=127.0.0.1 \
-OCS_REDIS_REPLICAS=0 OCS_NCHF_OAUTH=off OCS_IDENTITY_MODE=direct \
+OCS_REDIS_REPLICAS=0 OCS_NCHF_OAUTH=off OCS_IDENTITY_MODE=direct OCS_UNSETTLED_SPOOL=off \
   go run ./services/ocs-signaling-gateway
 curl -i http://127.0.0.1:8080/readyz
 ```
 
 The gateway refuses to start unless it is told how to authenticate Nchf callers
-(`OCS_NCHF_OAUTH`) and, outside development, unless Redis has the replicas it must wait for.
+(`OCS_NCHF_OAUTH`), whether to keep usage it releases while Redis is down (`OCS_UNSETTLED_SPOOL`: a directory, or
+`off` to lose it) and, outside development, unless Redis has the replicas it must wait for.
 Each service documents its environment variables at the top of its `main.go`/`config.go` and in its doc.
 
 ## Testing
@@ -245,8 +249,8 @@ Each service documents its environment variables at the top of its `main.go`/`co
 - Load generator: tested against in-process fakes of the gateway and provisioning, including faulty ones that
   must make it fail (grants not debited, double debit, look-alike sessions); run against the real stack at
   100 to 1,000 sessions/s, including overload (`429` shedding) and a deliberately spent bundle; a short run
-  is part of the CI stack job. `dev/chaos.sh` runs it under four injected faults; every balance reconciled in 10 runs, and
-  it found that usage in a terminate during a Redis outage is not charged. Measured results and their limits: [14](docs/architecture/14-load-test.md).
+  is part of the CI stack job. `dev/chaos.sh` runs it under five injected faults; it found that usage in a terminate during a Redis outage was
+  never charged (151 terminates in one 8 s stop), and with the reconciler on every balance reconciled in 12 runs with nothing lost. Measured results and their limits: [14](docs/architecture/14-load-test.md).
 
 ## Documentation
 

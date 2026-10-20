@@ -46,7 +46,27 @@ Each granted reservation is registered in the worker's timing wheel (1 s slots) 
 
 ## Fail policy integration
 
-The engine wraps the data-tier call in `failpolicy.Breaker`. When the call fails or the breaker is open, requests go to `failpolicy.Engine` (see doc 02): prepaid are denied (`ResultUnavailable`), postpaid get a capped, journalled, short grant (`Degraded=true`). A terminate during an outage is acknowledged and emits `AuditUnsettledUsage`; the reservation expires and is refunded, so **usage reported only in that terminate is not charged until reconciliation consumes the audit event**. That reconciler does not exist yet. The loss is counted: `Stats.UnsettledTerminates` / `ocs_engine_unsettled_terminates_total` rises for every such terminate that reported usage (one that reported none loses nothing and is not counted), and the chart alerts on it (`OcsUsageNotSettled`). It was first measured by the failure-injection runs in [14](14-load-test.md): about 0.8 MB of usage left uncharged in one run that stopped Redis for 8 s under load.
+The engine wraps the data-tier call in `failpolicy.Breaker`. When the call fails or the breaker is open, requests go to `failpolicy.Engine` (see doc 02): prepaid are denied (`ResultUnavailable`), postpaid get a capped, journalled, short grant (`Degraded=true`).
+
+### Usage released while the data tier is down, and its reconciler
+
+A **terminate** (Gy CCR-T, Nchf release) that arrives during an outage is still acknowledged, so the network element can free the session. But the usage it reported cannot be settled, and the reservation would expire and be refunded: without more, that usage is never charged. The failure-injection runs in [14](14-load-test.md) measured exactly that (151 terminates' usage lost in one 8 s Redis stop under load), so it is handled:
+
+1. **Record.** Before acknowledging, the engine hands the terminate to an `UnsettledSink` (`pkg/unsettled.Spool`): a local append-only log, fsynced per record, in the directory `OCS_UNSETTLED_SPOOL`. The data tier cannot hold the record, since it is the thing that is down. Only terminates that reported usage are recorded; a retransmission is the same record. If no sink is configured or the write fails, the terminate is still acknowledged but the usage is counted as **lost** (`ocs_engine_unsettled_unrecorded_total`).
+2. **Replay.** `unsettled.Reconciler` (in every gateway) calls `Engine.Settle` for the oldest records first, every 2 s, and stops at the first one the data tier cannot take (it respects the circuit breaker and never answers by the fail policy). It resubmits **the original terminate, with the same session and request number**.
+3. **Why that cannot charge twice.** The charge script makes `(session, request number)` idempotent: if the terminate had in fact reached Redis (an answer was lost, an unknown outcome) the replay is answered from its stored result and charges nothing; if it had not, it settles the reservation, or, when the reservation was swept meanwhile, charges the usage fresh against the buckets. Both are tested against a real Redis, together with the case where the original and its replay are both applied (`pkg/engine/settle_test.go`).
+4. **Dead letters.** If the session no longer exists (its state expired) or a later request of it was already processed, the usage cannot be charged through the session. The record is moved to the dead letters, kept in the log with the reason, counted (`ocs_unsettled_dead_total`) and alerted on. Nobody consumes them automatically.
+
+Choice and operation: `OCS_UNSETTLED_SPOOL` is required, a directory or `off` (usage is then lost, with a loud warning); the chart makes it a pod `emptyDir` (`gateway.unsettledSpool.mode`), compose a named volume. Metrics: `ocs_unsettled_pending`, `ocs_unsettled_oldest_age_seconds`, `ocs_unsettled_dead_letters`, `ocs_unsettled_settled_total`, `ocs_unsettled_dead_total`, `ocs_unsettled_deferred_total`, `ocs_engine_unsettled_recorded_total`, `ocs_engine_unsettled_unrecorded_total`, and the older `ocs_engine_unsettled_terminates_total`. Alerts: `OcsUsageNotSettled` (warning: it happened), `OcsUnsettledUsageBacklog` (critical: not draining), `OcsUnsettledUsageLost` (critical).
+
+Limits, stated plainly:
+
+- **The spool is node-local.** It survives a process or container restart on the same volume (tested, and in the `redis-and-gateway` chaos scenario), **not the loss of the pod's `emptyDir` or of the node**; usage recorded there and not yet replayed is lost with it. A persistent volume per gateway would need a StatefulSet; the chart does not offer it.
+- A terminate that arrives while the gateway is down never reaches it at all; the network element's own retry is what recovers that.
+- The replay is rated with the **tariff in effect when it is replayed**, not when the usage happened.
+- The usage of a terminate acknowledged by the fail policy is charged **after** the fact: a subscriber can briefly hold more than the balance shows, and over-use beyond the balance is reported as a shortfall like any over-use, not blocked.
+- **Only terminates are recorded.** An *update* refused during an outage also carried usage ("since the last request") and the network element does not report it again, so it too is uncharged; it is not recorded, and replaying an update would also reserve a new slice for a session that may be over. The load test cannot see this loss either: it treats a refused update as "settled or not, unknown" ([14](14-load-test.md)). Closing it needs a settle-only late-usage operation in the charge script.
+- Dead letters need a human.
 
 ## Measured numbers (this sandbox, not a benchmark environment)
 
@@ -58,3 +78,4 @@ Single-thread loopback Redis 7.0.15, one subscriber, `Charge` update path: ~110 
 2. **Durability** is whatever the Redis persistence config provides (risk R1 in doc 01). Commits wait for replica acknowledgement (`WAIT`, doc 07), which narrows this but is not a consensus guarantee.
 3. **Allocations in the data client** (go-redis) mean the end-to-end path is not zero-alloc; a custom RESP client is an option if GC profiling demands it.
 4. **Deleted buckets.** Refunds to a bucket that no longer exists are parked in `P:orph` rather than dropped; nothing reads that hash yet.
+5. **Usage in refused updates is not recorded**: only terminates are (see the limits under *Usage released while the data tier is down*).

@@ -4,6 +4,8 @@
 {{- $suffix := required "gateway.diameter.originHostSuffix is required (each pod is <pod-name>.<suffix>)" $g.diameter.originHostSuffix }}
 {{- if not (has $g.tariff (list "static" "catalog")) }}{{ fail "gateway.tariff must be static or catalog" }}{{ end }}
 {{- if and (eq $g.tariff "catalog") (not $g.defaultPlan) }}{{ fail "gateway.tariff=catalog needs gateway.defaultPlan" }}{{ end }}
+{{- if not (has $g.unsettledSpool.mode (list "emptyDir" "off")) }}{{ fail (printf "gateway.unsettledSpool.mode must be \"emptyDir\" or \"off\" (got %q): with \"off\", usage reported in a terminate that arrives while Redis is down is lost" $g.unsettledSpool.mode) }}{{ end }}
+{{- if and (eq $g.unsettledSpool.mode "off") (not .Values.allowInsecure) }}{{ fail "gateway.unsettledSpool.mode=off is refused unless allowInsecure=true: it loses the usage of terminates acknowledged while Redis is down" }}{{ end }}
 {{- $oauth := "" }}
 {{- if $g.nchf.enabled }}
 {{- if not (has $g.nchf.oauth (list "required" "off")) }}{{ fail (printf "gateway.nchf.oauth must be \"required\" or \"off\" (got %q): the gateway will not start the Nchf listener until you choose" $g.nchf.oauth) }}{{ end }}
@@ -24,6 +26,10 @@
 {{- if $g.nchf.enabled }}{{ $ports = append $ports (dict "name" "nchf" "port" $g.nchf.port) }}{{ end }}
 {{- if $g.control.enabled }}{{ $ports = append $ports (dict "name" "control" "port" $g.control.port) }}{{ end }}
 {{- $vols := list }}{{- $mounts := list }}
+{{- if eq $g.unsettledSpool.mode "emptyDir" }}
+{{- $vols = append $vols (dict "name" "unsettled-spool" "emptyDir" (dict "sizeLimit" $g.unsettledSpool.sizeLimit)) }}
+{{- $mounts = append $mounts (dict "name" "unsettled-spool" "mountPath" "/var/spool/ocs") }}
+{{- end }}
 {{- if and $g.nchf.enabled $g.nchf.tls.secretName }}
 {{- $vols = append $vols (dict "name" "nchf-tls" "secret" (dict "secretName" $g.nchf.tls.secretName "defaultMode" 288)) }}
 {{- $mounts = append $mounts (dict "name" "nchf-tls" "mountPath" "/tls/nchf" "readOnly" true) }}

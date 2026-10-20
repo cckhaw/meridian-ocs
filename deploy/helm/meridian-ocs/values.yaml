@@ -94,6 +94,7 @@ alerts:
   catalogStaleSeconds: 300           # time since a node last read the shared catalog
   rejectRatio: 0.01                  # share of mediation records in suspense or rejected
   approvalWaitSeconds: 14400         # a provisioning request waiting this long for approval
+  unsettledBacklogSeconds: 600       # usage released without being charged has waited this long unreconciled
 dashboard:
   enabled: false
   labels: {grafana_dashboard: "1"}   # the label your Grafana sidecar selects on
@@ -106,6 +107,11 @@ gateway:
     limits: {memory: 1Gi}    # no CPU limit: throttling shows up as latency on a charging path
   maxTps: 0                  # admission rate limit for the whole pod, 0 = unlimited
   maxInflight: 10000
+  # Usage reported in a terminate that arrives while Redis is down is acknowledged (so the network can release the
+  # session) and kept here, then charged when Redis returns (docs/architecture/03-rating-engine.md).
+  unsettledSpool:
+    mode: ""                 # REQUIRED: "emptyDir" (survives a container restart, NOT the loss of the pod or node) | "off" (that usage is lost; development only)
+    sizeLimit: 256Mi
   tariff: static             # static | catalog
   defaultPlan: ""            # REQUIRED when tariff=catalog
   cashBytesRate: ""          # static tariff num/den; empty = the gateway's default

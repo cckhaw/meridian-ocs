@@ -28,11 +28,45 @@ tests:
       - eval_time: 7m
         alertname: OcsUsageNotSettled
         exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Sessions were released while the data tier was down; their last usage awaits charging"
+              description: "A terminate arrived while Redis was unavailable and was acknowledged. Its usage is kept in the gateway's spool and is charged when Redis returns; OcsUnsettledUsageBacklog and OcsUnsettledUsageLost say if that is not happening."
+      - {eval_time: 20m, alertname: OcsUsageNotSettled, exp_alerts: []}
+
+  - name: unsettled usage is not draining
+    interval: 1m
+    input_series:
+      # waiting 100 s at minute 4, then older and older: past the 600 s limit from minute 10, and for 5 minutes by minute 15
+      - series: 'ocs_unsettled_oldest_age_seconds{pod="g0"}'
+        values: '0+0x3 100+100x20'
+    alert_rule_test:
+      - {eval_time: 8m, alertname: OcsUnsettledUsageBacklog, exp_alerts: []}   # 500 s: under the 600 s limit
+      - eval_time: 16m
+        alertname: OcsUnsettledUsageBacklog
+        exp_alerts:
           - exp_labels: {severity: critical}
             exp_annotations:
-              summary: "Sessions were released without their last usage being charged"
-              description: "A terminate arrived while the data tier was down and was acknowledged; the usage it reported was not charged and its reservation will expire and be refunded. There is no reconciler yet: the affected sessions are in the engine audit events."
-      - {eval_time: 20m, alertname: OcsUsageNotSettled, exp_alerts: []}
+              summary: "Usage released without being charged has been waiting for over 10 minutes"
+              description: "The reconciler is not draining the gateway's spool: Redis is still unavailable, the circuit breaker is held open, or replays are failing. The usage is on disk and will be charged once it can be."
+
+  - name: unsettled usage that can no longer be recovered
+    interval: 1m
+    input_series:
+      - series: 'ocs_engine_unsettled_unrecorded_total{pod="g0"}'
+        values: '0+0x3 0+1x3 3+0x14'
+      - series: 'ocs_unsettled_dead_total{pod="g0"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - {eval_time: 2m, alertname: OcsUnsettledUsageLost, exp_alerts: []}
+      - eval_time: 6m
+        alertname: OcsUnsettledUsageLost
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "Usage was released without being charged and can no longer be recovered"
+              description: "Either the spool is off or could not be written (ocs_engine_unsettled_unrecorded_total), or a recorded terminate belonged to a session that no longer exists (ocs_unsettled_dead_total; the records are kept as dead letters in the spool). That usage is revenue not charged."
+      - {eval_time: 19m, alertname: OcsUnsettledUsageLost, exp_alerts: []}
 
   - name: a commit acknowledged by too few replicas
     interval: 1m

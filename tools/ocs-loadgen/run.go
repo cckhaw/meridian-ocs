@@ -36,12 +36,14 @@ type config struct {
 	Updates     int   // update rounds between create and release
 	Seed        int64
 
-	JSON     string
-	SLOP99   time.Duration // 0 = not checked
-	SLOOK    float64       // minimum share of sessions that completed, 0 = not checked
-	NoVerify bool
-	Audit    bool
-	Timeline bool
+	JSON         string
+	SLOP99       time.Duration // 0 = not checked
+	SLOOK        float64       // minimum share of sessions that completed, 0 = not checked
+	NoVerify     bool
+	Audit        bool
+	Timeline     bool
+	DrainTimeout time.Duration
+	Hold         time.Duration // how long a session lasts: spread evenly over its updates and its release
 }
 
 func (c config) validate() error {
@@ -64,6 +66,8 @@ func (c config) validate() error {
 		return errors.New("--used-percent must be 0 to 100")
 	case c.Updates < 0 || c.Updates > 20:
 		return errors.New("--updates must be 0 to 20")
+	case c.Hold < 0:
+		return errors.New("--hold must not be negative")
 	case c.SLOOK < 0 || c.SLOOK > 1:
 		return errors.New("--slo-completed must be between 0 and 1")
 	case c.Nchf == "" || c.Prov == "":
@@ -307,8 +311,14 @@ func (r *runner) session(ctx context.Context, due time.Time, s *subscriber) {
 	grant, success := grantOf(rep.body)
 	both(func(k *counters) { k.granted.Add(grant) })
 
+	pause := func() {
+		if c.Hold > 0 {
+			time.Sleep(c.Hold / time.Duration(c.Updates+1))
+		}
+	}
 	seq := uint32(1)
 	for i := 0; i < c.Updates && grant > 0; i++ {
+		pause()
 		used := grant * c.UsedPercent / 100
 		seq++
 		up := call(&r.lat.update, ref+"/update", r.body(s.imsi, pdu, seq, c.RequestSize, used))
@@ -342,6 +352,7 @@ func (r *runner) session(ctx context.Context, due time.Time, s *subscriber) {
 		both(func(k *counters) { k.granted.Add(grant) })
 	}
 
+	pause()
 	used := grant * c.UsedPercent / 100
 	seq++
 	rel := call(&r.lat.release, ref+"/release", r.body(s.imsi, pdu, seq, 0, used))
@@ -431,22 +442,52 @@ func engineRequests(ctx context.Context, admin string) (float64, error) {
 	return scrape(ctx, admin, "ocs_engine_requests_total")
 }
 
-// scrape reads one unlabelled counter from a service's /metrics.
-func scrape(ctx context.Context, admin, name string) (float64, error) {
+// scrapeAll reads every unlabelled sample of a service's /metrics.
+func scrapeAll(ctx context.Context, admin string) (map[string]float64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(admin, "/")+"/metrics", nil)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	out := map[string]float64{}
 	for _, line := range strings.Split(string(b), "\n") {
-		if v, ok := strings.CutPrefix(line, name+" "); ok {
-			return strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if line == "" || line[0] == '#' || strings.ContainsAny(line, "{") {
+			continue
+		}
+		name, val, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		if f, err := strconv.ParseFloat(strings.TrimSpace(val), 64); err == nil {
+			out[name] = f
 		}
 	}
-	return 0, errors.New(name + " not found")
+	return out, nil
+}
+
+// scrape reads one unlabelled counter from a service's /metrics.
+func scrape(ctx context.Context, admin, name string) (float64, error) {
+	m, err := scrapeAll(ctx, admin)
+	if err != nil {
+		return 0, err
+	}
+	v, ok := m[name]
+	if !ok {
+		return 0, errors.New(name + " not found")
+	}
+	return v, nil
+}
+
+// gwDelta is how much a counter rose during the run; a gateway that restarted began again at zero.
+func gwDelta(before, after map[string]float64, name string) float64 {
+	d := after[name] - before[name]
+	if d < 0 {
+		d = after[name]
+	}
+	return d
 }

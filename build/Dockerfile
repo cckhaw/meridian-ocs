@@ -8,12 +8,14 @@ COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     test -n "$SERVICE" && cd services/$SERVICE && \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/service . && \
-    mkdir -p /out/data && chown 65532:65532 /out/data
+    mkdir -p /out/data /out/spool && chown 65532:65532 /out/data /out/spool
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/service /service
 # A volume mounted at /data starts out owned by the non-root user (mediation writes there).
 COPY --from=build --chown=65532:65532 /out/data /data
+# The gateway keeps usage it could not charge while Redis was down here (OCS_UNSETTLED_SPOOL): a volume.
+COPY --from=build --chown=65532:65532 /out/spool /var/spool/ocs
 EXPOSE 8080
 USER nonroot:nonroot
 ENTRYPOINT ["/service"]

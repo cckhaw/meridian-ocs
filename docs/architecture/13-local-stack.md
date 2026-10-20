@@ -36,7 +36,7 @@ so it runs natively on Apple Silicon.
 | `catalog` | built | catalog REST and editor | 8444 (`/ui/`) |
 | `seed` | `curlimages/curl` | publishes `dev/seed-catalog.json` once (plans `basic`, `gold`; offerings `basic-offer`, `gold-offer`), then exits; leaves an existing catalog alone | none |
 | `provisioning` | built | REST + console, gRPC, command workers; **two-person approval on** for corrections above 1000 and for terminations, with self-approval allowed because authentication is off (try it in the console: the *Approvals* tab) | 8443 (`/ui/`), 9443 |
-| `gateway` | built | Diameter Gy and Nchf, rating engine in-process; tariff from the catalog, default plan `basic` | 3868, 8000 |
+| `gateway` | built | Diameter Gy and Nchf, rating engine in-process; tariff from the catalog, default plan `basic`; the `gateway-spool` volume holds usage it released while Redis was down until it is charged ([03](03-rating-engine.md)) | 3868, 8000 |
 | `mediation` | built | offline CDR pipeline; input and output on the `mediation-data` volume | none |
 | `aiops` | built | mapping workbench | 8445 |
 

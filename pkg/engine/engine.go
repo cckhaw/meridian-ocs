@@ -45,6 +45,13 @@ type Store interface {
 	SweepExpired(ctx context.Context, subscriberID string, now time.Time) (int, error)
 }
 
+// UnsettledSink durably records a terminate that is about to be acknowledged without being settled, so its
+// usage can be charged later (see package unsettled). Record must not return until the record is safe; an
+// error means it is not, and the usage is counted as unrecorded.
+type UnsettledSink interface {
+	Record(req *canonical.Request) error
+}
+
 // AuditKind classifies an audit event.
 type AuditKind uint8
 
@@ -88,6 +95,9 @@ type Deps struct {
 	Breaker *failpolicy.Breaker
 	Policy  *failpolicy.Engine
 	Audit   chan<- AuditEvent
+	// Unsettled, when set, receives every terminate that reported usage and was acknowledged while the data
+	// tier was unavailable. Without it that usage is lost (and counted as unrecorded).
+	Unsettled UnsettledSink
 	// Latency, when set, records how long each Rate call took (queueing plus
 	// processing), including rejected ones.
 	Latency *telemetry.Histogram
@@ -110,14 +120,19 @@ type Stats struct {
 	// charged (its reservation expires and is refunded). Each one is revenue
 	// that only a reconciler could recover; see AuditUnsettledUsage.
 	UnsettledTerminates uint64
+	// UnsettledRecorded / UnsettledUnrecorded split UnsettledTerminates: those saved for reconciliation, and
+	// those whose usage is lost because no sink was configured or writing the record failed.
+	UnsettledRecorded   uint64
+	UnsettledUnrecorded uint64
 }
 
 type job struct {
-	ctx  context.Context
-	req  *canonical.Request
-	resp *canonical.Response
-	err  error
-	done chan struct{}
+	ctx    context.Context
+	req    *canonical.Request
+	resp   *canonical.Response
+	err    error
+	replay bool // a reconciliation replay: never answered by the fail policy, errors go back to the caller
+	done   chan struct{}
 }
 
 var jobPool = sync.Pool{New: func() any { return &job{done: make(chan struct{}, 1)} }}
@@ -133,7 +148,7 @@ type Engine struct {
 	closed      atomic.Bool
 	wg          sync.WaitGroup
 
-	requests, degraded, overloaded, auditDropped, unreplicated, unpriced, unsettled atomic.Uint64
+	requests, degraded, overloaded, auditDropped, unreplicated, unpriced, unsettled, unsettledRecorded, unsettledUnrecorded atomic.Uint64
 }
 
 // New builds and starts an engine.
@@ -183,7 +198,7 @@ func (e *Engine) Close() {
 
 // Stats returns a snapshot of the counters.
 func (e *Engine) Stats() Stats {
-	return Stats{e.requests.Load(), e.degraded.Load(), e.overloaded.Load(), e.auditDropped.Load(), e.unreplicated.Load(), e.unpriced.Load(), e.unsettled.Load()}
+	return Stats{e.requests.Load(), e.degraded.Load(), e.overloaded.Load(), e.auditDropped.Load(), e.unreplicated.Load(), e.unpriced.Load(), e.unsettled.Load(), e.unsettledRecorded.Load(), e.unsettledUnrecorded.Load()}
 }
 
 // Rate processes one request and fills resp. It blocks until the answer is
@@ -223,6 +238,46 @@ func (e *Engine) Rate(ctx context.Context, req *canonical.Request, resp *canonic
 	j.ctx, j.req, j.resp = nil, nil, nil
 	jobPool.Put(j)
 	return err
+}
+
+// Settle submits a terminate again, as the unsettled-usage reconciler does after the data tier was down when
+// it first arrived. Unlike Rate it is never answered by the fail policy: when the data tier cannot take the
+// request it returns the error and the caller keeps the record. The charge is idempotent per session and
+// request number, so a terminate that did reach the data tier the first time is answered from its stored
+// result and charges nothing twice. The result is ResultUnknownSession or ResultStaleRequest when the session
+// can no longer take the usage; any other result means it was settled.
+func (e *Engine) Settle(ctx context.Context, req *canonical.Request) (canonical.Result, error) {
+	if req.Type != canonical.TypeTerminate {
+		return 0, ErrInvalid
+	}
+	if e.closed.Load() {
+		return 0, ErrClosed
+	}
+	resp := canonical.AcquireResponse()
+	defer canonical.ReleaseResponse(resp)
+	j := jobPool.Get().(*job)
+	j.ctx, j.req, j.resp, j.err, j.replay = ctx, req, resp, nil, true
+	w := e.workers[fnv32(req.SubscriberID)%uint32(len(e.workers))]
+	select {
+	case w.in <- j:
+	default:
+		j.replay = false
+		jobPool.Put(j)
+		return 0, ErrOverloaded
+	}
+	select {
+	case <-j.done:
+	case <-e.workersDone:
+		select {
+		case <-j.done:
+		default:
+			return 0, ErrClosed
+		}
+	}
+	err := j.err
+	j.ctx, j.req, j.resp, j.replay = nil, nil, nil, false
+	jobPool.Put(j)
+	return resp.Result, err
 }
 
 func fnv32(s string) uint32 {
@@ -306,6 +361,26 @@ func (w *worker) handle(j *job) {
 
 	var err error
 	br := e.deps.Breaker
+	if j.replay {
+		if br != nil && !br.AllowDataTier() {
+			j.err = errBreakerOpen
+			return
+		}
+		err = e.deps.Store.Charge(j.ctx, &w.dreq, &w.dres)
+		if br != nil && j.ctx.Err() == nil {
+			br.Record(err)
+		}
+		if errors.Is(err, datalayer.ErrInvalid) {
+			j.err = ErrInvalid
+			return
+		}
+		if err != nil {
+			j.err = err
+			return
+		}
+		w.fill(req, resp)
+		return
+	}
 	if br == nil || br.AllowDataTier() {
 		err = e.deps.Store.Charge(j.ctx, &w.dreq, &w.dres)
 		if errors.Is(err, datalayer.ErrInvalid) {
@@ -468,6 +543,11 @@ func (w *worker) degrade(req *canonical.Request, resp *canonical.Response, now t
 		for i := range req.Units {
 			if req.Units[i].Used > 0 { // a terminate that reported no usage loses nothing
 				e.unsettled.Add(1)
+				if sink := e.deps.Unsettled; sink != nil && sink.Record(req) == nil {
+					e.unsettledRecorded.Add(1)
+				} else {
+					e.unsettledUnrecorded.Add(1)
+				}
 				break
 			}
 		}

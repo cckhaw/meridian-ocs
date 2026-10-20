@@ -114,6 +114,14 @@ func (rp *Report) judge(c config) {
 			rp.SLO = append(rp.SLO, fmt.Sprintf("%d of %d sessions finished as expected, below the objective %.4f", done, total, c.SLOOK))
 		}
 	}
+	if v := rp.Verification; v != nil && v.Reconciler {
+		if v.Lost > 0 {
+			rp.SLO = append(rp.SLO, fmt.Sprintf("%.0f terminates released without being charged could not be recovered by the gateway (no spool, a failed write, or a session that no longer exists)", v.Lost))
+		}
+		if v.StillPending > 0 {
+			rp.SLO = append(rp.SLO, fmt.Sprintf("%.0f terminates released without being charged were still waiting after %s: the reconciler has not caught up", v.StillPending, c.DrainTimeout))
+		}
+	}
 	if rp.RefCollisions > 0 {
 		rp.SLO = append(rp.SLO, fmt.Sprintf("%d sessions were given a charging reference another session already held: the generator sent look-alike requests and the run is not valid", rp.RefCollisions))
 	}
@@ -173,8 +181,13 @@ func (rp *Report) write(w io.Writer) {
 			p("             %d subscribers spent their whole bundle: usage beyond it is charged to other buckets, which are not checked\n", v.Overflowed)
 		}
 		if v.UnsettledTerminates > 0 {
-			p("             the gateway counted %.0f terminates acknowledged without settling (data tier down): up to %d bytes may be uncharged or held; deviations explained by them: %d bytes\n",
-				v.UnsettledTerminates, v.Budget, v.Explained)
+			if v.Reconciler {
+				p("             the gateway released %.0f terminates without charging them (data tier down): %.0f saved, %.0f charged afterwards by its reconciler, %.0f lost, %.0f still waiting\n",
+					v.UnsettledTerminates, v.Recorded, v.Settled, v.Lost, v.StillPending)
+			} else {
+				p("             the gateway counted %.0f terminates acknowledged without settling (data tier down): up to %d bytes may be uncharged or held; deviations explained by them: %d bytes\n",
+					v.UnsettledTerminates, v.Budget, v.Explained)
+			}
 		}
 		for _, s := range v.Violations {
 			p("  VIOLATION  %s\n", s)

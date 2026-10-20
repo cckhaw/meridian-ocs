@@ -93,6 +93,8 @@ refuses "nchf oauth off needs allowInsecure"       "gateway.nchf.oauth=off is re
 refuses "nchf oauth needs the NRF keys"            "oauthKeys.secretName"                    $S --set gateway.nchf.oauthKeys.secretName=
 refuses "nchf must not run in clear"               "bearer tokens must not cross"            $S --set gateway.nchf.tls.secretName=
 refuses "client certs need the tls secret"         "requireClientCert needs"                 $S --set gateway.nchf.tls.secretName= --set gateway.nchf.tls.mesh=true
+refuses "the unsettled-usage spool must be chosen"  "gateway.unsettledSpool.mode must be"   $S --set gateway.unsettledSpool.mode=
+refuses "no spool needs allowInsecure"             "unsettledSpool.mode=off is refused"      $S --set gateway.unsettledSpool.mode=off
 refuses "gateway needs a diameter realm"           "gateway.diameter.realm is required"      $S --set gateway.diameter.realm=
 refuses "gateway needs an origin host suffix"      "originHostSuffix is required"            $S --set gateway.diameter.originHostSuffix=
 refuses "catalog tariff needs a default plan"      "gateway.tariff=catalog needs"            $S --set gateway.defaultPlan=
@@ -117,6 +119,10 @@ for prop in 'runAsNonRoot: true' 'readOnlyRootFilesystem: true' 'allowPrivilegeE
   [ "$got" -ge "$n" ] && ok "every workload sets: $prop" || bad "$prop on $got of $n workloads"
 done
 grep -qE 'cpu: *"?[0-9a-z]+"?$' <<<"$(awk '/limits:/{f=1;next} /requests:|^[^ ]/{f=0} f' <<<"$workloads")" && bad "a CPU limit is set (throttling hurts latency)" || ok "no CPU limits"
+grep -q 'OCS_UNSETTLED_SPOOL, value: "/var/spool/ocs"' <<<"$secure" && grep -q 'mountPath: /var/spool/ocs' <<<"$secure" && grep -q 'name: unsettled-spool' <<<"$secure" \
+  && ok "the gateway gets the unsettled-usage spool (env and volume)" || bad "the gateway has no unsettled-usage spool"
+dev=$(helm template t . -f ci/dev.yaml --set gateway.unsettledSpool.mode=off 2>&1)
+grep -q 'OCS_UNSETTLED_SPOOL, value: "off"' <<<"$dev" && ! grep -q 'mountPath: /var/spool/ocs' <<<"$dev" && ok "mode=off renders OCS_UNSETTLED_SPOOL=off and no volume (development only)" || bad "spool off rendering"
 grep -q 'kind: StatefulSet' <<<"$secure" && grep -A3 'kind: StatefulSet' <<<"$secure" | grep -q . && ok "mediation is a StatefulSet" || bad "mediation StatefulSet"
 st=$(awk 'BEGIN{RS="---\n"} /kind: StatefulSet/' <<<"$secure")
 grep -qE '^  replicas: 1$' <<<"$st" && ok "mediation runs exactly one pod (its ledger is per output directory)" || bad "mediation replicas"

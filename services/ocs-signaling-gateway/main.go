@@ -38,6 +38,9 @@
 //	OCS_MAX_INFLIGHT     concurrent request limit, 0 = off    (default 10000)
 //	OCS_TARIFF           "static" or "catalog"                (default static; see newTariff)
 //	OCS_CASH_BYTES_RATE  static tariff: cash price as num/den (default 1/1024)
+//	OCS_UNSETTLED_SPOOL  required: a directory, or "off". The log of terminates that were acknowledged while
+//	                     Redis was down; the reconciler charges their usage when Redis returns. "off" means
+//	                     that usage is lost. Needs a volume that outlives the process (docs/architecture/03)
 //	OCS_ADMIN_ADDR       /healthz, /readyz and /metrics       (default :8080; keep it cluster-internal)
 //	OCS_LOG_LEVEL        debug | info | warn | error          (default info; JSON logs)
 //	OCS_CONTROL_ADDR     guarded AI Ops control plane (gRPC); unset = none. With it:
@@ -248,21 +251,35 @@ func run(ctx context.Context, ready func()) error {
 		func() { logger.Warn("data-tier circuit breaker opened: requests are answered by the fail policy") },
 		func() { logger.Info("data-tier circuit breaker closed") })
 
+	spool, err := openUnsettledSpool()
+	if err != nil {
+		return err
+	}
+	if spool != nil {
+		defer spool.Close() // after the engine has stopped (defers run last-in first)
+	}
+
 	// No profile cache exists yet, so there is no fail policy engine: if the
 	// data tier is down every request is denied (fail-closed for everyone).
-	eng, err := engine.New(engine.Config{}, engine.Deps{
+	deps := engine.Deps{
 		Store:   store,
 		Tariff:  tariff,
 		Breaker: breaker,
 		Latency: latency,
-	})
+	}
+	if spool != nil {
+		deps.Unsettled = spool
+	}
+	eng, err := engine.New(engine.Config{}, deps)
 	if err != nil {
 		return err
 	}
 	defer eng.Close()
+	reconciler := startReconciler(ctx, spool, eng, func(f string, a ...any) { log.Printf("ocs-signaling-gateway: "+f, a...) })
 
 	adm := admission.New(float64(maxTPS), maxTPS/10+1, maxInflight)
 	registerMetrics(reg, eng, adm, resolver, store, breaker)
+	registerUnsettledMetrics(reg, eng, spool, reconciler)
 	service.HandleAdmin("/metrics", reg.Handler())
 
 	ctl := control.New(control.Config{Service: "ocs-signaling-gateway", Audit: func(e control.Event) {
