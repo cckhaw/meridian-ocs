@@ -10,7 +10,7 @@ with web consoles, metrics, alert rules, a Helm chart and a one-command local st
 99.999 % availability, zero double-spend. None of these has been demonstrated yet; see
 [What is not built yet](#what-is-not-built-yet).
 
-*Last updated: 2026-10-20, after two-person approval for privileged provisioning changes. This README is kept current with every
+*Last updated: 2026-10-20, after the load test and balance reconciliation tool. This README is kept current with every
 change: see [Keeping this up to date](#keeping-this-up-to-date).*
 
 ## Try it
@@ -22,6 +22,7 @@ Redpanda (Kafka API), and the gateway, provisioning, catalog, mediation and AI O
 docker compose up --build     # first start compiles five services
 dev/smoke.sh                  # provisions a subscriber, charges it over Nchf, checks mediation and metrics
 # consoles:  http://127.0.0.1:8443/ui/  (subscribers)   http://127.0.0.1:8444/ui/  (catalog editor)
+make loadtest                 # 200 charging sessions/s for 20 s, then reconciles every balance
 docker compose down -v        # stop and forget everything
 ```
 
@@ -70,6 +71,7 @@ mean production-ready). The list of what does not exist yet is [further down](#w
 | AI Ops interface | guarded control plane in the gateway (allow-listed, clamped, auto-reverting, two-person rule for risky changes, audited), declarative mapping workbench, structured logs; no agent included | [11](docs/architecture/11-aiops.md) |
 | Helm chart | gateway, provisioning (api and worker), catalog, mediation, AI Ops; autoscaling, disruption budgets, spread, optional NetworkPolicy, ServiceMonitor, alert rules, dashboard; refuses insecure choices; values schema; checked in CI | [12](docs/architecture/12-deployment.md) |
 | Local stack | `docker-compose.yml` plus a smoke test that runs in CI | [13](docs/architecture/13-local-stack.md) |
+| Load test and reconciliation | `tools/ocs-loadgen`: seeds subscribers, drives Nchf sessions at a constant arrival rate (open loop, latency counted from when the arrival was due), then checks every balance against the usage it reported, so lost or created money fails the run; a short run is part of CI | [14](docs/architecture/14-load-test.md) |
 
 Architecture and decisions: [01](docs/architecture/01-system-architecture.md),
 [02](docs/architecture/02-decisions-and-failure-policy.md).
@@ -80,8 +82,10 @@ Honest list, grouped; each module's doc has the detail. The item marked **(next 
 one I would build first.
 
 **Scale, performance and platform**
-- **No load test.** The numbers in the docs are micro-benchmarks in a small sandbox (about 110 µs per Redis
-  charge call on loopback). 50k TPS and P99 < 10 ms are untested against a real cluster. **(next candidate)**
+- **Capacity is unproven.** A load generator exists ([14](docs/architecture/14-load-test.md)) but has only been
+  run with the generator and the whole stack sharing one 4-vCPU sandbox, where the system sustained roughly
+  1,800 charging requests/s before shedding load. 50k TPS and P99 < 10 ms are untested on real infrastructure; the generator has no
+  Diameter Gy mode, no fault injection during a run and no soak. **(next candidate: a run on dedicated hardware or a cluster, with failures injected)**
 - **No Redis Cluster support** (`WAIT` is not available on Cluster) and no Sentinel/operator integration (the address is a single endpoint).
 - Redis access control is coarse: one user and password per release (no least-privilege ACL profile per service), and a rotated CA certificate is read at start-up only.
 - **No multi-region active-active replication** (design only, doc 01 §6).
@@ -182,12 +186,13 @@ pkg/                  shared library module
   control/            guarded control plane for AI Ops agents (+ controlrpc gRPC server)
   mapping/            declarative JSON translation rules, hot-reloadable (+ JSON Schema, example)
   tlsconf/ svcenv/ service/   TLS/mTLS helpers, env parsing, service runner
+tools/ocs-loadgen/    load generator and balance reconciliation (own Go module; see doc 14)
 services/             one Go module per service (see go.work); the provisioning and catalog services embed their consoles
 build/Dockerfile      builds any service: --build-arg SERVICE=<name>
 docker-compose.yml    local development stack (+ dev/: seed catalog, smoke test)
 deploy/helm/          Helm chart (values schema, CI value sets, alert rules + tests, dashboard, test.sh)
-docs/architecture/    design documents 01-13
-.github/workflows/    CI: fmt, vet, build, test (with Redis); protobuf checks; Helm chart checks; local stack smoke test
+docs/architecture/    design documents 01-14
+.github/workflows/    CI: fmt, vet, build, test (with Redis); protobuf checks; Helm chart checks; local stack smoke test and a short load test
 ```
 
 ## Build, test, run
@@ -200,6 +205,7 @@ make fmt vet build test      # whole workspace, race detector on
 make proto-tools proto       # regenerate protobuf code (needs buf)
 make docker                  # one image per service
 make stack-up stack-smoke    # the local stack and its smoke test (make stack-down to stop)
+make loadtest                # load + balance reconciliation against the running stack (LOAD_ARGS="-rate 500 ...")
 deploy/helm/test.sh          # chart checks (needs helm; kubeconform and promtool are used if installed)
 ```
 
@@ -233,6 +239,10 @@ Each service documents its environment variables at the top of its `main.go`/`co
 - Chart: `deploy/helm/test.sh` (lint, render, kubeconform, deliberate refusals, pod properties,
   `promtool` and alert unit tests, every metric used is registered in the code), mutation-checked.
 - Local stack: `dev/smoke.sh` against the real containers, in CI.
+- Load generator: tested against in-process fakes of the gateway and provisioning, including faulty ones that
+  must make it fail (grants not debited, double debit, look-alike sessions); run against the real stack at
+  100 to 1,000 sessions/s, including overload (`429` shedding) and a deliberately spent bundle; a short run
+  is part of the CI stack job. Measured results and their limits: [14](docs/architecture/14-load-test.md).
 
 ## Documentation
 
@@ -247,7 +257,7 @@ module as built, with measured numbers where they exist and an explicit list of 
 | [07](docs/architecture/07-durability.md) durability | [08](docs/architecture/08-provisioning.md) provisioning and the subscriber console |
 | [09](docs/architecture/09-catalog.md) catalog and its editor | [10](docs/architecture/10-mediation.md) offline mediation |
 | [11](docs/architecture/11-aiops.md) metrics, control plane, mappings | [12](docs/architecture/12-deployment.md) Helm chart, alerts, dashboard |
-| [13](docs/architecture/13-local-stack.md) local Docker Compose stack | |
+| [13](docs/architecture/13-local-stack.md) local Docker Compose stack | [14](docs/architecture/14-load-test.md) load test and balance reconciliation |
 
 ## Keeping this up to date
 

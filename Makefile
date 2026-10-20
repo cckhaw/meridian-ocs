@@ -1,7 +1,8 @@
 SERVICES := $(notdir $(wildcard services/ocs-*))
-MODULES  := pkg $(addprefix services/,$(SERVICES))
+TOOLS    := $(notdir $(wildcard tools/ocs-*))
+MODULES  := pkg $(addprefix services/,$(SERVICES)) $(addprefix tools/,$(TOOLS))
 
-.PHONY: build test vet fmt proto docker lint-proto proto-tools proto-check stack-up stack-smoke stack-down
+.PHONY: build test vet fmt proto docker lint-proto proto-tools proto-check stack-up stack-smoke stack-down loadtest
 build:
 	@for m in $(MODULES); do (cd $$m && go build ./...) || exit 1; done
 test:
@@ -9,7 +10,7 @@ test:
 vet:
 	@for m in $(MODULES); do (cd $$m && go vet ./...) || exit 1; done
 fmt:
-	@test -z "$$(gofmt -l pkg services)" || (gofmt -l pkg services; exit 1)
+	@test -z "$$(gofmt -l pkg services tools)" || (gofmt -l pkg services tools; exit 1)
 # Generated code is committed (pkg/gen); `make proto` regenerates it and
 # `make proto-check` fails if the committed copy is stale. Needs buf and the
 # two plugins on PATH: `make proto-tools` installs them (pinned versions).
@@ -34,3 +35,9 @@ stack-smoke:
 	dev/smoke.sh
 stack-down:
 	docker compose down -v
+
+# Load test against the running local stack (make stack-up first). A short run with objectives that fail the
+# command when missed; tune with LOAD_ARGS, e.g. make loadtest LOAD_ARGS="-rate 1000 -duration 60s".
+LOAD_ARGS ?= -rate 200 -duration 20s -warmup 5s -gateway-admin http://127.0.0.1:9080
+loadtest:
+	cd tools/ocs-loadgen && go run . $(LOAD_ARGS)

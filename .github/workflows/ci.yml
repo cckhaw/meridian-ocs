@@ -56,6 +56,11 @@ jobs:
         run: docker compose up -d --build
       - name: Smoke test it (provision a subscriber, charge it over Nchf, check mediation and metrics)
         run: dev/smoke.sh
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Load test it briefly and reconcile every balance (no latency objective: shared runner)
+        run: make loadtest LOAD_ARGS="-subscribers 200 -rate 100 -duration 10s -warmup 2s -gateway-admin http://127.0.0.1:9080 -slo-completed 0.999 -audit"
       - name: Logs on failure
         if: failure()
         run: docker compose ps -a && docker compose logs --no-color --tail=80
