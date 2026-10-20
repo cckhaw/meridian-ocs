@@ -49,6 +49,7 @@ func parseFlags(args []string, errOut io.Writer) (config, error) {
 	fs.BoolVar(&c.Timeline, "timeline", false, "print outcomes for every second of the run (shows when a fault started and how long recovery took)")
 	fs.DurationVar(&c.DrainTimeout, "drain-timeout", 90*time.Second, "how long to wait, after the load, for the gateway to charge usage it released while the data tier was down")
 	fs.DurationVar(&c.Hold, "hold", 0, "how long each session lasts (spread over its updates and release); with it, sessions are in flight when a fault strikes")
+	fs.DurationVar(&c.SettleWait, "settle-wait", 0, "wait this long after the load, before reading balances, so reservations orphaned by a lost session expire (about validity + grace, 35 s on the dev stack)")
 	fs.BoolVar(&c.NoVerify, "no-verify", false, "skip the balance check afterwards")
 	if err := fs.Parse(args); err != nil {
 		return c, err
@@ -150,6 +151,14 @@ func execute(ctx context.Context, c config, w io.Writer) (*Report, error) {
 		}
 	}
 	if !c.NoVerify {
+		if c.SettleWait > 0 {
+			out("waiting %s for reservations of lost sessions to expire\n", c.SettleWait)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(c.SettleWait):
+			}
+		}
 		out("checking every balance\n")
 		v := verify(ctx, prov, c, subs, gw)
 		rp.Verification = &v

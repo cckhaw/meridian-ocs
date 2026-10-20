@@ -4,7 +4,7 @@
 # and lets the generator reconcile every balance afterwards. The run reports what the fault did to
 # availability, second by second, and fails if money was created, lost or taken twice.
 #
-#   dev/chaos.sh replica-freeze primary-stop primary-kill gateway-kill redis-and-gateway gateway-drain     (or: all)
+#   dev/chaos.sh replica-freeze primary-stop primary-kill gateway-kill redis-and-gateway gateway-drain session-loss     (or: all)
 #
 # Needs docker compose, Go and a running stack. Development stack only: it stops and kills containers.
 # Environment: RATE (sessions/s, default 150), SUBSCRIBERS (300), HOLD (seconds the fault lasts, 8),
@@ -54,6 +54,10 @@ inject() { # inject <scenario> <start|stop>
     redis-and-gateway:start) # Redis down, then the gateway restarts while usage it could not charge is still on disk
       docker compose stop redis >/dev/null 2>&1; sleep 3; docker compose kill gateway >/dev/null 2>&1; docker compose start gateway >/dev/null 2>&1 ;;
     redis-and-gateway:stop) docker compose start redis >/dev/null 2>&1 ;;
+    session-loss:start) # every session hash is deleted: the data tier no longer knows any session (a lossy failover, a flush, an expiry)
+      docker compose exec -T redis sh -c 'P="${OCS_DEV_REDIS_PASSWORD:-dev-only-redis-password}"; redis-cli --tls --cacert /certs/ca.crt -a "$P" --no-auth-warning --scan --pattern "*}:s:*" |
+        xargs -r -n 200 redis-cli --tls --cacert /certs/ca.crt -a "$P" --no-auth-warning DEL | awk "{n+=\$1} END{print \"    deleted \" n+0 \" session hashes\"}"' 2>&1 ;;
+    session-loss:stop) : ;;
     gateway-drain:start)  docker compose stop redis >/dev/null 2>&1 ;;
     gateway-drain:stop)   # the gateway is told to stop while Redis is still down, with usage saved on disk; Redis returns during its drain
       docker compose stop gateway >/dev/null 2>&1 & local gp=$!
@@ -69,7 +73,8 @@ run_scenario() {
   local s=$1 log="$OUT/$1.txt" json="$OUT/$1.json"
   echo "=== $s: $RATE sessions/s, fault after ${BEFORE}s for ${HOLD}s, then ${AFTER}s of recovery"
   for p in 9080 9081; do wait_ready "$p" 120 || { echo "service on admin port $p is not ready before the run" >&2; return 2; }; done
-  "$BIN" -subscribers "$SUBSCRIBERS" -rate "$RATE" -duration "${DURATION}s" -warmup "${WARMUP}s" -conns 4 \
+  local settle=0s; [ "$s" = session-loss ] && settle=45s   # reservations orphaned by the loss expire after validity + grace
+  "$BIN" -subscribers "$SUBSCRIBERS" -rate "$RATE" -duration "${DURATION}s" -warmup "${WARMUP}s" -conns 4 -settle-wait "$settle" \
     -timeout 3s -hold "$SESSION" -timeline -audit -gateway-admin http://127.0.0.1:9080 -json "$json" > "$log" 2>&1 &
   local pid=$!
   # seeding finishes when the generator starts driving; the fault clock starts from the end of warm-up
@@ -96,8 +101,8 @@ run_scenario() {
 }
 
 scenarios=("$@")
-[ "${#scenarios[@]}" -eq 0 ] && { echo "usage: dev/chaos.sh replica-freeze|primary-stop|primary-kill|gateway-kill|redis-and-gateway|gateway-drain ... | all" >&2; exit 2; }
-[ "${scenarios[0]}" = all ] && scenarios=(replica-freeze primary-stop primary-kill gateway-kill redis-and-gateway gateway-drain)
+[ "${#scenarios[@]}" -eq 0 ] && { echo "usage: dev/chaos.sh replica-freeze|primary-stop|primary-kill|gateway-kill|redis-and-gateway|gateway-drain|session-loss ... | all" >&2; exit 2; }
+[ "${scenarios[0]}" = all ] && scenarios=(replica-freeze primary-stop primary-kill gateway-kill redis-and-gateway gateway-drain session-loss)
 for s in "${scenarios[@]}"; do run_scenario "$s"; done
 echo "logs and JSON: $OUT"
 exit "$worst"

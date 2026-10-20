@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/cckhaw/meridian-ocs/pkg/canonical"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer/redistest"
@@ -28,6 +30,7 @@ func (o *outage) Charge(ctx context.Context, req *datalayer.Request, resp *datal
 }
 
 type settleRig struct {
+	rdb    *redis.Client
 	t      *testing.T
 	store  *outage
 	spool  *unsettled.Spool
@@ -43,7 +46,8 @@ func newSettleRig(t *testing.T, balance int64) *settleRig {
 
 func newSettleRigWith(t *testing.T, balance int64, cfg Config) *settleRig {
 	t.Helper()
-	client := datalayer.New(redistest.Start(t))
+	rdb := redistest.Start(t)
+	client := datalayer.New(rdb)
 	ctx := context.Background()
 	if err := client.PutBucket(ctx, "r1", datalayer.Bucket{ID: "b", Class: datalayer.ClassBundle, Kind: canonical.UnitBytes, Balance: balance, Order: 1}); err != nil {
 		t.Fatal(err)
@@ -61,7 +65,7 @@ func newSettleRigWith(t *testing.T, balance int64, cfg Config) *settleRig {
 		t.Fatal(err)
 	}
 	t.Cleanup(e.Close)
-	return &settleRig{t: t, store: st, spool: spool, eng: e, rec: &unsettled.Reconciler{Spool: spool, Settler: e}, ctx: ctx, client: client}
+	return &settleRig{rdb: rdb, t: t, store: st, spool: spool, eng: e, rec: &unsettled.Reconciler{Spool: spool, Settler: e}, ctx: ctx, client: client}
 }
 
 func (r *settleRig) balance() int64 {
@@ -484,5 +488,82 @@ func TestWhenPeersMayRepeatUsageAnUpdateOfASessionThatStoodStillIsStillCharged(t
 	}
 	if got := r.balance(); got != 1_000_000-700 {
 		t.Fatalf("balance %d, want %d", got, 1_000_000-700)
+	}
+}
+
+// loseSessionState deletes the session hash of "s" (a failover that lost it, a flush, an expiry): the data tier no
+// longer knows the session. The reservation records and the balances stay.
+func (r *settleRig) loseSessionState() {
+	r.t.Helper()
+	if err := r.rdb.Del(r.ctx, "{sub:r1}:s:s").Err(); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+// For Nchf (TS 32.290 5.5.1.2) a refused update of a session whose state is gone is still charged afterwards.
+func TestUsageOfARefusedNchfUpdateIsChargedEvenIfTheSessionWasLostMeanwhile(t *testing.T) {
+	r := newSettleRig(t, 1_000_000)
+	r.rate(newReq(canonical.TypeInitial, "r1", "s", 0, 1000, 0))
+	r.store.down.Store(true)
+	r.openBreaker()
+	q := reqFor(canonical.TypeUpdate, 1, 700)
+	q.AcceptUnknownSession = true // what the Nchf adapter sets
+	r.rate(q)
+	if recs := r.spool.Pending(0); len(recs) != 1 || !recs[0].AcceptUnknownSession {
+		t.Fatalf("the record must remember it is an Nchf request: %+v", recs)
+	}
+	r.store.down.Store(false)
+	r.loseSessionState()
+	if n, err := r.pass(); err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if st := r.rec.Stats(); st.Dead != 0 || st.Settled != 1 {
+		t.Fatalf("%+v", st)
+	}
+	// The reservation of the lost session is refunded when it expires, as ever; the 700 are charged.
+	if n, err := r.client.SweepExpired(r.ctx, "r1", time.Now().Add(time.Hour)); err != nil || n != 1 {
+		t.Fatalf("sweep: %d %v", n, err)
+	}
+	if got := r.balance(); got != 1_000_000-700 {
+		t.Fatalf("balance %d, want %d", got, 1_000_000-700)
+	}
+}
+
+// ... and for Gy an unknown session stays unknown (RFC 4006): the usage is a dead letter, not charged.
+func TestUsageOfARefusedGyUpdateOfALostSessionStaysADeadLetter(t *testing.T) {
+	r := newSettleRig(t, 1_000_000)
+	r.rate(newReq(canonical.TypeInitial, "r1", "s", 0, 1000, 0))
+	r.store.down.Store(true)
+	r.openBreaker()
+	r.rate(reqFor(canonical.TypeUpdate, 1, 700)) // no AcceptUnknownSession
+	r.store.down.Store(false)
+	r.loseSessionState()
+	if _, err := r.pass(); err != nil {
+		t.Fatal(err)
+	}
+	if st := r.rec.Stats(); st.Dead != 1 || st.Settled != 0 {
+		t.Fatalf("%+v", st)
+	}
+}
+
+func TestATerminateOfALostNchfSessionIsChargedAndOnlyOnce(t *testing.T) {
+	r := newSettleRig(t, 1_000_000)
+	r.rate(newReq(canonical.TypeInitial, "r1", "s", 0, 1000, 0))
+	r.loseSessionState()
+	q := reqFor(canonical.TypeTerminate, 1, 300)
+	q.AcceptUnknownSession = true
+	r.rate(q)
+	// 300 charged fresh; the lost session's 1000 reservation comes back at expiry.
+	if _, err := r.client.SweepExpired(r.ctx, "r1", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.balance(); got != 1_000_000-300 {
+		t.Fatalf("balance %d, want %d", got, 1_000_000-300)
+	}
+	q2 := reqFor(canonical.TypeTerminate, 1, 300) // the retransmission
+	q2.AcceptUnknownSession = true
+	r.rate(q2)
+	if got := r.balance(); got != 1_000_000-300 {
+		t.Fatalf("a retransmitted terminate charged again: %d", got)
 	}
 }

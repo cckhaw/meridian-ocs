@@ -43,25 +43,28 @@ type Record struct {
 	Source uint8     `json:"src,omitempty"`
 	// Type is the canonical request type of what was acknowledged without being settled: a terminate (the
 	// default, and what every record written before updates were recorded is) or a refused update.
-	Type          uint8     `json:"typ,omitempty"`
-	SubscriberID  string    `json:"sub"`
-	SessionID     string    `json:"ses"`
-	RequestNumber uint32    `json:"no"`
-	EventTime     time.Time `json:"evt,omitempty"`
-	RATType       string    `json:"rat,omitempty"`
-	CellID        string    `json:"cell,omitempty"`
-	Slice         string    `json:"slice,omitempty"`
-	Units         []Unit    `json:"units"`
+	Type uint8 `json:"typ,omitempty"`
+	// AcceptUnknownSession is the request's flag of that name (Nchf): replayed, it creates the session if it is gone.
+	AcceptUnknownSession bool      `json:"acc,omitempty"`
+	SubscriberID         string    `json:"sub"`
+	SessionID            string    `json:"ses"`
+	RequestNumber        uint32    `json:"no"`
+	EventTime            time.Time `json:"evt,omitempty"`
+	RATType              string    `json:"rat,omitempty"`
+	CellID               string    `json:"cell,omitempty"`
+	Slice                string    `json:"slice,omitempty"`
+	Units                []Unit    `json:"units"`
 }
 
 // FromRequest builds the record of a terminate. Only units that reported usage are kept.
 func FromRequest(req *canonical.Request, at time.Time) Record {
 	r := Record{
-		ID:           fmt.Sprintf("%s|%s|%d", req.SubscriberID, req.SessionID, req.RequestNumber),
-		At:           at,
-		Source:       uint8(req.Source),
-		Type:         uint8(req.Type),
-		SubscriberID: req.SubscriberID, SessionID: req.SessionID, RequestNumber: req.RequestNumber,
+		ID:                   fmt.Sprintf("%s|%s|%d", req.SubscriberID, req.SessionID, req.RequestNumber),
+		At:                   at,
+		Source:               uint8(req.Source),
+		Type:                 uint8(req.Type),
+		AcceptUnknownSession: req.AcceptUnknownSession,
+		SubscriberID:         req.SubscriberID, SessionID: req.SessionID, RequestNumber: req.RequestNumber,
 		EventTime: req.EventTime, RATType: req.RATType, CellID: req.CellID, Slice: req.Slice,
 	}
 	for _, u := range req.Units {
@@ -86,6 +89,7 @@ func (r Record) Request() *canonical.Request {
 	}
 	q.SubscriberID, q.SessionID, q.RequestNumber = r.SubscriberID, r.SessionID, r.RequestNumber
 	q.EventTime, q.RATType, q.CellID, q.Slice = r.EventTime, r.RATType, r.CellID, r.Slice
+	q.AcceptUnknownSession = r.AcceptUnknownSession
 	for _, u := range r.Units {
 		q.Units = append(q.Units, canonical.UnitRequest{RatingGroup: u.RatingGroup, ServiceID: u.ServiceID, Kind: u.Kind, Used: u.Used})
 	}

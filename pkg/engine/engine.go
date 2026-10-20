@@ -458,6 +458,7 @@ func (w *worker) build(req *canonical.Request, mode datalayer.Mode, now time.Tim
 	d := &w.dreq
 	d.SubscriberID, d.SessionID, d.Mode, d.ReqNo, d.Now = req.SubscriberID, req.SessionID, mode, req.RequestNumber, now
 	d.Validity, d.Grace = w.e.cfg.Validity, w.e.cfg.Grace
+	d.AcceptUnknownSession = req.AcceptUnknownSession && mode != datalayer.ModeInitial && mode != datalayer.ModeEvent
 	d.Items = d.Items[:0]
 	for i := range req.Units {
 		u := &req.Units[i]

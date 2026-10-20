@@ -70,6 +70,10 @@ type Request struct {
 	CellID        string
 	Slice         string
 	Units         []UnitRequest
+	// AcceptUnknownSession asks the data tier to accept an update or terminate for a session it does not know, as the
+	// first request of a new one, and charge its usage (3GPP TS 32.290 5.5.1.2). Only the Nchf adapter sets it; for
+	// Gy an unknown session is DIAMETER_UNKNOWN_SESSION_ID (RFC 4006).
+	AcceptUnknownSession bool
 }
 
 // Reset clears the request for reuse while keeping slice capacity.

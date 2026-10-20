@@ -10,7 +10,7 @@ with web consoles, metrics, alert rules, a Helm chart and a one-command local st
 99.999 % availability, zero double-spend. None of these has been demonstrated yet; see
 [What is not built yet](#what-is-not-built-yet).
 
-*Last updated: 2026-10-20, after the saved-usage spool got a persistent volume option and a drain on shutdown. This README is kept current with every
+*Last updated: 2026-10-20, after the Nchf behaviour for refused and unknown-session requests was checked against TS 32.290/32.291. This README is kept current with every
 change: see [Keeping this up to date](#keeping-this-up-to-date).*
 
 ## Try it
@@ -50,7 +50,7 @@ mean production-ready). The list of what does not exist yet is [further down](#w
 |---|---|---|
 | Rating engine and atomic reservations | partitioned workers, reserve/settle/refund in one Redis Lua call, idempotent per session and request number; runs inside the gateway | [03](docs/architecture/03-rating-engine.md) |
 | 4G Diameter Gy | RFC 4006 codec and server over TCP, in-house (no third-party Diameter library) | [04](docs/architecture/04-gy-adapter.md) |
-| 5G Nchf | converged charging create/update/release over HTTP/2, NRF OAuth2 token validation | [05](docs/architecture/05-nchf-adapter.md) |
+| 5G Nchf | converged charging create/update/release over HTTP/2, NRF OAuth2 token validation; checked against TS 32.290/32.291 for retransmission, denied-request usage and unknown sessions (an update or release for a session the store lost is accepted and charged) | [05](docs/architecture/05-nchf-adapter.md) |
 | Identity mapping | MSISDN, IMSI and NAI resolve to one subscriber key; unknown or conflicting identifiers are refused, never guessed | [06](docs/architecture/06-identity-mapping.md) |
 | Durability | commits wait for replica acknowledgement (`WAIT`); the gateway refuses to start without the replicas it must wait for | [07](docs/architecture/07-durability.md) |
 | Redis access control | every service connects with an ACL user and password (inline or from a re-read file, so rotation needs no restart) over verified TLS, optionally with a client certificate; misconfiguration is refused at start-up; the chart will not render an open Redis | [07](docs/architecture/07-durability.md) |
@@ -90,7 +90,7 @@ one I would build first.
   Diameter Gy mode and no soak, and fault injection covers five faults on the local stack only (no failover, partition or Kafka outage). **(next candidate: a run on dedicated hardware or a cluster)**
 - **Unsettled-usage reconciler gaps**: a refused update more than 8 requests behind its session is left uncharged for a person (it could be charged twice);
   the rule assumes a network element does not report refused usage again under a **new** request number: supported for conforming Gy clients by RFC 4006 §9.1 and its client state machine,
-  but 3GPP TS 32.299, Nchf and real peers were not checked, so `OCS_UNSETTLED_PEER_REPEATS=true` gives the cautious behaviour;
+  and for Nchf by the text of TS 32.290/32.291 (usage of a denied request "shall be deducted"), but 3GPP TS 32.299 and real PGW/SMF behaviour were not checked, so `OCS_UNSETTLED_PEER_REPEATS=true` gives the cautious behaviour; the Nchf `usedUnitContainer.localSequenceNumber` is not used yet and would make a repeated container harmless;
   the spool survives a replaced pod only in `persistent` mode (a StatefulSet; never attached to a real volume, scaling in strands the removed pods' volumes) and the gateway drains it for up to `OCS_UNSETTLED_DRAIN` on shutdown; a replay is rated at the tariff in effect then;
   dead letters need a human; with `OCS_UNSETTLED_SPOOL=off` the usage is lost (alerted on). See [03](docs/architecture/03-rating-engine.md).
 - **No Redis Cluster support** (`WAIT` is not available on Cluster) and no Sentinel/operator integration (the address is a single endpoint).

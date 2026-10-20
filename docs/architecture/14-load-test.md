@@ -108,7 +108,7 @@ fails.
 
 ## Failure injection
 
-`dev/chaos.sh replica-freeze|primary-stop|primary-kill|gateway-kill|redis-and-gateway|gateway-drain|all` (needs the local stack, Docker and
+`dev/chaos.sh replica-freeze|primary-stop|primary-kill|gateway-kill|redis-and-gateway|gateway-drain|session-loss|all` (needs the local stack, Docker and
 Go) starts the generator at 150 sessions/s over 300 subscribers (each session lasting 2 s, so many are in flight when
 the fault strikes), lets it run healthy for 10 s, breaks one thing for 8 s, restores it, keeps loading for 25 s
 more, waits for the gateway to charge any usage it saved, and reconciles every balance. `--timeline` prints
@@ -123,6 +123,7 @@ part of CI (it takes about a minute per scenario).
 | **Gateway killed**, restarted | about 1,650 of 6,450 (26 %) | the 8 s of the fault and about 3 s after | In-flight sessions fail; sessions continue after the restart because their state is in Redis. About 3 s from `start` to serving. |
 
 | Redis stopped and the **gateway told to stop while Redis is still down**, Redis returning during its drain (`gateway-drain`) | about 1,600 of 6,450 | the fault and the gateway's restart | On SIGTERM the gateway kept replaying its saved usage until Redis answered: **301 of 301, 300 of 300 and 9 of 9** records were charged before it exited in three runs, none left on disk, every balance reconciled. |
+| **Every session hash deleted** from Redis under load (`session-loss`: what a lossy failover, a flush or an expiry does; about 7,000 hashes per run), balances read after the orphaned reservations expire (`-settle-wait 45s`) | **0** with the current gateway (5 runs); **299** (all `404`) with the gateway before the Nchf change | none | An update or release for a session the store no longer knows is accepted and its usage charged (TS 32.290 5.5.1.2, [05](05-nchf-adapter.md#against-the-specs-failure-handling-retransmission-and-unknown-sessions)). In all 5 runs every balance was exact. With the previous gateway the same fault failed 299 of 6,450 sessions with 404 and **dropped the usage in each of those requests**; the generator reported them as "unknown" (it cannot see that loss), so the evidence is the 404 count, not a violation. |
 | Redis stopped **and the gateway restarted** while it was down (`redis-and-gateway`) | about 2,000 of 6,450 | the fault and the restart | Usage the gateway had saved to its spool before it was killed was charged by the *new* process once Redis returned (it charged records it had not written itself). |
 
 Across the **12 runs with the reconciler on** (all five scenarios once, then the two Redis outages and the
@@ -159,6 +160,7 @@ across a restart is shown by that one run and by the spool's own tests, not by a
    more than 8 requests behind its session. Across **7 runs with that version** (Redis stopped three times,
    killed three times, and stopped with a gateway restart) every balance reconciled and **690 records
    (terminates and refused updates) were saved and all 690 charged afterwards, with 0 lost and 0 ambiguous**.
+   **Nchf did not follow its own spec for sessions it did not know.** Reading TS 32.290 5.5.1.2 for the refused-update work showed that an update or termination for an unknown session must be accepted and charged, while the adapter answered 404. The `session-loss` scenario shows the cost (above) and the fix.
 2. **The first version of the check blamed the system for a gap in its own model**: it assumed a `204` meant
    settled. It now states what it cannot know and takes the rest from the gateway's counters.
 3. **Behaviour during a Redis outage is not uniform** (hanging until the client times out versus an

@@ -34,6 +34,9 @@ local mode, sid = ARGV[1], ARGV[2]
 local reqNo, now = tonumber(ARGV[3]), tonumber(ARGV[4])
 local validity, grace = tonumber(ARGV[5]), tonumber(ARGV[6])
 local nItems = tonumber(ARGV[7])
+-- A trailing 'C' says an update or terminate for a session this store does not know is to be accepted and charged
+-- (3GPP TS 32.290 5.5.1.2, Nchf) instead of refused as unknown (RFC 4006, Gy). Numbers never equal it.
+local accept = (ARGV[#ARGV] == 'C')
 
 sweep(P, now)
 
@@ -48,7 +51,9 @@ local function replay()
   return out
 end
 
--- Idempotency: (session, request number) mutates state at most once.
+-- Idempotency: (session, request number) mutates state at most once. An update or terminate for a session that does not
+-- exist is refused (code 2), unless the caller said to accept it (trailing 'C'): then it is processed as the first
+-- request of a new session, its usage charged against the buckets since there is no reservation to settle.
 local last = redis.call('HGET', sk, 'last')
 local late = (mode == 'L' or mode == 'N')
 local marker = P .. ':late:' .. sid .. ':' .. fmt(reqNo)
@@ -59,17 +64,23 @@ if mode == 'I' or mode == 'E' then
     return { 3 }
   end
 elseif mode == 'N' then
-  if not last then return { 2 } end
-  local l = tonumber(last)
-  if reqNo == l or redis.call('HEXISTS', sk, 'a:' .. fmt(reqNo)) == 1 then return { 1, 0 } end -- applied already
-  if reqNo < l and (reqNo < l - 7 or redis.call('HEXISTS', sk, 'w') == 0) then return { 3 } end -- cannot be told
+  if not last then
+    if not accept then return { 2 } end
+  else
+    local l = tonumber(last)
+    if reqNo == l or redis.call('HEXISTS', sk, 'a:' .. fmt(reqNo)) == 1 then return { 1, 0 } end -- applied already
+    if reqNo < l and (reqNo < l - 7 or redis.call('HEXISTS', sk, 'w') == 0) then return { 3 } end -- cannot be told
+  end
 else
-  if not last then return { 2 } end
-  local l = tonumber(last)
-  if reqNo == l then return replay() end
-  if reqNo < l then return { 3 } end
-  -- A terminated session is gone: nothing may reserve quota on it again.
-  if redis.call('HEXISTS', sk, 'closed') == 1 then return { 2 } end
+  if not last then
+    if not accept then return { 2 } end
+  else
+    local l = tonumber(last)
+    if reqNo == l then return replay() end
+    if reqNo < l then return { 3 } end
+    -- A terminated session is gone: nothing may reserve quota on it again.
+    if redis.call('HEXISTS', sk, 'closed') == 1 then return { 2 } end
+  end
 end
 
 -- A suspended or terminated subscriber gets no new quota or events charged.
@@ -191,8 +202,8 @@ local packed = {}
 for i = 1, #out do packed[i] = fmt(out[i]) end
 -- Remember which request numbers were applied (the last 8): see the header.
 local fields = { 'a:' .. fmt(reqNo), '1' }
-if mode == 'I' then fields[#fields + 1] = 'w'; fields[#fields + 1] = '1' end
-if not late or reqNo > tonumber(last) then
+if mode == 'I' or not last then fields[#fields + 1] = 'w'; fields[#fields + 1] = '1' end
+if not late or not last or reqNo > tonumber(last) then
   fields[#fields + 1] = 'last'; fields[#fields + 1] = fmt(reqNo)
   fields[#fields + 1] = 'ans'; fields[#fields + 1] = table.concat(packed, ',')
 end

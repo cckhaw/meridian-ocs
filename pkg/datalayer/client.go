@@ -88,6 +88,9 @@ type Request struct {
 	Validity     time.Duration
 	Grace        time.Duration
 	Items        []Item
+	// AcceptUnknownSession makes an update or terminate for a session the store does not know a valid request that
+	// creates it and charges its usage, instead of CodeUnknownSession (3GPP TS 32.290 5.5.1.2).
+	AcceptUnknownSession bool
 }
 
 // Code is the script-level outcome.
@@ -211,6 +214,9 @@ func (c *Client) Charge(ctx context.Context, req *Request, resp *Response) error
 	// Updates, terminates and events commit usage: their writes must survive
 	// a primary failure. An initial reservation need not: if it is lost, the
 	// final settlement finds no reservation and charges the reported usage.
+	if req.AcceptUnknownSession {
+		args = append(args, "C")
+	}
 	commit := req.Mode != ModeInitial
 	v, rep, err := c.run(ctx, c.charge, []string{Prefix(req.SubscriberID)}, args, commit)
 	clear(args)

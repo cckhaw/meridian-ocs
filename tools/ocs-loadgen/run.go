@@ -43,6 +43,7 @@ type config struct {
 	Audit        bool
 	Timeline     bool
 	DrainTimeout time.Duration
+	SettleWait   time.Duration // before reading balances: lets reservations whose session was lost expire and be refunded
 	Hold         time.Duration // how long a session lasts: spread evenly over its updates and its release
 }
 

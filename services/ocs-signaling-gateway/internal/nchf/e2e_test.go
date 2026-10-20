@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"io"
 	"math/big"
@@ -146,9 +147,10 @@ func TestSessionOverHTTP2EndToEnd(t *testing.T) {
 	if resp.StatusCode != 404 || bal() != 5000-400-300 {
 		t.Fatalf("update after release: %d bundle=%d", resp.StatusCode, bal())
 	}
-	// a reference that never existed
+	// a reference the store has never seen is not refused: TS 32.290 5.5.1.2 makes it a valid request that creates
+	// the session (the next test checks the usage is charged)
 	ghost := base + "/chargingdata/r1.MjYyMDExMjM0NTY3ODkw.0123456789abcdef/update"
-	if resp, _ = doJSON(t, c, ghost, baseUpdate(2, 1, 1)); resp.StatusCode != 404 {
+	if resp, _ = doJSON(t, c, ghost, baseUpdate(2, 1, 1)); resp.StatusCode != 200 {
 		t.Fatalf("ghost: %d", resp.StatusCode)
 	}
 
@@ -335,5 +337,81 @@ func TestTokenOverMutualTLSEndToEnd(t *testing.T) {
 	}
 	if bal, _ := store.Balance(ctx, "262011234567890", "bundle"); bal != 4000 {
 		t.Fatalf("only the authorised request may have reserved quota: balance %d", bal)
+	}
+}
+
+// 3GPP TS 32.290 5.5.1.2: a Charging Data Request [Update] or [Termination] the CHF cannot associate with any charging
+// session "shall be handled as a valid request with the associated resource creation and quota usage handling". If
+// the session's state was lost (a failover, a flush, an expiry) the usage in its next request is still charged.
+func TestUpdateAndReleaseOfAnUnknownSessionAreChargedPerTS32290(t *testing.T) {
+	store := datalayer.New(redistest.Start(t))
+	ctx := context.Background()
+	const sub = "262015550000001"
+	_ = store.PutBucket(ctx, sub, datalayer.Bucket{ID: "bundle", Class: datalayer.ClassBundle, Kind: canonical.UnitBytes, Balance: 10000, Order: 1})
+	e, err := engine.New(engine.Config{Workers: 2}, engine.Deps{Store: store, Tariff: e2eTariff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	h, _ := NewHandler(Config{AllowUnauthenticated: true}, e, nil)
+	addr := serveOn(t, NewServer("", h, nil), false)
+	base := "http://" + addr + prefix
+	c := h2cClient()
+	bal := func() int64 {
+		v, err := store.Balance(ctx, sub, "bundle")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	ref := func(hash string) string {
+		return base + "/chargingdata/r1." + base64.RawURLEncoding.EncodeToString([]byte(sub)) + "." + hash
+	}
+	req := func(sub string) func(o obj) {
+		return func(o obj) { o["subscriberIdentifier"] = "imsi-" + sub }
+	}
+
+	// An update for a session this store has never heard of: 400 used are charged and a new slice is granted.
+	u := ref("aaaaaaaaaaaaaaaa") + "/update"
+	resp, body := doJSON(t, c, u, with(baseUpdate(5, 400, 1000), req(sub)))
+	if resp.StatusCode != 200 {
+		t.Fatalf("update of an unknown session: %d %s", resp.StatusCode, body)
+	}
+	var first chargingResponse
+	_ = jsonUnmarshal(body, &first)
+	if len(first.MUI) != 1 || first.MUI[0].Granted == nil || *first.MUI[0].Granted.TotalVolume != 1000 {
+		t.Fatalf("a new slice is granted: %s", body)
+	}
+	if got := bal(); got != 10000-400-1000 {
+		t.Fatalf("400 used and 1000 reserved: bundle %d, want %d", got, 10000-400-1000)
+	}
+	// The network element did not get the answer and retransmits with the same Invocation Sequence Number
+	// (TS 32.290 5.5.2): the pair is unique, so nothing is charged twice.
+	resp, again := doJSON(t, c, u, with(baseUpdate(5, 400, 1000), req(sub)))
+	var second chargingResponse
+	_ = jsonUnmarshal(again, &second)
+	if resp.StatusCode != 200 || bal() != 10000-400-1000 || len(second.MUI) != 1 || second.MUI[0].Granted == nil ||
+		*second.MUI[0].Granted.TotalVolume != *first.MUI[0].Granted.TotalVolume {
+		t.Fatalf("retransmission: %d bundle=%d %s", resp.StatusCode, bal(), again)
+	}
+	// The release that follows settles the slice it was given.
+	resp, _ = doJSON(t, c, ref("aaaaaaaaaaaaaaaa")+"/release", with(baseUpdate(6, 300, 0), req(sub)))
+	if resp.StatusCode != 204 || bal() != 10000-400-300 {
+		t.Fatalf("release: %d bundle=%d, want %d", resp.StatusCode, bal(), 10000-400-300)
+	}
+
+	// A release for a session that was never seen: the usage in it is charged, once.
+	r := ref("bbbbbbbbbbbbbbbb") + "/release"
+	before := bal()
+	resp, _ = doJSON(t, c, r, with(baseUpdate(9, 250, 0), req(sub)))
+	if resp.StatusCode != 204 || bal() != before-250 {
+		t.Fatalf("release of an unknown session: %d bundle=%d, want %d", resp.StatusCode, bal(), before-250)
+	}
+	if resp, _ = doJSON(t, c, r, with(baseUpdate(9, 250, 0), req(sub))); resp.StatusCode != 204 || bal() != before-250 {
+		t.Fatalf("retransmitted release charged again: %d bundle=%d", resp.StatusCode, bal())
+	}
+	// A session that was terminated is not an unknown one: it stays closed and cannot be reopened.
+	if resp, _ = doJSON(t, c, ref("bbbbbbbbbbbbbbbb")+"/update", with(baseUpdate(10, 1, 1), req(sub))); resp.StatusCode != 404 || bal() != before-250 {
+		t.Fatalf("update after release: %d bundle=%d", resp.StatusCode, bal())
 	}
 }
