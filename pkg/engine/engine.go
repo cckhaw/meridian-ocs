@@ -24,6 +24,7 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/canonical"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/failpolicy"
+	"github.com/cckhaw/meridian-ocs/pkg/telemetry"
 )
 
 var (
@@ -87,6 +88,9 @@ type Deps struct {
 	Breaker *failpolicy.Breaker
 	Policy  *failpolicy.Engine
 	Audit   chan<- AuditEvent
+	// Latency, when set, records how long each Rate call took (queueing plus
+	// processing), including rejected ones.
+	Latency *telemetry.Histogram
 }
 
 // Stats are cumulative counters.
@@ -184,6 +188,10 @@ func (e *Engine) Stats() Stats {
 // Errors: ErrOverloaded (shed it), ErrClosed, ErrInvalid. Data-tier trouble is
 // not an error: it is answered by the fail policy (resp.Result tells which).
 func (e *Engine) Rate(ctx context.Context, req *canonical.Request, resp *canonical.Response) error {
+	if h := e.deps.Latency; h != nil {
+		start := time.Now()
+		defer func() { h.Observe(time.Since(start)) }()
+	}
 	if e.closed.Load() {
 		return ErrClosed
 	}

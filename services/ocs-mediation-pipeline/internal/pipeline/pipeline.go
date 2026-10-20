@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cckhaw/meridian-ocs/pkg/identity"
@@ -62,7 +63,24 @@ type Pipeline struct {
 	Enricher Enricher
 	Rater    Rater // optional
 	Now      func() time.Time
+
+	totals Totals
 }
+
+// Totals are cumulative counters since start-up, for metrics.
+type Totals struct {
+	Units, StaleUnits, Failures                         atomic.Uint64
+	In, Output, Suspense, Rejected, Duplicates, Unrated uint64Counter
+}
+
+// uint64Counter is an atomic counter with a Load, to keep Totals' zero value usable.
+type uint64Counter struct{ v atomic.Uint64 }
+
+func (c *uint64Counter) add(n int)    { c.v.Add(uint64(n)) }
+func (c *uint64Counter) Load() uint64 { return c.v.Load() }
+
+// Totals returns the counters.
+func (p *Pipeline) Totals() *Totals { return &p.totals }
 
 // Controls are the audit totals of one unit. They are written next to the
 // output and must balance: In = Output + Suspense + Rejected + Duplicates.
@@ -254,8 +272,16 @@ func (p *Pipeline) Process(ctx context.Context, u ledger.Unit, items []Item) (Co
 	}
 	if !ok {
 		_ = p.Sink.Discard(u.Name)
+		p.totals.StaleUnits.Add(1)
 		return c, ErrStale
 	}
+	p.totals.Units.Add(1)
+	p.totals.In.add(c.In)
+	p.totals.Output.add(c.Output)
+	p.totals.Suspense.add(c.Suspense)
+	p.totals.Rejected.add(c.Rejected)
+	p.totals.Duplicates.add(c.Duplicates)
+	p.totals.Unrated.add(c.Unrated)
 	if err := p.Sink.Publish(u.Name); err != nil {
 		// Committed but not yet visible: Recover (at the next start) finishes it.
 		return c, fmt.Errorf("publishing committed output (will be recovered at start-up): %w", err)

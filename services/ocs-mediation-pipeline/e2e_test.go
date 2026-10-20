@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,12 +56,17 @@ func newRig(t *testing.T) *rig {
 }
 
 // start runs the service and returns a stop function that checks Run returned cleanly.
-func (r *rig) start(group string) (stop func()) {
+func (r *rig) start(group string, extra ...map[string]string) (stop func()) {
 	r.t.Helper()
 	e := map[string]string{
 		"OCS_MED_OUT_DIR": r.out, "OCS_MED_IN_DIR": r.in, "OCS_KAFKA_BROKERS": r.brokers, "OCS_MED_KAFKA_GROUP": group,
 		"OCS_REDIS_ADDR": r.rdbAddr, "OCS_REDIS_REPLICAS": "0",
 		"OCS_MED_SETTLE": "10ms", "OCS_MED_SCAN_INTERVAL": "20ms",
+	}
+	for _, m := range extra {
+		for k, v := range m {
+			e[k] = v
+		}
 	}
 	g := func(k string) string { return e[k] }
 	cfg, err := LoadConfig(g)
@@ -244,4 +250,97 @@ func TestMediationEndToEnd(t *testing.T) {
 	if left, _ := os.ReadDir(filepath.Join(r.out, ".staging")); len(left) != 0 {
 		t.Fatalf("staging left behind: %v", left)
 	}
+}
+
+const vendorMapping = `
+version: 1
+name: acme-pgw
+rules:
+  - id: acme
+    match:
+      - {path: $.recordType, equals: pgw}
+    output:
+      type: {const: PGW}
+      nodeId: {path: $.node}
+      chargingId: {path: $.cid, as: integer}
+      sequence: {path: $.seq, as: integer}
+      imsi: {path: $.imsi}
+      openTime: {path: $.openedAtMs, as: time_unix_ms}
+      durationSeconds: {path: $.durationMs, divide: 1000, as: integer}
+      containers:
+        each: $.usage
+        item:
+          ratingGroup: {path: $.rg, as: integer}
+          uplink: {path: $.ul, as: integer}
+          downlink: {path: $.dl, as: integer}
+`
+
+func vendor(seq int, up int) string {
+	return fmt.Sprintf(`{"recordType":"pgw","node":"acme-1","cid":77,"seq":%d,"imsi":"262010000000001","openedAtMs":1893499200000,"durationMs":30000,"usage":[{"rg":100,"ul":%d,"dl":1}]}`, seq, up)
+}
+
+// Vendor records are translated by a declarative mapping that can be replaced
+// while the service runs; a bad edit is refused and the previous mapping serves.
+func TestVendorRecordsAreTranslatedByAHotReloadableMapping(t *testing.T) {
+	r := newRig(t)
+	mapFile := filepath.Join(t.TempDir(), "mapping.yaml")
+	write := func(s string) {
+		t.Helper()
+		if err := os.WriteFile(mapFile, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(vendorMapping)
+	stop := r.start("g-map", map[string]string{"OCS_MED_MAPPING": mapFile, "OCS_MED_MAPPING_RELOAD": "20ms"})
+	defer stop()
+
+	typesSeen := func() map[string]int {
+		_, recs := r.outLines("cdr/dt=2030-01-01/*.jsonl")
+		m := map[string]int{}
+		for _, x := range recs {
+			m[fmt.Sprint(x["type"])]++
+		}
+		return m
+	}
+	rawProduce := func(b string) {
+		t.Helper()
+		if err := r.producer.ProduceSync(context.Background(), &kgo.Record{Topic: topic, Partition: 0, Value: []byte(b)}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Kafka: a vendor record is translated; a record already in the normalized
+	// form matches no rule and passes through; a vendor record that matches but
+	// cannot be converted is rejected, not guessed at.
+	rawProduce(vendor(1, 5))
+	r.produce(0, jsonRec("262010000000002", 21, 1, 1))
+	rawProduce(`{"recordType":"pgw","node":"acme-1","cid":"abc","seq":9,"imsi":"262010000000001","openedAtMs":1,"durationMs":1}`)
+	r.waitFor("translated output", func() bool { return typesSeen()["PGW"] == 1 })
+	_, recs := r.outLines("cdr/dt=2030-01-01/*.jsonl")
+	if recs[0]["chargingId"] != float64(77) || recs[0]["subscriberKey"] != "alice" || recs[0]["durationSeconds"] != float64(30) {
+		t.Fatalf("%v", recs[0])
+	}
+	r.waitFor("native record passed through", func() bool { n, _ := r.outLines("cdr/dt=2030-06-02/*.jsonl"); return n == 1 })
+	r.waitFor("conversion failure rejected", func() bool { n, _ := r.outLines("rejects/kafka-*.jsonl"); return n == 1 })
+
+	// A JSON lines file goes through the same mapping.
+	r.drop("vendor.jsonl", []byte(vendor(2, 6)+"\n"))
+	r.waitFor("file translated", func() bool { return r.exists(r.in, "processed", "vendor.jsonl") && typesSeen()["PGW"] == 2 })
+
+	// A good edit applies without a restart.
+	write(strings.Replace(vendorMapping, "type: {const: PGW}", "type: {const: PGW2}", 1))
+	for seq := 100; typesSeen()["PGW2"] == 0; seq++ {
+		if seq > 400 {
+			t.Fatal("the edited mapping never took effect")
+		}
+		rawProduce(vendor(seq, 1))
+		time.Sleep(30 * time.Millisecond)
+	}
+
+	// A bad edit is refused: the last good mapping keeps translating.
+	write("version: 1\nname: broken\nrules:\n - id: r\n   output:\n    k: {path: nonsense}\n")
+	time.Sleep(300 * time.Millisecond)
+	before := typesSeen()["PGW2"]
+	rawProduce(vendor(900, 1))
+	r.waitFor("translation continues after a bad edit", func() bool { return typesSeen()["PGW2"] > before })
 }

@@ -6,6 +6,7 @@ require (
 	github.com/redis/go-redis/v9 v9.7.3
 	google.golang.org/grpc v1.64.1
 	google.golang.org/protobuf v1.34.2
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

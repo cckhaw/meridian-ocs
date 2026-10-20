@@ -105,3 +105,22 @@ func TestAdmissionConcurrentBurstIsExact(t *testing.T) {
 		t.Fatalf("admitted %d, want exactly the burst of 100", admitted.Load())
 	}
 }
+
+func TestRejectedIsCounted(t *testing.T) {
+	a := New(0, 0, 1)
+	if !a.Acquire() || a.Acquire() || a.Acquire() {
+		t.Fatal("concurrency limit")
+	}
+	if a.Rejected() != 2 {
+		t.Fatalf("%d", a.Rejected())
+	}
+	b := New(1, 1, 0)
+	b.now = func() int64 { return 1_000_000_000 }
+	b.Acquire()
+	for i := 0; i < 5; i++ {
+		b.Acquire()
+	}
+	if b.Rejected() == 0 {
+		t.Fatal("rate rejections must be counted")
+	}
+}

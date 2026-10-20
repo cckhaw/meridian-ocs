@@ -36,7 +36,11 @@
 //	OCS_MAX_INFLIGHT     concurrent request limit, 0 = off    (default 10000)
 //	OCS_TARIFF           "static" or "catalog"                (default static; see newTariff)
 //	OCS_CASH_BYTES_RATE  static tariff: cash price as num/den (default 1/1024)
-//	OCS_ADMIN_ADDR       /healthz and /readyz                 (default :8080)
+//	OCS_ADMIN_ADDR       /healthz, /readyz and /metrics       (default :8080; keep it cluster-internal)
+//	OCS_LOG_LEVEL        debug | info | warn | error          (default info; JSON logs)
+//	OCS_CONTROL_ADDR     guarded AI Ops control plane (gRPC); unset = none. With it:
+//	                     OCS_CONTROL_AUTH=mtls|off, OCS_CONTROL_TLS_CERT/KEY/CLIENT_CA,
+//	                     OCS_CONTROL_AGENTS, OCS_CONTROL_APPROVERS (docs/architecture/11-aiops.md)
 //
 // Nchf authorization: with OCS_NCHF_OAUTH=required every request must carry an
 // NRF-issued OAuth2 access token (Authorization: Bearer ...), validated against
@@ -68,6 +72,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -77,11 +82,15 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/cckhaw/meridian-ocs/pkg/control"
+	"github.com/cckhaw/meridian-ocs/pkg/control/controlrpc"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/engine"
+	"github.com/cckhaw/meridian-ocs/pkg/failpolicy"
 	"github.com/cckhaw/meridian-ocs/pkg/identity"
 	"github.com/cckhaw/meridian-ocs/pkg/service"
 	"github.com/cckhaw/meridian-ocs/pkg/svcenv"
+	"github.com/cckhaw/meridian-ocs/pkg/telemetry"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/admission"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/gy"
 	"github.com/cckhaw/meridian-ocs/services/ocs-signaling-gateway/internal/nchf"
@@ -224,11 +233,27 @@ func run(ctx context.Context, ready func()) error {
 	}
 	defer stopTariff()
 
+	// Structured JSON logs; the level is adjustable at run time (control plane).
+	lvl, ok := telemetry.ParseLevel(env("OCS_LOG_LEVEL", "info"))
+	if !ok {
+		return fmt.Errorf("OCS_LOG_LEVEL: want debug, info, warn or error")
+	}
+	logger, levelVar := telemetry.NewLogger(os.Stderr, "ocs-signaling-gateway", lvl)
+	slog.SetDefault(logger) // the standard log package now writes through it too
+
+	reg := telemetry.NewRegistry()
+	latency := reg.Histogram("ocs_engine_rate_duration_seconds", "Time to rate one charging request (queueing and processing).", nil)
+	breaker := failpolicy.NewBreaker(5, time.Second,
+		func() { logger.Warn("data-tier circuit breaker opened: requests are answered by the fail policy") },
+		func() { logger.Info("data-tier circuit breaker closed") })
+
 	// No profile cache exists yet, so there is no fail policy engine: if the
 	// data tier is down every request is denied (fail-closed for everyone).
 	eng, err := engine.New(engine.Config{}, engine.Deps{
-		Store:  store,
-		Tariff: tariff,
+		Store:   store,
+		Tariff:  tariff,
+		Breaker: breaker,
+		Latency: latency,
 	})
 	if err != nil {
 		return err
@@ -236,6 +261,21 @@ func run(ctx context.Context, ready func()) error {
 	defer eng.Close()
 
 	adm := admission.New(float64(maxTPS), maxTPS/10+1, maxInflight)
+	registerMetrics(reg, eng, adm, resolver, store, breaker)
+	service.HandleAdmin("/metrics", reg.Handler())
+
+	ctl := control.New(control.Config{Service: "ocs-signaling-gateway", Audit: func(e control.Event) {
+		logger.Info("control", "event", e.Type, "change", e.ChangeID, "param", e.Param, "principal", e.Principal, "detail", e.Detail)
+	}})
+	defer ctl.Close() // reverts any unconfirmed change
+	if err := registerControls(ctl, controlTargets{Adm: adm, Breaker: breaker, Level: levelVar, BaselineTPS: maxTPS, BaselineConc: maxInflight}); err != nil {
+		return err
+	}
+	_, stopControl, err := controlrpc.ServeFromEnv(svcenv.OS, ctl, func(f string, a ...any) { logger.Info(fmt.Sprintf(f, a...)) })
+	if err != nil {
+		return err
+	}
+	defer stopControl()
 	errCh := make(chan error, 2)
 	var stops []func()
 

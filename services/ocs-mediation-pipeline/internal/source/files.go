@@ -41,6 +41,8 @@ type FileConfig struct {
 	MaxRecords   int           // more records than this quarantines the file (default 1,000,000)
 	Mapping      cdr.Mapping   // BER mapping
 	Logf         func(string, ...any)
+	// Translate is the same hook as KafkaConfig.Translate, for JSON lines files.
+	Translate func([]byte) ([]byte, error)
 }
 
 // Files watches a directory. Layout under Dir:
@@ -220,7 +222,11 @@ func (f *Files) decodeJSONL(name string, data []byte) ([]pipeline.Item, error) {
 			return nil, fmt.Errorf("more than %d records", f.cfg.MaxRecords)
 		}
 		it := pipeline.Item{Pos: fmt.Sprintf("%s#%d", name, n), Raw: append([]byte(nil), line...)}
-		r, err := cdr.FromJSON(line)
+		body, err := translate(f.cfg.Translate, line)
+		var r cdr.Record
+		if err == nil {
+			r, err = cdr.FromJSON(body)
+		}
 		if err != nil {
 			it.Err = err
 		} else {
