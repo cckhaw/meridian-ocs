@@ -22,6 +22,19 @@ redis:
   requiredReplicas: 1   # replicas that must acknowledge every commit before the answer (OCS_REDIS_REPLICAS)
   waitTimeout: 25ms
   allowNoReplica: false # start without the required replicas; development only, needs allowInsecure
+  # Access control. Redis holds every balance: an open Redis is refused unless allowInsecure.
+  username: ""          # ACL user (Redis 6+); empty = the default user
+  password:
+    secretName: ""      # REQUIRED unless allowInsecure: a Secret holding the password under `key`.
+    key: password       # It is mounted as a file and re-read for every new connection, so rotating the
+                        # Secret needs no restart (the new password must be accepted by Redis first).
+  tls:
+    enabled: false      # REQUIRED to be true (or mesh) unless allowInsecure: the connection is encrypted and the server verified
+    mesh: false         # a service mesh encrypts the connection instead
+    secretName: ""      # Secret with ca.crt (and tls.crt + tls.key when clientCert); empty = the system roots
+    serverName: ""      # name to verify in the server certificate; empty = the host of redis.addr
+    clientCert: false   # present tls.crt / tls.key from the Secret (a Redis that requires client certificates);
+                        # re-read for every handshake, so a renewed certificate needs no restart
 identityPrefix: "id:"   # must be the same everywhere
 logLevel: info
 

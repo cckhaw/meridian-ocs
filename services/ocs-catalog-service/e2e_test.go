@@ -48,7 +48,7 @@ func startSystem(t *testing.T) *system {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app, err := NewApp(context.Background(), cfg, t.Logf)
+	app, err := NewApp(context.Background(), cfg, func(string) string { return "" }, t.Logf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func TestServeEditorForManualTesting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app, err := NewApp(context.Background(), cfg, t.Logf)
+	app, err := NewApp(context.Background(), cfg, func(string) string { return "" }, t.Logf)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,7 +10,7 @@ with web consoles, metrics, alert rules, a Helm chart and a one-command local st
 99.999 % availability, zero double-spend. None of these has been demonstrated yet; see
 [What is not built yet](#what-is-not-built-yet).
 
-*Last updated: 2026-10-20, after the local Docker Compose stack. This README is kept current with every
+*Last updated: 2026-10-20, after Redis password and TLS support. This README is kept current with every
 change: see [Keeping this up to date](#keeping-this-up-to-date).*
 
 ## Try it
@@ -25,7 +25,7 @@ dev/smoke.sh                  # provisions a subscriber, charges it over Nchf, c
 docker compose down -v        # stop and forget everything
 ```
 
-Development only: authentication is off and ports are bound to `127.0.0.1`. Details, ports, what
+Development only: the services have authentication off and ports are bound to `127.0.0.1` (Redis does require a password and TLS). Details, ports, what
 starts in which order and what was verified: [13 – local stack](docs/architecture/13-local-stack.md).
 
 **Just the consoles, with Go and `redis-server` installed (no Docker):**
@@ -52,6 +52,7 @@ mean production-ready). The list of what does not exist yet is [further down](#w
 | 5G Nchf | converged charging create/update/release over HTTP/2, NRF OAuth2 token validation | [05](docs/architecture/05-nchf-adapter.md) |
 | Identity mapping | MSISDN, IMSI and NAI resolve to one subscriber key; unknown or conflicting identifiers are refused, never guessed | [06](docs/architecture/06-identity-mapping.md) |
 | Durability | commits wait for replica acknowledgement (`WAIT`); the gateway refuses to start without the replicas it must wait for | [07](docs/architecture/07-durability.md) |
+| Redis access control | every service connects with an ACL user and password (inline or from a re-read file, so rotation needs no restart) over verified TLS, optionally with a client certificate; misconfiguration is refused at start-up; the chart will not render an open Redis | [07](docs/architecture/07-durability.md) |
 | Fail policy | data tier down: all prepaid refused (fail-closed), postpaid gets small capped grants; circuit breaker | [02](docs/architecture/02-decisions-and-failure-policy.md) |
 | Tariff catalog | versioned, compiled, future-datable price plans with a typed condition language, policy filters, offerings and allowances; published atomically and swapped in with no restart; dry-run against the live version | [09](docs/architecture/09-catalog.md) |
 | Per-subscriber plans | an attached offering selects the price plan and creates its allowance buckets atomically; never silently falls back to the default plan on a lookup failure | [09](docs/architecture/09-catalog.md), [08](docs/architecture/08-provisioning.md) |
@@ -79,9 +80,9 @@ ones I would build first.
 
 **Scale, performance and platform**
 - **No load test.** The numbers in the docs are micro-benchmarks in a small sandbox (about 110 µs per Redis
-  charge call on loopback). 50k TPS and P99 < 10 ms are untested against a real cluster.
-- **No Redis Cluster support** (`WAIT` is not available on Cluster) and no Sentinel/operator integration.
-- **Redis connections have no password, ACL user or TLS option** (address only). **(next candidate)**
+  charge call on loopback). 50k TPS and P99 < 10 ms are untested against a real cluster. **(next candidate)**
+- **No Redis Cluster support** (`WAIT` is not available on Cluster) and no Sentinel/operator integration (the address is a single endpoint).
+- Redis access control is coarse: one user and password per release (no least-privilege ACL profile per service), and a rotated CA certificate is read at start-up only.
 - **No multi-region active-active replication** (design only, doc 01 §6).
 - **Standalone `ocs-rating-engine` and `ocs-data-layer` services** are scaffolds; the engine runs in-process in the gateway.
 - **The Helm chart has never been installed in a cluster.** No Redis or Kafka in the chart, NetworkPolicy is

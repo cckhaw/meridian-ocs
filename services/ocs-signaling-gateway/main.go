@@ -29,6 +29,8 @@
 //	OCS_ORIGIN_REALM     Diameter realm, required
 //	OCS_HOST_IP          address advertised in CEA, required
 //	OCS_REDIS_ADDR       hot-state store                      (default 127.0.0.1:6379)
+//	OCS_REDIS_USERNAME, OCS_REDIS_PASSWORD or OCS_REDIS_PASSWORD_FILE, OCS_REDIS_TLS=on and
+//	OCS_REDIS_TLS_CA / _CERT / _KEY / _SERVER_NAME: access control for Redis (svcenv.ApplyRedisAccess)
 //	OCS_REDIS_REPLICAS   replicas that must acknowledge a commit     (default 1)
 //	OCS_REDIS_WAIT_TIMEOUT  how long to wait for them             (default 25ms)
 //	OCS_ALLOW_NO_REPLICA "true" starts without the required replicas (development only)
@@ -209,15 +211,14 @@ func run(ctx context.Context, ready func()) error {
 		return err
 	}
 
-	rdb := redis.NewClient(&redis.Options{
-		Addr:         env("OCS_REDIS_ADDR", "127.0.0.1:6379"),
-		DialTimeout:  200 * time.Millisecond,
-		ReadTimeout:  250 * time.Millisecond, // bounds every data-tier call
-		WriteTimeout: 250 * time.Millisecond,
-		PoolSize:     256,
-		MinIdleConns: 16,
-	})
+	rdb, err := newRedis(env)
+	if err != nil {
+		return err
+	}
 	defer rdb.Close()
+	if err := svcenv.CheckRedisAccess(ctx, rdb); err != nil {
+		return err
+	}
 	store := datalayer.New(rdb)
 	if err := svcenv.ConfigureDurability(ctx, svcenv.OS, store, func(f string, a ...any) { log.Printf("ocs-signaling-gateway: "+f, a...) }); err != nil {
 		return err
@@ -357,3 +358,22 @@ func run(ctx context.Context, ready func()) error {
 }
 
 func main() { service.RunWith("ocs-signaling-gateway", run) }
+
+// newRedis connects to the hot-state store as the environment says (address,
+// credentials, TLS: see svcenv.ApplyRedisAccess).
+func newRedis(env func(string, string) string) (*redis.Client, error) {
+	ropts := &redis.Options{
+		Addr:         env("OCS_REDIS_ADDR", "127.0.0.1:6379"),
+		DialTimeout:  200 * time.Millisecond,
+		ReadTimeout:  250 * time.Millisecond, // bounds every data-tier call
+		WriteTimeout: 250 * time.Millisecond,
+		PoolSize:     256,
+		MinIdleConns: 16,
+	}
+	access, err := svcenv.ApplyRedisAccess(ropts, svcenv.OS)
+	if err != nil {
+		return nil, err
+	}
+	svcenv.LogRedisAccess(func(f string, a ...any) { log.Printf("ocs-signaling-gateway: "+f, a...) }, access)
+	return redis.NewClient(ropts), nil
+}

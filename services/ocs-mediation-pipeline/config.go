@@ -25,6 +25,8 @@ import (
 //	OCS_MED_DEDUP_WINDOW       how long duplicates are remembered (default 72h)
 //	OCS_REDIS_ADDR             ledger, duplicate window, identity directory (default 127.0.0.1:6379)
 //	OCS_REDIS_REPLICAS, OCS_REDIS_WAIT_TIMEOUT, OCS_ALLOW_NO_REPLICA  see docs/architecture/07-durability.md
+//	OCS_REDIS_USERNAME, OCS_REDIS_PASSWORD or OCS_REDIS_PASSWORD_FILE, OCS_REDIS_TLS=on and
+//	OCS_REDIS_TLS_CA / _CERT / _KEY / _SERVER_NAME: access control for Redis (svcenv.ApplyRedisAccess)
 //	OCS_IDENTITY_PREFIX        identity directory key prefix      (default id:)
 //	OCS_CDR_MAPPING            JSON file overriding the PGW BER field mapping
 //	OCS_MED_MAPPING            YAML/JSON mapping translating vendor JSON records into the normalized

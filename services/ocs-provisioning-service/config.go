@@ -15,6 +15,8 @@ import (
 //	OCS_PROV_MODE            all (default) | api | worker
 //	OCS_REDIS_ADDR           hot store                         (default 127.0.0.1:6379)
 //	OCS_REDIS_REPLICAS, OCS_REDIS_WAIT_TIMEOUT, OCS_ALLOW_NO_REPLICA   see docs/architecture/07-durability.md
+//	OCS_REDIS_USERNAME, OCS_REDIS_PASSWORD or OCS_REDIS_PASSWORD_FILE, OCS_REDIS_TLS=on and
+//	OCS_REDIS_TLS_CA / _CERT / _KEY / _SERVER_NAME: access control for Redis (svcenv.ApplyRedisAccess)
 //	OCS_IDENTITY_PREFIX      identity directory key prefix     (default id:; must match the gateway)
 //	OCS_KAFKA_BROKERS        required, comma separated
 //	OCS_KAFKA_COMMANDS_TOPIC, OCS_KAFKA_EVENTS_TOPIC, OCS_KAFKA_DLQ_TOPIC, OCS_KAFKA_GROUP

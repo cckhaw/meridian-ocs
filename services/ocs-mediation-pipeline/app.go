@@ -44,7 +44,13 @@ type App struct {
 // an earlier crash, and builds the sources.
 func NewApp(ctx context.Context, cfg Config, g svcenv.Getenv, logf func(string, ...any)) (*App, error) {
 	a := &App{cfg: cfg, logf: logf}
-	a.rdb = redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, PoolSize: 32})
+	ropts := &redis.Options{Addr: cfg.RedisAddr, PoolSize: 32}
+	access, err := svcenv.ApplyRedisAccess(ropts, g)
+	if err != nil {
+		return nil, err
+	}
+	svcenv.LogRedisAccess(logf, access)
+	a.rdb = redis.NewClient(ropts)
 	fail := func(err error) (*App, error) { a.Close(); return nil, err }
 
 	replicas, err := g.Int("OCS_REDIS_REPLICAS", 1)

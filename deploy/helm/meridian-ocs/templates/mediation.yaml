@@ -31,7 +31,7 @@ data:
 {{- $claims := list (dict "metadata" (dict "name" "data") "spec" (dict "accessModes" (list "ReadWriteOnce") "resources" (dict "requests" (dict "storage" $m.persistence.size)))) }}
 {{- if $m.persistence.storageClass }}{{ $_ := set (index $claims 0).spec "storageClassName" $m.persistence.storageClass }}{{ end }}
 {{- $env := include "mediation.env" . }}
-{{ include "ocs.component" (dict "root" . "name" "mediation" "service" "ocs-mediation-pipeline" "kind" "StatefulSet"
+{{ include "ocs.component" (dict "redis" true "root" . "name" "mediation" "service" "ocs-mediation-pipeline" "kind" "StatefulSet"
     "replicas" 1 "resources" $m.resources "ports" (list) "env" $env
     "volumes" (ternary (toYaml $vols) "" (gt (len $vols) 0)) "mounts" (toYaml $mounts) "claims" (toYaml $claims)
     "checksum" (ternary (toYaml (list $m.mapping $m.cdrMapping) | sha256sum) "" (not (not $hasConfig)))) }}

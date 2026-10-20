@@ -66,6 +66,12 @@ refuses() {
 S="-f ci/secure.yaml"
 refuses "no image repository"                      "image.repository is required"            $S --set image.repository=
 refuses "no image tag"                             "image.tag is required"                   $S --set image.tag=
+refuses "an open Redis (no password) is refused"      "redis.password.secretName is required" $S --set redis.password.secretName=
+refuses "an unencrypted Redis connection is refused" "redis.tls.enabled=true is required"    $S --set redis.tls.enabled=false --set redis.tls.secretName= --set redis.tls.clientCert=false
+refuses "Redis TLS and a mesh are exclusive"        "choose one"                             $S --set redis.tls.mesh=true
+refuses "Redis TLS options without TLS"             "have no effect without redis.tls.enabled" $S --set allowInsecure=true --set redis.tls.enabled=false
+refuses "a Redis client certificate needs a Secret" "redis.tls.clientCert needs"             $S --set redis.tls.secretName=
+refuses "a Redis user needs a password"             "redis.username needs"                   -f ci/dev.yaml --set redis.username=app
 refuses "no redis address"                         "redis.addr is required"                  $S --set redis.addr=
 refuses "provisioning auth must be chosen"        'provisioning.auth must be set'           $S --set provisioning.auth=
 refuses "auth off needs allowInsecure"             "provisioning.auth=off is refused"        $S --set-string provisioning.auth=off --set provisioning.clients=null --set provisioning.privileged=null
@@ -111,6 +117,12 @@ grep -qE '^  replicas: 1$' <<<"$st" && ok "mediation runs exactly one pod (its l
 # the admin port is only reachable through the -admin Services
 svcs=$(awk 'BEGIN{RS="---\n"} /kind: Service/ && !/-admin/' <<<"$secure")
 grep -q 'port: 8080' <<<"$svcs" && bad "a client-facing Service exposes the admin port" || ok "client-facing Services never expose the admin port"
-grep -qiE 'password|secretKey|apiKey|BEGIN (RSA|PRIVATE)' <<<"$secure$dev" && bad "something secret-looking is in the rendered output" || ok "no secret material in the rendered output"
+# Redis credentials reach the pods as files from Secrets, never as environment values
+grep -q 'OCS_REDIS_PASSWORD_FILE' <<<"$workloads" && ! grep -qE 'name: OCS_REDIS_PASSWORD[,}]' <<<"$workloads" && ok "the Redis password is a mounted file, not an environment value" || bad "the Redis password is exposed as an environment value"
+n_redis=$(count "$workloads" 'name: redis-password$')
+[ "$n_redis" -ge 5 ] && ok "every Redis-using workload mounts the password Secret ($n_redis volumes)" || bad "expected the password Secret on 5 workloads, got $n_redis"
+aiops=$(awk 'BEGIN{RS="---\n"} /kind: Deployment/ && /name: r-aiops$/' <<<"$secure")
+grep -q 'redis' <<<"$aiops" && bad "AI Ops (no Redis) mounts Redis credentials" || ok "AI Ops, which does not use Redis, gets no Redis credentials"
+grep -qiE 'secretKey|apiKey|BEGIN (RSA|EC )?PRIVATE KEY' <<<"$secure$dev" && bad "something secret-looking is in the rendered output" || ok "no secret material in the rendered output"
 
 exit $fail

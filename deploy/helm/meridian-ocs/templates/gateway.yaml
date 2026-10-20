@@ -36,7 +36,7 @@
 {{- $vols = append $vols (dict "name" "control-tls" "secret" (dict "secretName" $g.control.tls.secretName "defaultMode" 288)) }}
 {{- $mounts = append $mounts (dict "name" "control-tls" "mountPath" "/tls/control" "readOnly" true) }}
 {{- end }}
-{{ include "ocs.component" (dict "root" . "name" "gateway" "service" "ocs-signaling-gateway" "kind" "Deployment"
+{{ include "ocs.component" (dict "redis" true "root" . "name" "gateway" "service" "ocs-signaling-gateway" "kind" "Deployment"
     "replicas" $g.replicas "resources" $g.resources "ports" $ports "env" $env
     "volumes" (ternary (toYaml $vols) "" (gt (len $vols) 0)) "mounts" (ternary (toYaml $mounts) "" (gt (len $mounts) 0))
     "pdb" $g.pdb "autoscaling" $g.autoscaling) }}

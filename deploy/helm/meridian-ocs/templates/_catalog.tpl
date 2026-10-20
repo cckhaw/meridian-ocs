@@ -1,6 +1,6 @@
 {{- define "catalog.env" -}}
 {{- $c := .Values.catalog -}}
-- {name: OCS_REDIS_ADDR, value: {{ required "redis.addr is required" .Values.redis.addr | quote }}}
+{{ include "ocs.env.redisAccess" . }}
 - {name: OCS_CATALOG_ADDR, value: {{ printf ":%d" (int $c.port) | quote }}}
 - {name: OCS_CATALOG_AUTH, value: {{ $c.auth | quote }}}
 {{- include "ocs.opt" (dict "name" "OCS_CATALOG_RETAIN" "value" $c.retain) }}

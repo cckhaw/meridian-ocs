@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -98,4 +99,121 @@ func start(tb testing.TB, extra ...string) (*redis.Client, *exec.Cmd) {
 	tb.Cleanup(func() { _ = rdb.Close() })
 	waitFor(tb, "redis-server to start", func() bool { return rdb.Ping(context.Background()).Err() == nil })
 	return rdb, cmd
+}
+
+// Secure describes the access control of a server started by StartSecure.
+type Secure struct {
+	// Password is the default user's password (requirepass). Ignored when
+	// DisableDefaultUser is set.
+	Password string
+	// User, if set, is created with full access and UserPassword.
+	User, UserPassword string
+	// DisableDefaultUser turns the default user off, so only User can log in.
+	DisableDefaultUser bool
+	// TLS, if set, makes the server accept TLS connections only (no plaintext port).
+	TLS *ServerTLS
+}
+
+// ServerTLS are the server's certificate files. ClientCAFile, when set, makes
+// the server demand a client certificate signed by that CA.
+type ServerTLS struct {
+	CertFile, KeyFile, CAFile string
+	RequireClientCert         bool
+}
+
+// StartSecure launches a redis-server with the given access control and returns
+// its address. The test is skipped (or fails, with OCS_REQUIRE_REDIS=1) when
+// redis-server is missing or was built without TLS support and TLS is asked for.
+func StartSecure(tb testing.TB, s Secure) (addr string, kill func()) {
+	tb.Helper()
+	bin, err := exec.LookPath("redis-server")
+	if err != nil {
+		if os.Getenv("OCS_REQUIRE_REDIS") == "1" {
+			tb.Fatal("redis-server not found and OCS_REQUIRE_REDIS=1")
+		}
+		tb.Skip("redis-server not installed")
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		tb.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+
+	args := []string{"--bind", "127.0.0.1", "--save", "", "--appendonly", "no", "--dir", tb.TempDir()}
+	if s.TLS != nil {
+		clientAuth := "no"
+		if s.TLS.RequireClientCert {
+			clientAuth = "yes"
+		}
+		args = append(args, "--port", "0", "--tls-port", fmt.Sprint(port),
+			"--tls-cert-file", s.TLS.CertFile, "--tls-key-file", s.TLS.KeyFile, "--tls-ca-cert-file", s.TLS.CAFile,
+			"--tls-auth-clients", clientAuth)
+	} else {
+		args = append(args, "--port", fmt.Sprint(port))
+	}
+	if s.DisableDefaultUser {
+		args = append(args, "--user", "default", "off")
+	} else if s.Password != "" {
+		args = append(args, "--requirepass", s.Password)
+	}
+	if s.User != "" {
+		args = append(args, "--user", s.User, "on", ">"+s.UserPassword, "~*", "&*", "+@all")
+	}
+	cmd := exec.Command(bin, args...)
+	out := &syncBuffer{}
+	cmd.Stdout, cmd.Stderr = out, out
+	if err := cmd.Start(); err != nil {
+		tb.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
+	kill = func() {
+		_ = cmd.Process.Kill()
+		<-exited
+	}
+	tb.Cleanup(kill)
+
+	addr = fmt.Sprintf("127.0.0.1:%d", port)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if c, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
+			c.Close()
+			return addr, kill
+		}
+		select {
+		case <-exited:
+		default:
+			if time.Now().Before(deadline) {
+				time.Sleep(20 * time.Millisecond)
+				continue
+			}
+		}
+		if s.TLS != nil && strings.Contains(strings.ToLower(out.String()), "tls") {
+			if os.Getenv("OCS_REQUIRE_REDIS") == "1" {
+				tb.Fatalf("redis-server does not accept the TLS options: %s", out.String())
+			}
+			tb.Skipf("redis-server built without TLS support? %s", out.String())
+		}
+		tb.Fatalf("redis-server did not start: %s", out.String())
+	}
+}
+
+// syncBuffer collects a process's output; it is written by the exec goroutines
+// while the test reads it.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

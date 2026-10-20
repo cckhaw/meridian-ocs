@@ -1,6 +1,10 @@
 # A production-shaped install: every listener authenticated, everything enabled.
 image: {repository: registry.example.com/meridian, tag: "0.1.0"}
-redis: {addr: redis-primary.data:6379}
+redis:
+  addr: redis-primary.data:6379
+  username: ocs
+  password: {secretName: redis-auth}
+  tls: {enabled: true, secretName: redis-tls, clientCert: true}
 kafka: {brokers: "kafka-0.kafka:9092,kafka-1.kafka:9092"}
 networkPolicy:
   enabled: true

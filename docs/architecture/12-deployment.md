@@ -17,6 +17,12 @@ points at them (`redis.addr`, `kafka.brokers`).
   (named callers with auth off) is an error, as in the services. The Nchf listener
   must have TLS (a Secret, or `tls.mesh: true` when a mesh terminates it) because
   OAuth tokens are bearer credentials.
+- **Redis is never open.** `redis.password.secretName` is required, and so is
+  `redis.tls.enabled` (or `redis.tls.mesh` when a mesh encrypts the connection), unless
+  `allowInsecure`. The password is mounted as a file and re-read for every new connection
+  (rotation needs no restart); the TLS Secret carries `ca.crt` and, with `redis.tls.clientCert`,
+  `tls.crt` / `tls.key`. Options that would have no effect are refused. The password never appears
+  as an environment value (checked by `test.sh`). Details: [07](07-durability.md#connecting-to-redis-credentials-and-tls).
 - **No secrets in values.** Certificates and keys are Kubernetes Secrets you create
   (cert-manager works: `tls.crt`, `tls.key`, `ca.crt`) and reference by name, mounted
   read-only. The NRF's token-signing certificate is a Secret too.
@@ -150,6 +156,7 @@ actually emitted** by the real binaries (the CI check is the cheaper static vers
    are not in the chart (the gateway runs the engine in-process).
 8. **Images are built and smoke-tested in CI** (job `stack`, [13](13-local-stack.md)) but not
    published to a registry, signed or scanned.
-9. **Redis connections have no password, ACL user or TLS option**: every service connects by
-   address only. In a cluster this must be solved by network policy or a mesh until the
-   services learn `OCS_REDIS_PASSWORD` / `OCS_REDIS_TLS`; the chart has no value for them.
+9. **Redis access control is coarse.** One user and password are shared by every service in a
+   release; there is no least-privilege ACL profile per service (for example a catalog user that
+   cannot touch balances), and a rotated *CA* certificate (unlike the password and client
+   certificate) is read at start-up only. Sentinel and Cluster addressing are not supported.

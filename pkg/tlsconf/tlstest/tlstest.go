@@ -68,6 +68,14 @@ func (p *PKI) issue(tb testing.TB, cn string, usage x509.ExtKeyUsage, ips []net.
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kd})
 }
 
+// ClientFiles issues a client certificate with the given common name and returns
+// the PEM files of the certificate and its key.
+func (p *PKI) ClientFiles(tb testing.TB, commonName string) (certFile, keyFile string) {
+	tb.Helper()
+	c, k := p.issue(tb, commonName, x509.ExtKeyUsageClientAuth, nil)
+	return p.write(tb, commonName+".crt", c), p.write(tb, commonName+".key", k)
+}
+
 // ClientTLS returns a client configuration trusting the CA. With a name it
 // presents a client certificate with that common name.
 func (p *PKI) ClientTLS(tb testing.TB, commonName string) *tls.Config {

@@ -27,6 +27,43 @@ If fewer replicas than required acknowledge within the timeout (default 25 ms), 
 
 **Suspension.** A dead replica would otherwise add the full timeout to every commit and wreck the latency budget. After 5 consecutive shortfalls, waiting is suspended for 5 s (commits stay fast, are marked `Short` and counted as `Suspended`), then one probe waits again. Both numbers are configurable. The consequence to accept: **while suspended, commits are not durable**. Alert on a rising `Short` / `Suspended` count.
 
+## Connecting to Redis: credentials and TLS
+
+Balances live in Redis, so a connection that anyone on the network can open, or read, is a
+hole in everything above. Every service that uses Redis (gateway, provisioning, catalog, mediation)
+takes the same settings (`pkg/svcenv.ApplyRedisAccess`):
+
+| Variable | Meaning |
+|---|---|
+| `OCS_REDIS_USERNAME` | ACL user (Redis 6+); empty = the default user |
+| `OCS_REDIS_PASSWORD` or `OCS_REDIS_PASSWORD_FILE` | the password, inline or from a file (prefer the file: mount a Secret). Not both. The file is **read again for every new connection**, so a rotated password needs no restart: change it on Redis (`ACL SETUSER ... >new`) and in the file, and the pool picks it up as connections are replaced |
+| `OCS_REDIS_TLS` | `on` or `off` (default `off`) |
+| `OCS_REDIS_TLS_CA` | PEM file of the CA that signed the server certificate (default: system roots) |
+| `OCS_REDIS_TLS_CERT`, `OCS_REDIS_TLS_KEY` | client certificate for a Redis that requires one (`tls-auth-clients yes`); re-read for every handshake, so a renewed certificate needs no restart |
+| `OCS_REDIS_TLS_SERVER_NAME` | name to verify in the server certificate (default: the host of `OCS_REDIS_ADDR`) |
+
+Server verification is never switched off (there is no "skip verify"). Settings that would have no
+effect are errors, in the same spirit as the listeners' `AUTH` settings: TLS options with TLS off, a
+username without a password, both a password and a password file. A start-up check
+(`CheckRedisAccess`) fails the process, with the reason, when Redis refuses its credentials
+(`NOAUTH`, `WRONGPASS`, `NOPERM`), when TLS verification fails, or when the server closes the
+connection three times in a row before answering (what a TLS-only Redis does to a plaintext client);
+an **unreachable** Redis is not an error there, because the gateway must still start during an
+outage to serve its fail policy. Because a TLS handshake takes longer than the 200 ms the gateway
+allows a plain connect, `DialTimeout` is raised to 1 s when TLS is on (connections are pooled, so this
+is off the hot path). The password is never logged; the start-up line says only *how* the connection
+is protected (`redis access: user ocs (password from a file), TLS with a client certificate`) and warns
+when it is neither authenticated nor encrypted.
+
+Verified against a real `redis-server` with `requirepass`, a named ACL user with the default user
+disabled, TLS-only listeners and `tls-auth-clients yes`: no password, wrong password and wrong user
+are refused; a plaintext client cannot talk to a TLS server; a server certificate from another CA, an
+untrusted CA and a wrong server name are refused; a client certificate from another CA is refused;
+a rotated password file is picked up; a service-level test per service proves it uses the settings and
+refuses to start otherwise (mutation-checked: skipping the settings makes each fail). Also run through
+the Docker Compose stack, where Redis requires a password and TLS, replication runs over TLS and the
+replica acknowledgements the gateway waits for still arrive.
+
 ## Startup check
 
 The gateway reads `INFO replication` and **refuses to start** if fewer than `OCS_REDIS_REPLICAS` (default 1) replicas are connected, unless `OCS_ALLOW_NO_REPLICA=true` (development only, logs a warning). `OCS_REDIS_REPLICAS=0` turns waiting off (logs a warning).

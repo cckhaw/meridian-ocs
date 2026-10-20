@@ -12,7 +12,7 @@
 {{- $mounts = append $mounts (dict "name" "tls" "mountPath" "/tls" "readOnly" true) }}
 {{- end }}
 {{- $env := include "catalog.env" . }}
-{{ include "ocs.component" (dict "root" . "name" "catalog" "service" "ocs-catalog-service" "kind" "Deployment"
+{{ include "ocs.component" (dict "redis" true "root" . "name" "catalog" "service" "ocs-catalog-service" "kind" "Deployment"
     "replicas" $c.replicas "resources" $c.resources "ports" (list (dict "name" "rest" "port" $c.port)) "env" $env
     "volumes" (ternary (toYaml $vols) "" (gt (len $vols) 0)) "mounts" (ternary (toYaml $mounts) "" (gt (len $mounts) 0))
     "pdb" $c.pdb) }}

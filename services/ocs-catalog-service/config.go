@@ -11,6 +11,8 @@ import (
 // Config is read from the environment.
 //
 //	OCS_REDIS_ADDR            catalog system of record          (default 127.0.0.1:6379)
+//	OCS_REDIS_USERNAME, OCS_REDIS_PASSWORD or OCS_REDIS_PASSWORD_FILE, OCS_REDIS_TLS=on and
+//	OCS_REDIS_TLS_CA / _CERT / _KEY / _SERVER_NAME: access control for Redis (svcenv.ApplyRedisAccess)
 //	OCS_CATALOG_ADDR          REST listener                      (default :8444)
 //	OCS_CATALOG_AUTH          required: "mtls" or "off"
 //	OCS_CATALOG_TLS_CERT, OCS_CATALOG_TLS_KEY, OCS_CATALOG_CLIENT_CA
