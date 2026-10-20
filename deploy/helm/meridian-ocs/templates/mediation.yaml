@@ -1,0 +1,38 @@
+{{- if .Values.mediation.enabled }}
+{{- $m := .Values.mediation }}
+{{- if not (or $m.input.enabled $m.kafka.enabled) }}{{ fail "mediation needs a source: set mediation.input.enabled and/or mediation.kafka.enabled" }}{{ end }}
+{{- if $m.kafka.enabled }}{{ $_ := required "kafka.brokers is required for Kafka-fed mediation" .Values.kafka.brokers }}{{ end }}
+{{- if not (has $m.rating (list "off" "catalog")) }}{{ fail "mediation.rating must be off or catalog" }}{{ end }}
+{{- if and (eq $m.rating "catalog") (not $m.defaultPlan) }}{{ fail "mediation.rating=catalog needs mediation.defaultPlan" }}{{ end }}
+{{- $name := include "ocs.name" (dict "root" . "name" "mediation") }}
+{{- $hasConfig := or $m.mapping $m.cdrMapping }}
+{{- if $hasConfig }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels: {{- include "ocs.labels" (dict "root" . "name" "mediation") | nindent 4 }}
+data:
+  {{- if $m.mapping }}
+  mapping.yaml: |
+    {{- $m.mapping | nindent 4 }}
+  {{- end }}
+  {{- if $m.cdrMapping }}
+  cdr-mapping.json: |
+    {{- $m.cdrMapping | nindent 4 }}
+  {{- end }}
+---
+{{- end }}
+{{- $vols := list }}{{- $mounts := list (dict "name" "data" "mountPath" "/data") }}
+{{- if $hasConfig }}
+{{- $vols = append $vols (dict "name" "config" "configMap" (dict "name" $name)) }}
+{{- $mounts = append $mounts (dict "name" "config" "mountPath" "/config" "readOnly" true) }}
+{{- end }}
+{{- $claims := list (dict "metadata" (dict "name" "data") "spec" (dict "accessModes" (list "ReadWriteOnce") "resources" (dict "requests" (dict "storage" $m.persistence.size)))) }}
+{{- if $m.persistence.storageClass }}{{ $_ := set (index $claims 0).spec "storageClassName" $m.persistence.storageClass }}{{ end }}
+{{- $env := include "mediation.env" . }}
+{{ include "ocs.component" (dict "root" . "name" "mediation" "service" "ocs-mediation-pipeline" "kind" "StatefulSet"
+    "replicas" 1 "resources" $m.resources "ports" (list) "env" $env
+    "volumes" (ternary (toYaml $vols) "" (gt (len $vols) 0)) "mounts" (toYaml $mounts) "claims" (toYaml $claims)
+    "checksum" (ternary (toYaml (list $m.mapping $m.cdrMapping) | sha256sum) "" (not (not $hasConfig)))) }}
+{{- end }}

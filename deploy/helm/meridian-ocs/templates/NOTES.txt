@@ -1,0 +1,10 @@
+Meridian OCS {{ .Chart.AppVersion }} installed as {{ .Release.Name }}.
+
+Enabled: {{ if .Values.gateway.enabled }}gateway {{ end }}{{ if .Values.provisioning.enabled }}provisioning {{ end }}{{ if .Values.catalog.enabled }}catalog {{ end }}{{ if .Values.mediation.enabled }}mediation {{ end }}{{ if .Values.aiops.enabled }}aiops {{ end }}
+
+Not installed by this chart: Redis (primary + {{ .Values.redis.requiredReplicas }} replica(s) with acknowledged writes) and Kafka. The gateway
+refuses to start while fewer than redis.requiredReplicas replicas are connected.
+{{- if .Values.allowInsecure }}
+
+WARNING: allowInsecure=true. Anything rendered with authentication "off" is open to whoever can reach it.
+{{- end }}

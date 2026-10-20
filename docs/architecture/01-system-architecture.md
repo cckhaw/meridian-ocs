@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Design baseline. The gateway (Gy, Nchf), rating engine, identity mapping, durability, provisioning, tariff catalog and offline mediation are implemented; the AI Ops interface (metrics, guarded control plane, declarative mappings) exists for the gateway and mediation; multi-region and Helm are not. See the [README](../../README.md) for what is built and [docs 02–10](.) for each module as built. Sections below describe the *target* design and may be ahead of the code. |
+| **Status** | Design baseline. The gateway (Gy, Nchf), rating engine, identity mapping, durability, provisioning, tariff catalog and offline mediation are implemented; the AI Ops interface (metrics, guarded control plane, declarative mappings) exists for the gateway and mediation; multi-region is not, and the Helm chart ([12](12-deployment.md)) exists but has not been installed in a cluster. See the [README](../../README.md) for what is built and [docs 02–10](.) for each module as built. Sections below describe the *target* design and may be ahead of the code. |
 | **Scope** | Real-time Online (Gy/Ro, Nchf) and Offline (CDR) charging, 50M+ subscribers |
 | **Language** | Go 1.22+ |
 | **Targets** | ≥ 50,000 TPS peak, P99 < 10 ms in-region, 99.999% availability, zero double-spend |
@@ -405,7 +405,7 @@ Every transition emits a notification event; illegal transitions are rejected by
 
 ## 10. Repository layout
 
-The `go.work` layout (as proposed; `deploy/helm/` is still empty and `ocs-rating-engine`, `ocs-data-layer`, `ocs-aiops-layer` are scaffolds; shared code lives in `pkg/`):
+The `go.work` layout (as proposed; `deploy/helm/meridian-ocs` now holds the chart and `ocs-rating-engine`, `ocs-data-layer`, `ocs-aiops-layer` are scaffolds; shared code lives in `pkg/`):
 
 ```
 meridian-ocs/

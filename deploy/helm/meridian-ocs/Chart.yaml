@@ -1,0 +1,7 @@
+apiVersion: v2
+name: meridian-ocs
+description: Meridian Online Charging System - signaling gateway, provisioning, catalog, mediation and AI Ops services
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"

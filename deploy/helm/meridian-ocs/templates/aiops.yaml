@@ -1,0 +1,17 @@
+{{- if .Values.aiops.enabled }}
+{{- $a := .Values.aiops }}
+{{- $auth := include "ocs.auth" (dict "root" . "what" "aiops.auth" "value" $a.auth) }}
+{{- if and (eq $auth "mtls") (not $a.tls.secretName) }}{{ fail "aiops.auth=mtls needs aiops.tls.secretName (tls.crt, tls.key and ca.crt)" }}{{ end }}
+{{- $vols := list }}{{- $mounts := list }}
+{{- if eq $auth "mtls" }}
+{{- $vols = append $vols (dict "name" "tls" "secret" (dict "secretName" $a.tls.secretName "defaultMode" 288)) }}
+{{- $mounts = append $mounts (dict "name" "tls" "mountPath" "/tls" "readOnly" true) }}
+{{- end }}
+{{- $env := include "aiops.env" . }}
+{{ include "ocs.component" (dict "root" . "name" "aiops" "service" "ocs-aiops-layer" "kind" "Deployment"
+    "replicas" $a.replicas "resources" $a.resources "ports" (list (dict "name" "http" "port" $a.port)) "env" $env
+    "volumes" (ternary (toYaml $vols) "" (gt (len $vols) 0)) "mounts" (ternary (toYaml $mounts) "" (gt (len $mounts) 0))
+    "pdb" $a.pdb) }}
+---
+{{ include "ocs.service" (dict "root" . "name" "aiops" "svc" $a.service "ports" (list (dict "name" "http" "port" $a.port))) }}
+{{- end }}
