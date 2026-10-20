@@ -148,5 +148,8 @@ actually emitted** by the real binaries (the CI check is the cheaper static vers
 6. **No mesh topology, no multi-region.** Active-active across regions is not built.
 7. **The standalone rating-engine and data-layer services** are still scaffolds and
    are not in the chart (the gateway runs the engine in-process).
-8. **Images are not built or published** by CI; the Dockerfile exists but is
-   untested here (no container runtime in the development environment).
+8. **Images are built and smoke-tested in CI** (job `stack`, [13](13-local-stack.md)) but not
+   published to a registry, signed or scanned.
+9. **Redis connections have no password, ACL user or TLS option**: every service connects by
+   address only. In a cluster this must be solved by network policy or a mesh until the
+   services learn `OCS_REDIS_PASSWORD` / `OCS_REDIS_TLS`; the chart has no value for them.

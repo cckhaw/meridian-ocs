@@ -82,12 +82,12 @@ Library default: an adapter built without a resolver uses `NewPassthroughResolve
 
 ## Not implemented / known gaps
 
-1. Nothing populates the directory automatically; the provisioning service (Module 5) will call `Bind` / `Rebind`.
+1. The provisioning service populates the directory when it creates a subscriber (doc 08); there is no bulk import and no command to move an identifier to another subscriber.
 2. No cache invalidation push; changes are seen after the TTL.
 3. An in-flight session keeps the key it was created with. Gy resolves on every CCR, so a binding that changes **mid-session** makes later CCRs of that session resolve to a different key and fail as unknown session. Nchf is unaffected (the key is in the reference).
 4. Only MSISDN, IMSI and NAI. GPSI-based Nchf identification and SIP-URI / private Gy identifiers are not handled.
 5. No number normalisation beyond dropping `+` (no national to E.164 conversion).
-6. Resolution metrics (`Resolver.Stats`, `CachedDirectory.Stats`) exist but are not exported anywhere yet.
+6. Resolver statistics are exported by the gateway as `ocs_identity_*` (doc 11); the directory cache's own hit/miss counters are not.
 
 ## Other users of the directory
 

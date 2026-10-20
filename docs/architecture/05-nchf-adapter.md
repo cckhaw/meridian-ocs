@@ -107,7 +107,7 @@ The charge script accepted an update with a higher request number **after** the 
 
 ## Not implemented / known gaps
 
-1. **Identity directory contents.** Subscribers resolve through the identity directory (doc 06), but nothing populates it yet: bindings are written with `RedisDirectory.Bind` or by hand (`SET id:imsi:<digits> <key>`) until the provisioning service exists.
+1. **Identity directory contents.** Subscribers resolve through the identity directory (doc 06); the provisioning service (doc 08) now writes the bindings when it creates a subscriber, and they can still be written with `RedisDirectory.Bind` or by hand (`SET id:imsi:<digits> <key>`) until the provisioning service exists.
 2. **PEC (pending event charging)** and the reservation/confirmation flow it needs.
 3. **`retransmissionIndicator`**, `notifyUri` / charging notifications (the callback), `triggers`, `quotaHoldingTime`, thresholds, `announcementInformation`, `invocationResult.failureHandling`, `sessionFailover`.
 4. Only `pduSessionInformation.ratType`, `pduSessionID` and S-NSSAI are read from the PDU session charging information; other 5G charging information blocks (SMS, MMTel, NEF, …) are ignored. No monetary units.

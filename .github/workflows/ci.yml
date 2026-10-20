@@ -48,3 +48,17 @@ jobs:
           echo "/tmp/linux-amd64" >> "$GITHUB_PATH"
           echo "/tmp/bin" >> "$GITHUB_PATH"
       - run: deploy/helm/test.sh
+  stack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and start the local stack (docker-compose.yml)
+        run: docker compose up -d --build
+      - name: Smoke test it (provision a subscriber, charge it over Nchf, check mediation and metrics)
+        run: dev/smoke.sh
+      - name: Logs on failure
+        if: failure()
+        run: docker compose ps -a && docker compose logs --no-color --tail=80
+      - name: Stop
+        if: always()
+        run: docker compose down -v

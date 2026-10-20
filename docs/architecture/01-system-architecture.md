@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Design baseline. The gateway (Gy, Nchf), rating engine, identity mapping, durability, provisioning, tariff catalog and offline mediation are implemented; the AI Ops interface (metrics, guarded control plane, declarative mappings) exists for the gateway and mediation; multi-region is not, and the Helm chart ([12](12-deployment.md)) exists but has not been installed in a cluster. See the [README](../../README.md) for what is built and [docs 02–10](.) for each module as built. Sections below describe the *target* design and may be ahead of the code. |
+| **Status** | Design baseline. The gateway (Gy, Nchf), rating engine, identity mapping, durability, provisioning, tariff catalog and offline mediation are implemented; the AI Ops interface (guarded control plane, declarative mappings) exists for the gateway and mediation, and every service exports metrics; multi-region is not, and the Helm chart ([12](12-deployment.md)) exists but has not been installed in a cluster, and a local Docker Compose stack ([13](13-local-stack.md)) runs the whole system on one machine. See the [README](../../README.md) for what is built and [docs 02–13](.) for each module as built. Sections below describe the *target* design and may be ahead of the code. |
 | **Scope** | Real-time Online (Gy/Ro, Nchf) and Offline (CDR) charging, 50M+ subscribers |
 | **Language** | Go 1.22+ |
 | **Targets** | ≥ 50,000 TPS peak, P99 < 10 ms in-region, 99.999% availability, zero double-spend |
