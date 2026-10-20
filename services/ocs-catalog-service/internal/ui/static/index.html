@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meridian OCS Catalog</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <h1>Meridian OCS <span class="muted">Catalog</span></h1>
+  <div class="who" id="who" aria-live="polite"></div>
+</header>
+
+<main>
+  <div class="banner" id="draft-banner" role="status" hidden></div>
+
+  <div class="tabs" role="tablist" aria-label="Catalog sections">
+    <button role="tab" id="tab-offerings" aria-controls="panel-offerings" aria-selected="true">Offerings</button>
+    <button role="tab" id="tab-plans" aria-controls="panel-plans" aria-selected="false" tabindex="-1">Price plans</button>
+    <button role="tab" id="tab-publish" aria-controls="panel-publish" aria-selected="false" tabindex="-1">Review &amp; publish</button>
+    <button role="tab" id="tab-history" aria-controls="panel-history" aria-selected="false" tabindex="-1">History</button>
+    <button role="tab" id="tab-json" aria-controls="panel-json" aria-selected="false" tabindex="-1">JSON</button>
+  </div>
+
+  <section id="panel-offerings" role="tabpanel" aria-labelledby="tab-offerings">
+    <div class="card">
+      <div class="row"><h2 class="grow">Product offerings</h2><button id="new-offering" class="primary">New offering</button></div>
+      <p class="hint">An offering is what a subscriber buys: a price plan plus the allowances that come with it. Changes stay in your draft until you publish them.</p>
+      <div class="table-scroll"><table id="offering-table"></table></div>
+    </div>
+    <div id="offering-editor"></div>
+  </section>
+
+  <section id="panel-plans" role="tabpanel" aria-labelledby="tab-plans" hidden>
+    <div class="card">
+      <div class="row"><h2 class="grow">Price plans</h2><button id="new-plan" class="primary">New price plan</button></div>
+      <p class="hint">A plan decides what a unit of usage costs. Policy filters bar usage first; then the first matching charge rule (highest priority first) prices it.</p>
+      <div class="table-scroll"><table id="plan-table"></table></div>
+    </div>
+    <div id="plan-editor"></div>
+  </section>
+
+  <section id="panel-publish" role="tabpanel" aria-labelledby="tab-publish" hidden>
+    <div class="card">
+      <h2>Changes in this draft</h2>
+      <div id="changes"></div>
+    </div>
+    <div class="card">
+      <h2>When should it take effect?</h2>
+      <div class="row">
+        <label class="field narrow">Effective from
+          <input id="effective" type="datetime-local">
+        </label>
+        <label class="field grow">Note (shown in the history)
+          <input id="note" maxlength="200" autocomplete="off">
+        </label>
+      </div>
+      <p class="hint" id="effective-hint"></p>
+      <div class="actions">
+        <button id="validate">Validate</button>
+        <button id="dry-run-open">Try some prices</button>
+      </div>
+      <div id="validation" role="status" aria-live="polite"></div>
+    </div>
+    <div class="card" id="dry-run-card" hidden>
+      <h2>Try some prices</h2>
+      <p class="hint">Price sample usage under the version in force and under your draft, side by side, without publishing anything. Leave the time empty for now.</p>
+      <div id="cases"></div>
+      <div class="actions"><button id="add-case">Add a case</button><button id="run-cases" class="primary">Compare</button></div>
+      <div id="dry-run-result" aria-live="polite"></div>
+    </div>
+    <div class="card">
+      <h2>Publish</h2>
+      <p class="hint" id="publish-hint"></p>
+      <label class="checks"><input type="checkbox" id="confirm-publish"> <span id="confirm-text">I understand this changes how live traffic is priced.</span></label>
+      <div class="actions"><button id="publish" class="primary" disabled>Publish as the next version</button><button id="discard" class="danger">Discard draft</button></div>
+      <div class="error" id="publish-error" role="alert" hidden></div>
+      <p class="ok-text" id="publish-ok" role="status" hidden></p>
+    </div>
+  </section>
+
+  <section id="panel-history" role="tabpanel" aria-labelledby="tab-history" hidden>
+    <div class="card">
+      <h2>Published versions</h2>
+      <p class="hint">History is append-only. To go back, start a draft from an older version and publish it as a new one.</p>
+      <div class="table-scroll"><table id="version-table"></table></div>
+    </div>
+  </section>
+
+  <section id="panel-json" role="tabpanel" aria-labelledby="tab-json" hidden>
+    <div class="card">
+      <h2>Draft as JSON</h2>
+      <p class="hint">For bulk edits and reviews. Loading replaces your draft; nothing is published until you do so on the Review tab.</p>
+      <label class="field">Document
+        <textarea id="json-text" spellcheck="false" autocomplete="off"></textarea>
+      </label>
+      <div class="actions"><button id="json-load" class="primary">Load into draft</button><button id="json-reset">Reset text from draft</button></div>
+      <p class="error" id="json-error" role="alert" hidden></p>
+    </div>
+  </section>
+</main>
+<footer class="muted">Amounts are in minor currency units. Prices are numerator/denominator minor units per unit of usage (bytes, seconds or events).</footer>
+<script src="app.js"></script>
+</body>
+</html>

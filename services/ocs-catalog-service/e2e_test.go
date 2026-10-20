@@ -5,8 +5,11 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -245,4 +248,116 @@ func TestCatalogServiceEndToEnd(t *testing.T) {
 	if err != nil || rates[len(rates)-1].Num != 5 {
 		t.Fatalf("in three days: %v %v", rates, err)
 	}
+}
+
+// The editor is served by the same authenticated listener, with a policy that
+// forbids inline script, and a browser cannot be made to publish from another
+// site.
+func TestEditorIsServedSafelyAndCannotBeDrivenCrossOrigin(t *testing.T) {
+	s := startSystem(t)
+	editor := s.client(t, "pricing")
+	viewer := s.client(t, "care")
+
+	get := func(c *http.Client, path string) (*http.Response, string) {
+		resp, err := c.Get(s.base + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp, string(b)
+	}
+	resp, body := get(viewer, "/ui/")
+	if resp.StatusCode != 200 || !strings.Contains(body, "Meridian OCS") {
+		t.Fatalf("%d", resp.StatusCode)
+	}
+	csp := resp.Header.Get("Content-Security-Policy")
+	if !strings.Contains(csp, "default-src 'none'") || !strings.Contains(csp, "script-src 'self'") || strings.Contains(csp, "unsafe-inline") ||
+		resp.Header.Get("X-Frame-Options") != "DENY" || resp.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("headers: %v", resp.Header)
+	}
+	if strings.Contains(body, "<script>") || strings.Contains(body, "onclick=") {
+		t.Fatal("the page must not carry inline script")
+	}
+	if resp, js := get(viewer, "/ui/app.js"); resp.StatusCode != 200 || strings.Contains(js, "innerHTML") {
+		t.Fatalf("app.js %d (must never use innerHTML)", resp.StatusCode)
+	}
+	noFollow := *viewer
+	noFollow.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	if resp, _ := get(&noFollow, "/"); resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/ui/" {
+		t.Fatalf("root: %d %v", resp.StatusCode, resp.Header)
+	}
+
+	// Who am I: the publisher can publish, the viewer cannot.
+	if code, b, _ := call(t, editor, "GET", s.base+"/v1/catalog/me", nil, ""); code != 200 || b["principal"] != "pricing" || b["canPublish"] != true {
+		t.Fatalf("%d %v", code, b)
+	}
+	if code, b, _ := call(t, viewer, "GET", s.base+"/v1/catalog/me", nil, ""); code != 200 || b["principal"] != "care" || b["canPublish"] != false {
+		t.Fatalf("%d %v", code, b)
+	}
+
+	// A browser on another site attaches the certificate but also an Origin.
+	past := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	raw, _ := json.Marshal(map[string]any{"document": draft(past, 2)})
+	post := func(origin string) int {
+		req, _ := http.NewRequest("POST", s.base+"/v1/catalog/versions", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		resp, err := editor.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := post("https://evil.example"); code != 403 {
+		t.Fatalf("cross-origin publish: %d", code)
+	}
+	if n, _ := redis.NewClient(&redis.Options{Addr: s.rdb}).LLen(context.Background(), "ocs:catalog:versions").Result(); n != 0 {
+		t.Fatalf("a cross-origin request published %d version(s)", n)
+	}
+	if code := post(s.base); code != 201 {
+		t.Fatalf("same-origin publish: %d", code)
+	}
+}
+
+// TestServeEditorForManualTesting serves the editor on OCS_UI_DEV_ADDR with
+// authentication off and a small catalog, for a browser check:
+//
+//	OCS_UI_DEV_ADDR=127.0.0.1:18444 go test -run ServeEditorForManualTesting -timeout 15m ./services/ocs-catalog-service
+func TestServeEditorForManualTesting(t *testing.T) {
+	addr := os.Getenv("OCS_UI_DEV_ADDR")
+	if addr == "" {
+		t.Skip("set OCS_UI_DEV_ADDR (for example 127.0.0.1:8444) to serve the editor")
+	}
+	rdb := redistest.Start(t)
+	seed := &catalog.Replicator{Redis: rdb, Store: catalog.NewStore(0)}
+	doc := draft(time.Now().Add(-time.Hour), 2)
+	doc.Note = "initial catalog"
+	if _, _, err := seed.Publish(context.Background(), doc, 0); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"OCS_REDIS_ADDR": rdb.Options().Addr, "OCS_CATALOG_ADDR": addr, "OCS_CATALOG_AUTH": "off", "OCS_CATALOG_RESYNC": "1h"}
+	cfg, err := LoadConfig(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := NewApp(context.Background(), cfg, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secs := 3600
+	if n, err := strconv.Atoi(os.Getenv("OCS_UI_DEV_SECONDS")); err == nil && n > 0 {
+		secs = n
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(secs)*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- app.Run(ctx) }()
+	fmt.Printf("editor ready: http://%s/ui/\n", app.Addr())
+	<-ctx.Done()
+	<-done
+	app.Close()
 }
