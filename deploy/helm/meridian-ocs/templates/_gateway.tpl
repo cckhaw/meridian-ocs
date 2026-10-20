@@ -10,7 +10,7 @@
 - {name: OCS_REGION, value: {{ $g.region | quote }}}
 - {name: OCS_MAX_TPS, value: {{ $g.maxTps | quote }}}
 - {name: OCS_MAX_INFLIGHT, value: {{ $g.maxInflight | quote }}}
-- {name: OCS_UNSETTLED_SPOOL, value: {{ ternary "/var/spool/ocs" "off" (eq $g.unsettledSpool.mode "emptyDir") | quote }}}
+- {name: OCS_UNSETTLED_SPOOL, value: {{ ternary "off" "/var/spool/ocs" (eq $g.unsettledSpool.mode "off") | quote }}}
 {{- if $g.unsettledSpool.peerMayRepeat }}
 - {name: OCS_UNSETTLED_PEER_REPEATS, value: "true"}
 {{- end }}

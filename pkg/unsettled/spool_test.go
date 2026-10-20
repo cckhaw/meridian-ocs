@@ -356,3 +356,63 @@ func TestRecordsWrittenBeforeUpdatesWereRecordedAreTerminates(t *testing.T) {
 		t.Fatalf("a record without a type is a terminate: %+v", q)
 	}
 }
+
+func TestDrainSettlesWhatIsPendingAndStopsAtTheDeadline(t *testing.T) {
+	s, _ := Open(t.TempDir())
+	defer s.Close()
+	for i := 0; i < 5; i++ {
+		_ = s.Record(term(fmt.Sprintf("u%d", i), "s", 1, 10))
+	}
+	f := &fakeSettler{}
+	r := &Reconciler{Spool: s, Settler: f}
+	if left := r.Drain(context.Background(), time.Second); left != 0 || s.Stats().Pending != 0 || len(f.calls) != 5 {
+		t.Fatalf("left=%d pending=%d calls=%d", left, s.Stats().Pending, len(f.calls))
+	}
+
+	// With the data tier down it waits no longer than it was given, and leaves the records on disk.
+	_ = s.Record(term("late", "s", 1, 10))
+	f.mu.Lock()
+	f.err = errors.New("redis down")
+	f.mu.Unlock()
+	started := time.Now()
+	if left := r.Drain(context.Background(), 400*time.Millisecond); left != 1 {
+		t.Fatalf("the record must stay pending: %d", left)
+	}
+	if took := time.Since(started); took < 300*time.Millisecond || took > 2*time.Second {
+		t.Fatalf("drain took %v for a 400 ms budget", took)
+	}
+	if r.Drain(context.Background(), 0) != 1 {
+		t.Fatal("a zero budget does nothing")
+	}
+}
+
+func TestDrainRidesOutAShortOutage(t *testing.T) {
+	s, _ := Open(t.TempDir())
+	defer s.Close()
+	_ = s.Record(term("a", "s", 1, 10))
+	f := &fakeSettler{err: errors.New("down")}
+	r := &Reconciler{Spool: s, Settler: f}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		f.mu.Lock()
+		f.err = nil
+		f.mu.Unlock()
+	}()
+	if left := r.Drain(context.Background(), 3*time.Second); left != 0 {
+		t.Fatalf("an outage shorter than the budget must be waited out: %d left", left)
+	}
+}
+
+func TestDrainDoesNotSpinOnDeadLetters(t *testing.T) {
+	s, _ := Open(t.TempDir())
+	defer s.Close()
+	_ = s.Record(term("a", "s", 1, 10))
+	r := &Reconciler{Spool: s, Settler: &fakeSettler{result: canonical.ResultUnknownSession}}
+	started := time.Now()
+	if left := r.Drain(context.Background(), 5*time.Second); left != 0 || time.Since(started) > time.Second {
+		t.Fatalf("left=%d after %v", left, time.Since(started))
+	}
+	if s.Stats().Dead != 1 {
+		t.Fatal("the record is a dead letter")
+	}
+}

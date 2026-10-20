@@ -4,7 +4,7 @@
 {{- $suffix := required "gateway.diameter.originHostSuffix is required (each pod is <pod-name>.<suffix>)" $g.diameter.originHostSuffix }}
 {{- if not (has $g.tariff (list "static" "catalog")) }}{{ fail "gateway.tariff must be static or catalog" }}{{ end }}
 {{- if and (eq $g.tariff "catalog") (not $g.defaultPlan) }}{{ fail "gateway.tariff=catalog needs gateway.defaultPlan" }}{{ end }}
-{{- if not (has $g.unsettledSpool.mode (list "emptyDir" "off")) }}{{ fail (printf "gateway.unsettledSpool.mode must be \"emptyDir\" or \"off\" (got %q): with \"off\", usage reported in a terminate that arrives while Redis is down is lost" $g.unsettledSpool.mode) }}{{ end }}
+{{- if not (has $g.unsettledSpool.mode (list "persistent" "emptyDir" "off")) }}{{ fail (printf "gateway.unsettledSpool.mode must be \"persistent\", \"emptyDir\" or \"off\" (got %q): with \"off\", usage reported while Redis is down is lost" $g.unsettledSpool.mode) }}{{ end }}
 {{- if and (eq $g.unsettledSpool.mode "off") (not .Values.allowInsecure) }}{{ fail "gateway.unsettledSpool.mode=off is refused unless allowInsecure=true: it loses the usage of terminates acknowledged while Redis is down" }}{{ end }}
 {{- $oauth := "" }}
 {{- if $g.nchf.enabled }}
@@ -26,8 +26,17 @@
 {{- if $g.nchf.enabled }}{{ $ports = append $ports (dict "name" "nchf" "port" $g.nchf.port) }}{{ end }}
 {{- if $g.control.enabled }}{{ $ports = append $ports (dict "name" "control" "port" $g.control.port) }}{{ end }}
 {{- $vols := list }}{{- $mounts := list }}
+{{- $claims := "" }}
+{{- $kind := "Deployment" }}
 {{- if eq $g.unsettledSpool.mode "emptyDir" }}
 {{- $vols = append $vols (dict "name" "unsettled-spool" "emptyDir" (dict "sizeLimit" $g.unsettledSpool.sizeLimit)) }}
+{{- $mounts = append $mounts (dict "name" "unsettled-spool" "mountPath" "/var/spool/ocs") }}
+{{- else if eq $g.unsettledSpool.mode "persistent" }}
+{{- /* A volume that outlives the pod needs a StatefulSet: pod gateway-N always gets the volume of gateway-N. */ -}}
+{{- $kind = "StatefulSet" }}
+{{- $claim := dict "metadata" (dict "name" "unsettled-spool") "spec" (dict "accessModes" (list "ReadWriteOnce") "resources" (dict "requests" (dict "storage" $g.unsettledSpool.persistence.size))) }}
+{{- if $g.unsettledSpool.persistence.storageClass }}{{ $_ := set $claim.spec "storageClassName" $g.unsettledSpool.persistence.storageClass }}{{ end }}
+{{- $claims = toYaml (list $claim) }}
 {{- $mounts = append $mounts (dict "name" "unsettled-spool" "mountPath" "/var/spool/ocs") }}
 {{- end }}
 {{- if and $g.nchf.enabled $g.nchf.tls.secretName }}
@@ -42,7 +51,7 @@
 {{- $vols = append $vols (dict "name" "control-tls" "secret" (dict "secretName" $g.control.tls.secretName "defaultMode" 288)) }}
 {{- $mounts = append $mounts (dict "name" "control-tls" "mountPath" "/tls/control" "readOnly" true) }}
 {{- end }}
-{{ include "ocs.component" (dict "redis" true "root" . "name" "gateway" "service" "ocs-signaling-gateway" "kind" "Deployment"
+{{ include "ocs.component" (dict "redis" true "root" . "name" "gateway" "service" "ocs-signaling-gateway" "kind" $kind "parallel" true "claims" $claims
     "replicas" $g.replicas "resources" $g.resources "ports" $ports "env" $env
     "volumes" (ternary (toYaml $vols) "" (gt (len $vols) 0)) "mounts" (ternary (toYaml $mounts) "" (gt (len $mounts) 0))
     "pdb" $g.pdb "autoscaling" $g.autoscaling) }}

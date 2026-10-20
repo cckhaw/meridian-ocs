@@ -121,13 +121,23 @@ done
 grep -qE 'cpu: *"?[0-9a-z]+"?$' <<<"$(awk '/limits:/{f=1;next} /requests:|^[^ ]/{f=0} f' <<<"$workloads")" && bad "a CPU limit is set (throttling hurts latency)" || ok "no CPU limits"
 grep -q 'OCS_UNSETTLED_SPOOL, value: "/var/spool/ocs"' <<<"$secure" && grep -q 'mountPath: /var/spool/ocs' <<<"$secure" && grep -q 'name: unsettled-spool' <<<"$secure" \
   && ok "the gateway gets the unsettled-usage spool (env and volume)" || bad "the gateway has no unsettled-usage spool"
+gws=$(awk 'BEGIN{RS="---\n"} /kind: StatefulSet/ && /ocs-signaling-gateway/' <<<"$secure")
+grep -q 'serviceName: .*-admin' <<<"$gws" && grep -q 'podManagementPolicy: Parallel' <<<"$gws" && grep -qE 'volumeClaimTemplates:' <<<"$gws" \
+  && grep -qE 'name: unsettled-spool' <<<"$gws" && grep -qE 'storage: 2Gi' <<<"$gws" && grep -q 'storageClassName: fast-ssd' <<<"$gws" \
+  && ! grep -qE 'sizeLimit: 256Mi' <<<"$gws" \
+  && ok "persistent spool: the gateway is a StatefulSet with a 2Gi volume claim per pod (storage class from values)" || bad "persistent spool rendering"
+! grep -qE 'kind: Deployment' <<<"$(awk 'BEGIN{RS="---\n"} /ocs-signaling-gateway/ && /kind: Deployment/' <<<"$secure")" \
+  && ok "persistent spool: no gateway Deployment is rendered next to the StatefulSet" || bad "a gateway Deployment is rendered with the persistent spool"
+gwd=$(awk 'BEGIN{RS="---\n"} /kind: Deployment/ && /ocs-signaling-gateway/' <<<"$dev")
+grep -qE 'sizeLimit: 256Mi' <<<"$gwd" && grep -q 'name: unsettled-spool' <<<"$gwd" && ! grep -q 'volumeClaimTemplates' <<<"$gwd" \
+  && ok "emptyDir spool: the gateway stays a Deployment with an emptyDir volume" || bad "emptyDir spool rendering"
 dev=$(helm template t . -f ci/dev.yaml --set gateway.unsettledSpool.mode=off 2>&1)
 grep -q 'OCS_UNSETTLED_SPOOL, value: "off"' <<<"$dev" && ! grep -q 'mountPath: /var/spool/ocs' <<<"$dev" && ok "mode=off renders OCS_UNSETTLED_SPOOL=off and no volume (development only)" || bad "spool off rendering"
 grep -q 'OCS_UNSETTLED_PEER_REPEATS' <<<"$secure" && bad "peer-repeats is set without being asked for" || ok "OCS_UNSETTLED_PEER_REPEATS is absent unless gateway.unsettledSpool.peerMayRepeat is true"
 rep=$(helm template t . -f ci/secure.yaml --set gateway.unsettledSpool.peerMayRepeat=true 2>&1)
 grep -q 'OCS_UNSETTLED_PEER_REPEATS, value: "true"' <<<"$rep" && ok "peerMayRepeat renders OCS_UNSETTLED_PEER_REPEATS=true" || bad "peerMayRepeat rendering"
 grep -q 'kind: StatefulSet' <<<"$secure" && grep -A3 'kind: StatefulSet' <<<"$secure" | grep -q . && ok "mediation is a StatefulSet" || bad "mediation StatefulSet"
-st=$(awk 'BEGIN{RS="---\n"} /kind: StatefulSet/' <<<"$secure")
+st=$(awk 'BEGIN{RS="---\n"} /kind: StatefulSet/ && /ocs-mediation-pipeline/' <<<"$secure")
 grep -qE '^  replicas: 1$' <<<"$st" && ok "mediation runs exactly one pod (its ledger is per output directory)" || bad "mediation replicas"
 # the admin port is only reachable through the -admin Services
 svcs=$(awk 'BEGIN{RS="---\n"} /kind: Service/ && !/-admin/' <<<"$secure")

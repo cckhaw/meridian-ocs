@@ -10,7 +10,7 @@ with web consoles, metrics, alert rules, a Helm chart and a one-command local st
 99.999 % availability, zero double-spend. None of these has been demonstrated yet; see
 [What is not built yet](#what-is-not-built-yet).
 
-*Last updated: 2026-10-20, after refused updates were made safe against a retransmission applied after the outage. This README is kept current with every
+*Last updated: 2026-10-20, after the saved-usage spool got a persistent volume option and a drain on shutdown. This README is kept current with every
 change: see [Keeping this up to date](#keeping-this-up-to-date).*
 
 ## Try it
@@ -73,7 +73,7 @@ mean production-ready). The list of what does not exist yet is [further down](#w
 | Helm chart | gateway, provisioning (api and worker), catalog, mediation, AI Ops; autoscaling, disruption budgets, spread, optional NetworkPolicy, ServiceMonitor, alert rules, dashboard; refuses insecure choices; values schema; checked in CI | [12](docs/architecture/12-deployment.md) |
 | Local stack | `docker-compose.yml` plus a smoke test that runs in CI | [13](docs/architecture/13-local-stack.md) |
 | Load test and reconciliation | `tools/ocs-loadgen`: seeds subscribers, drives Nchf sessions at a constant arrival rate (open loop, latency counted from when the arrival was due), then checks every balance against the usage it reported, so lost or created money fails the run; a short run is part of CI; `dev/chaos.sh` repeats it while the Redis replica or primary or the gateway is frozen, stopped or killed (development stack only, not in CI) | [14](docs/architecture/14-load-test.md) |
-| Unsettled-usage reconciler | usage reported while Redis is down (in a terminate that is still acknowledged, or in an update that is refused) is first saved to a local fsynced log and charged when Redis returns, idempotently; the data tier remembers which of a session's last 8 requests it applied, so a refused update is charged exactly when it was not applied (including after a retransmission), and one older than that is deliberately left to a person; metrics, four alerts, dead letters kept; found and measured by the failure injection; `OCS_UNSETTLED_PEER_REPEATS` switches to the cautious rule if a peer may repeat refused usage | [03](docs/architecture/03-rating-engine.md#usage-released-while-the-data-tier-is-down-and-its-reconciler) |
+| Unsettled-usage reconciler | usage reported while Redis is down (in a terminate that is still acknowledged, or in an update that is refused) is first saved to a local fsynced log and charged when Redis returns, idempotently; the data tier remembers which of a session's last 8 requests it applied, so a refused update is charged exactly when it was not applied (including after a retransmission), and one older than that is deliberately left to a person; metrics, four alerts, dead letters kept; the log can live on a persistent volume per pod and is charged for up to a configurable time on shutdown; found and measured by the failure injection; `OCS_UNSETTLED_PEER_REPEATS` switches to the cautious rule if a peer may repeat refused usage | [03](docs/architecture/03-rating-engine.md#usage-released-while-the-data-tier-is-down-and-its-reconciler) |
 
 Architecture and decisions: [01](docs/architecture/01-system-architecture.md),
 [02](docs/architecture/02-decisions-and-failure-policy.md).
@@ -91,7 +91,7 @@ one I would build first.
 - **Unsettled-usage reconciler gaps**: a refused update more than 8 requests behind its session is left uncharged for a person (it could be charged twice);
   the rule assumes a network element does not report refused usage again under a **new** request number: supported for conforming Gy clients by RFC 4006 §9.1 and its client state machine,
   but 3GPP TS 32.299, Nchf and real peers were not checked, so `OCS_UNSETTLED_PEER_REPEATS=true` gives the cautious behaviour;
-  the spool is node-local (an `emptyDir`: lost with the pod or node, no persistent-volume option); a replay is rated at the tariff in effect then;
+  the spool survives a replaced pod only in `persistent` mode (a StatefulSet; never attached to a real volume, scaling in strands the removed pods' volumes) and the gateway drains it for up to `OCS_UNSETTLED_DRAIN` on shutdown; a replay is rated at the tariff in effect then;
   dead letters need a human; with `OCS_UNSETTLED_SPOOL=off` the usage is lost (alerted on). See [03](docs/architecture/03-rating-engine.md).
 - **No Redis Cluster support** (`WAIT` is not available on Cluster) and no Sentinel/operator integration (the address is a single endpoint).
 - Redis access control is coarse: one user and password per release (no least-privilege ACL profile per service), and a rotated CA certificate is read at start-up only.

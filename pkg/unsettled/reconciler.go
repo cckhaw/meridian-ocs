@@ -137,3 +137,32 @@ func (r *Reconciler) Run(ctx context.Context) {
 		}
 	}
 }
+
+// Drain keeps replaying the spool until it is empty, the data tier stops accepting it, or d has passed. A gateway
+// calls it on shutdown, before it stops: a pod that is replaced (a rolling update, a scale-down, a node drain)
+// would otherwise leave usage on a disk that may not come back. It returns how many records are still pending; they
+// stay on the spool's volume for the next process to find.
+func (r *Reconciler) Drain(ctx context.Context, d time.Duration) int {
+	if d <= 0 {
+		return r.Spool.Stats().Pending
+	}
+	ctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	for r.Spool.Stats().Pending > 0 {
+		n, err := r.Pass(ctx)
+		if err != nil {
+			// The data tier cannot take the usage now. A moment's wait may be enough (a breaker probe, a failover);
+			// more than the time left is not.
+			select {
+			case <-ctx.Done():
+				return r.Spool.Stats().Pending
+			case <-time.After(250 * time.Millisecond):
+			}
+			continue
+		}
+		if n == 0 { // nothing was settled and nothing failed: only dead letters moved
+			break
+		}
+	}
+	return r.Spool.Stats().Pending
+}
