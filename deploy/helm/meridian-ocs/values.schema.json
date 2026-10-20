@@ -779,6 +779,13 @@
             "number"
           ]
         },
+        "graceSweep": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
         "restPort": {
           "type": "integer",
           "minimum": 1,

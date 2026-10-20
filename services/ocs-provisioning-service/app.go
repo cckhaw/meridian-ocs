@@ -23,6 +23,7 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/tlsconf"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/auth"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/bus"
+	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/gracesweep"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/grpcapi"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/rest"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/service"
@@ -35,13 +36,14 @@ type App struct {
 	cfg  Config
 	logf func(string, ...any)
 
-	rdb  *redis.Client
-	prod *bus.KafkaProducer
-	cons *kgo.Client
-	wrk  *worker.Worker
-	rep  *catalog.Replicator
-	reg  *telemetry.Registry
-	svc  *service.Service
+	rdb   *redis.Client
+	prod  *bus.KafkaProducer
+	cons  *kgo.Client
+	wrk   *worker.Worker
+	grace *gracesweep.Sweeper
+	rep   *catalog.Replicator
+	reg   *telemetry.Registry
+	svc   *service.Service
 
 	pending, pendingOldest atomic.Int64 // approval requests waiting, and the age in seconds of the oldest
 
@@ -109,6 +111,13 @@ func NewApp(ctx context.Context, cfg Config, g svcenv.Getenv, logf func(string, 
 		a.wrk = worker.New(worker.Config{Bus: cfg.Bus, Limits: cfg.Limits, Workers: cfg.Workers, Logf: logf, Lag: lag,
 			Policy: cfg.Approval, AllowSelfApproval: cfg.ApprovalSelf}, a.cons, applier, st, a.prod)
 		a.registerWorkerMetrics()
+		if cfg.GraceSweep > 0 {
+			a.grace = gracesweep.New(gracesweep.Config{Data: data, Prod: a.prod, Topic: cfg.Bus.EventsTopic, Interval: cfg.GraceSweep, Logf: logf})
+			a.registerGraceMetrics()
+			logf("grace sweeper running every %s: subscribers are suspended when their grace period ends", cfg.GraceSweep)
+		} else {
+			logf("grace sweeper is off: Grace -> Suspended happens only when someone issues the lifecycle command")
+		}
 	}
 
 	if cfg.runsAPI() {
@@ -178,13 +187,16 @@ func NewApp(ctx context.Context, cfg Config, g svcenv.Getenv, logf func(string, 
 func (a *App) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	errc := make(chan error, 3)
+	errc := make(chan error, 5)
 	running := 0
 	start := func(f func() error) { running++; go func() { errc <- f() }() }
 
 	if a.wrk != nil {
 		a.logf("command worker running (group %s, topic %s)", a.cfg.Bus.Group, a.cfg.Bus.CommandsTopic)
 		start(func() error { return a.wrk.Run(ctx) })
+	}
+	if a.grace != nil {
+		start(func() error { return a.grace.Run(ctx) })
 	}
 	if a.rep != nil {
 		start(func() error { return a.rep.Run(ctx) })

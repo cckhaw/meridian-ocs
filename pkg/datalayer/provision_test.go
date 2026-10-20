@@ -592,3 +592,118 @@ func TestCreateRecordsIdentifiersOnTheProfile(t *testing.T) {
 		}
 	}
 }
+
+func graceFor(t testing.TB, c *datalayer.Client, key string, until time.Time) {
+	t.Helper()
+	create(t, c, key, "prepaid")
+	if r := prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvLifecycle, Key: key, Token: "g-" + key, Target: "grace", Until: until}); r.Code != 0 {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func expire(t testing.TB, c *datalayer.Client, key string, expected, now time.Time) datalayer.ProvisionResult {
+	t.Helper()
+	return prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvExpireGrace, Key: key, Token: fmt.Sprintf("exp-%s-%d", key, expected.UnixMilli()),
+		Fingerprint: "e", Until: expected, Now: now})
+}
+
+func TestGraceIndexFollowsTheLifecycle(t *testing.T) {
+	c, ctx := setup(t)
+	until := t0.Add(time.Hour)
+	graceFor(t, c, "g1", until)
+	graceFor(t, c, "g2", until.Add(time.Hour))
+	create(t, c, "g3", "prepaid") // never in grace
+
+	due, total, err := c.DueGrace(ctx, until.Add(time.Minute), 10)
+	if err != nil || total != 1 || len(due) != 1 || due[0].Key != "g1" || !due[0].Until.Equal(until) {
+		t.Fatalf("only g1 is past its deadline: %+v %d %v", due, total, err)
+	}
+	if due, total, _ = c.DueGrace(ctx, until.Add(-time.Second), 10); len(due) != 0 || total != 0 {
+		t.Fatalf("nothing is due before the deadline: %+v", due)
+	}
+
+	// Leaving grace by any route removes the entry; so does grace without a deadline.
+	prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvLifecycle, Key: "g1", Token: "back", Target: "active"})
+	prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvLifecycle, Key: "g2", Token: "sus", Target: "suspended"})
+	if _, total, _ = c.DueGrace(ctx, until.Add(24*time.Hour), 10); total != 0 {
+		t.Fatalf("recovered and suspended subscribers leave the index: %d", total)
+	}
+	prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvLifecycle, Key: "g3", Token: "g", Target: "grace"})
+	if _, total, _ = c.DueGrace(ctx, until.Add(24*time.Hour), 10); total != 0 {
+		t.Fatalf("grace without a deadline is never due: %d", total)
+	}
+}
+
+func TestExpireGraceSuspendsOnlyTheGracePeriodItWasMadeFor(t *testing.T) {
+	c, ctx := setup(t)
+	until := t0.Add(time.Hour)
+	after := until.Add(time.Second)
+
+	graceFor(t, c, "e1", until)
+	if r := expire(t, c, "e1", until, until.Add(-time.Second)); r.Code != datalayer.ProvGraceNotOver {
+		t.Fatalf("not before the deadline: %+v", r)
+	}
+	r := expire(t, c, "e1", until, after)
+	if r.Code != datalayer.ProvApplied || r.From != "grace" || r.To != "suspended" {
+		t.Fatalf("%+v", r)
+	}
+	p, _ := c.GetProfile(ctx, "e1")
+	if p.Status != "suspended" || !p.GraceUntil.IsZero() || p.Version != 3 {
+		t.Fatalf("%+v", p)
+	}
+	if again := expire(t, c, "e1", until, after.Add(time.Hour)); again.Code != datalayer.ProvDuplicate || again.Effective() != datalayer.ProvApplied {
+		t.Fatalf("a redelivery repeats the answer and applies nothing: %+v", again)
+	}
+	if p, _ = c.GetProfile(ctx, "e1"); p.Version != 3 {
+		t.Fatalf("applied twice: %+v", p)
+	}
+
+	// A longer grace given after the request was made is left alone, and the index is corrected.
+	graceFor(t, c, "e2", until)
+	prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvLifecycle, Key: "e2", Token: "ext", Target: "active"})
+	prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvLifecycle, Key: "e2", Token: "ext2", Target: "grace", Until: until.Add(48 * time.Hour)})
+	if r := expire(t, c, "e2", until, after); r.Code != datalayer.ProvGraceChanged {
+		t.Fatalf("%+v", r)
+	}
+	if p, _ = c.GetProfile(ctx, "e2"); p.Status != "grace" {
+		t.Fatalf("an extended grace must not be suspended: %+v", p)
+	}
+
+	// A subscriber that has since recovered is left alone, however the request got there.
+	graceFor(t, c, "e3", until)
+	prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvLifecycle, Key: "e3", Token: "ok", Target: "active"})
+	if r := expire(t, c, "e3", until, after); r.Code != datalayer.ProvInvalidTransition || r.From != "active" {
+		t.Fatalf("%+v", r)
+	}
+	if p, _ = c.GetProfile(ctx, "e3"); p.Status != "active" {
+		t.Fatalf("a paying subscriber must not be suspended: %+v", p)
+	}
+	if r := expire(t, c, "nobody", until, after); r.Code != datalayer.ProvNoSubscriber {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestClearGraceDueKeepsALongerGrace(t *testing.T) {
+	c, ctx := setup(t)
+	until := t0.Add(time.Hour)
+	graceFor(t, c, "k1", until)
+	later := until.Add(time.Hour)
+	// The entry is replaced by a later deadline: clearing the old one must not drop it.
+	prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvLifecycle, Key: "k1", Token: "a", Target: "active"})
+	prov(t, c, datalayer.ProvisionOp{Op: datalayer.ProvLifecycle, Key: "k1", Token: "b", Target: "grace", Until: later})
+	if err := c.ClearGraceDue(ctx, "k1", until); err != nil {
+		t.Fatal(err)
+	}
+	if _, total, _ := c.DueGrace(ctx, later.Add(time.Second), 10); total != 1 {
+		t.Fatalf("the longer grace must stay indexed: %d", total)
+	}
+	if err := c.ClearGraceDue(ctx, "k1", later); err != nil {
+		t.Fatal(err)
+	}
+	if _, total, _ := c.DueGrace(ctx, later.Add(time.Second), 10); total != 0 {
+		t.Fatalf("%d", total)
+	}
+	if err := c.ClearGraceDue(ctx, "never-there", later); err != nil {
+		t.Fatal(err)
+	}
+}

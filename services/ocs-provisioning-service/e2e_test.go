@@ -643,3 +643,62 @@ func TestTwoPersonApprovalThroughTheWholeSystem(t *testing.T) {
 		}
 	}
 }
+
+// TestGraceExpiryThroughTheWholeSystem: a subscriber put into grace with a deadline is suspended by the
+// service itself when the deadline passes, charging then refuses new quota, and one that was restored in
+// time is left alone.
+func TestGraceExpiryThroughTheWholeSystem(t *testing.T) {
+	s := startSystemWith(t, map[string]string{"OCS_PROV_GRACE_SWEEP": "1s"})
+	for _, k := range []string{"gr-lapse", "gr-pays"} {
+		if code, m := s.call(t, "crm", "POST", "/v1/subscribers", "c-"+k, map[string]any{"subscriberKey": k, "paymentType": "prepaid",
+			"identifiers": []map[string]string{{"type": "msisdn", "value": "49170" + strconv.Itoa(len(k)*1000+int(k[3]))}}}); code != 202 {
+			t.Fatalf("%d %v", code, m)
+		}
+		s.waitApplied(t, "c-"+k)
+		if code, _ := s.call(t, "crm", "POST", "/v1/subscribers/"+k+"/top-ups", "p-"+k, map[string]any{"amountMinorUnits": 5000, "currency": "EUR"}); code != 202 {
+			t.Fatal(code)
+		}
+		s.waitApplied(t, "p-"+k)
+		until := time.Now().Add(3 * time.Second).UTC().Format(time.RFC3339)
+		if code, m := s.call(t, "care", "POST", "/v1/subscribers/"+k+"/lifecycle", "g-"+k, map[string]any{"target": "grace", "graceUntil": until}); code != 202 {
+			t.Fatalf("%d %v", code, m)
+		}
+		s.waitApplied(t, "g-"+k)
+	}
+	if code, _ := s.call(t, "care", "POST", "/v1/subscribers/gr-pays/lifecycle", "a-pays", map[string]any{"target": "active"}); code != 202 {
+		t.Fatal(code)
+	}
+	s.waitApplied(t, "a-pays")
+	if it := s.charge(t, "gr-lapse", "s-in-grace", datalayer.ModeInitial, 0, 1000, 0); it.Code != datalayer.ItemGranted {
+		t.Fatalf("a subscriber in grace is still served: %+v", it)
+	}
+
+	status := func(k string) string {
+		_, m := s.call(t, "crm", "GET", "/v1/subscribers/"+k, "", nil)
+		st, _ := m["status"].(string)
+		return st
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for status("gr-lapse") != "suspended" {
+		if time.Now().After(deadline) {
+			t.Fatalf("never suspended: %s", status("gr-lapse"))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if it := s.charge(t, "gr-lapse", "s-after", datalayer.ModeInitial, 0, 1000, 0); it.Code != datalayer.ItemBarred {
+		t.Fatalf("a suspended subscriber gets no new quota: %+v", it)
+	}
+	if got := status("gr-pays"); got != "active" {
+		t.Fatalf("a subscriber restored in time must not be suspended: %s", got)
+	}
+
+	var sb strings.Builder
+	if _, err := s.app.Metrics().WriteTo(&sb); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ocs_prov_grace_expired_total 1", "ocs_prov_grace_overdue 0"} {
+		if !strings.Contains(sb.String(), want) {
+			t.Errorf("metrics lack %q", want)
+		}
+	}
+}

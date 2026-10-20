@@ -193,6 +193,37 @@ purpose. The offering decides the price plan used to rate the subscriber
 Suspended or Terminated, `charge.lua` answers `BARRED` for new quota while still
 settling usage from sessions already open.
 
+#### The end of a grace period
+
+A change to Grace may carry a deadline (`graceUntil`). With `OCS_PROV_GRACE_SWEEP` set, the service
+suspends the subscriber itself when the deadline passes; without it nothing does (the default is `off`,
+which is the behaviour before this existed: an operator or upstream system issues the command).
+
+- **Index.** The lifecycle script keeps a sorted set `ocs:grace:due` (member: the subscriber's key
+  prefix, score: the deadline) in step with the profile, in the same atomic call: entering Grace with a
+  deadline adds it, any other change removes it. Grace without a deadline never expires.
+- **Sweeper.** In every instance that runs the command worker (`all` or `worker`), every
+  `OCS_PROV_GRACE_SWEEP` (1s to 1h) it reads up to 200 overdue entries per round and applies an *expire grace*
+  step for each. The step suspends only if the subscriber is **still in the very grace period that was seen**:
+  a subscriber restored to Active, or given a longer grace, meanwhile is left alone (the step answers
+  `invalid_transition` or `grace_changed`, and the index entry is repaired or dropped). A step that finds the
+  deadline not yet reached answers `grace_not_over` and changes nothing. Refusals are not remembered under the
+  step's token, so a later attempt sees the state then.
+- **Several instances, crashes.** The step's token is derived from the subscriber and the deadline, so
+  concurrent sweepers, or a sweeper that restarts, suspend a subscriber once (the second gets the stored
+  original answer).
+- **Event.** `lifecycle.changed` (`from: grace`, `to: suspended`, `by: system:grace-expiry`, `reason: grace
+  period ended`, `operation: expire_grace`) is published after the step and the index entry is removed only
+  after the publish succeeded. If Kafka is down the subscriber is already suspended, the entry stays, the
+  event is published on a later pass (at least once, like every event here) and the backlog is visible as
+  `ocs_prov_grace_overdue`.
+- **Not approval-gated.** A suspension the system makes because a deadline passed is not a person's privileged
+  request, so it does not go through two-person approval; the deadline itself was set by a privileged
+  caller (and approval applies to that if `change_lifecycle` is in the policy).
+- **Metrics.** `ocs_prov_grace_expired_total`, `ocs_prov_grace_stale_total`, `ocs_prov_grace_sweep_errors_total`,
+  and the gauges `ocs_prov_grace_overdue` and `ocs_prov_grace_oldest_overdue_seconds` (after the last sweep;
+  they keep rising if Redis or Kafka stay broken). No alert rule uses them yet.
+
 ## Two-person approval
 
 A privileged caller can move or destroy value: correct a balance, remove a bucket, suspend or terminate a
@@ -280,7 +311,7 @@ Topic `OCS_KAFKA_EVENTS_TOPIC`, key = subscriber, JSON, `v: 1`:
 |---|---|---|
 | `subscriber.provisioned` | create applied | `payment`, `version` |
 | `balance.modified` | top-up, adjustment, bundle, bucket set/remove | `bucket`, `delta`, `balance`, `reason` |
-| `lifecycle.changed` | lifecycle change applied | `from`, `to`, `reason` |
+| `lifecycle.changed` | lifecycle change applied, or a grace period ended (`by: system:grace-expiry`) | `from`, `to`, `reason` |
 | `offering.changed` | offering attached or renewed | `from`, `to` (offering ids; `from` empty if none), `buckets` |
 | `command.failed` | business failure (e.g. insufficient balance, conflict, `approval_required`) | `outcome`, `message` |
 | `approval.requested` | a privileged command was held for approval | `by`, `rule`, `reason` (what will happen, in words) |
@@ -303,6 +334,7 @@ Events of commands that needed approval also carry `approvedBy`.
 | `OCS_PROV_APPROVERS` | CNs that may approve and reject without being privileged | none |
 | `OCS_PROV_APPROVAL_TTL` | how long a request waits (1m to 720h) | 24h |
 | `OCS_PROV_APPROVAL_SELF` | `true` lets a requester approve their own request; development with auth off only | false |
+| `OCS_PROV_GRACE_SWEEP` | `off`, or how often to suspend subscribers whose grace period has ended (1s to 1h) | `off` |
 | `OCS_PROV_REST_ADDR`, `OCS_PROV_GRPC_ADDR` | listeners | `:8443`, `:9443` |
 | `OCS_PROV_WORKERS` | key-hash lanes | 16 |
 | `OCS_PROV_MAX_TOPUP`, `OCS_PROV_MAX_ADJUST` | per-call ceilings | 10,000,000 / 1,000,000 |
@@ -333,6 +365,16 @@ Durability env (replica `WAIT`) is shared with the gateway through
   termination are held, listed in words, one withdrawn, one approved and applied. Through the real Docker stack
   (`dev/smoke.sh`): held, balance unchanged, approved, applied, and `approval.requested` ->
   `approval.approved` -> `balance.modified` (with `approvedBy`) in the Kafka events topic.
+- Grace expiry: against a real `redis-server`, the index follows every route out of Grace; the expire step
+  refuses before the deadline, for a subscriber restored to Active, for a longer grace, and for an unknown
+  subscriber, and is idempotent; the sweeper handles more than one batch, retries a failed publish without
+  suspending twice, keeps the overdue gauge honest while Kafka is down, and two concurrent sweepers suspend
+  each subscriber once. Mutation-checked: ignoring the deadline comparison, the status check or the "not over
+  yet" check in the script, and not removing the index entry when leaving Grace, each make a test fail. An
+  end-to-end test (mTLS, Kafka, workers, Redis): a subscriber put into Grace for 3 s is `suspended` within
+  seconds and charging answers `ItemBarred`, while one restored in time stays Active. Not run against the
+  Docker stack's smoke test or a cluster, and the Helm value was added without rendering the chart (no `helm`
+  in the sandbox).
 - Smoke of the real binary against a standalone broker and Redis, driven by
   `curl`/`openssl`: config refusals, create -> applied, top-up -> balance 2500,
   standard caller denied a privileged op (403), no client certificate refused,
@@ -345,8 +387,12 @@ Durability env (replica `WAIT`) is shared with the gateway through
 - Kafka connections are plaintext: no TLS or SASL to the brokers yet.
 - The fail-policy profile cache is not yet fed from provisioning events, so the
   postpaid fail-open path has no live profile source (doc 02, point 1).
-- No sweeper moves Grace -> Suspended on a timer; today an operator or upstream
-  system issues the lifecycle command.
+- The Grace -> Suspended timer only covers grace periods that were given a deadline **after this version
+  is deployed**: subscribers already in Grace are not in the index and need one more lifecycle command (to
+  Grace with a deadline) to be tracked. The index is a single Redis key (another reason for no Redis
+  Cluster support), it is node-time based (the sweeper's clock decides what is overdue, within the clock
+  skew between provisioning nodes), the timer has no alert rule yet, and there is no automatic return to
+  Active on payment (a top-up does not change the lifecycle state; upstream still sends the command).
 - No reconciler for usage left unsettled when a session is barred mid-flight.
 - The command status store is advisory (TTL-bound); the idempotency record in
   the hot store is the source of truth.

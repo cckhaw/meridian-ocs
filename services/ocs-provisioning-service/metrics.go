@@ -28,6 +28,17 @@ func (a *App) registerWorkerMetrics() {
 	reg.CounterFunc("ocs_prov_worker_commits_total", "Consumer batches whose offsets were committed.", nil, func() float64 { return f(w.Stats().Commits) })
 }
 
+// registerGraceMetrics exposes the grace-expiry sweeper. Overdue is the number of subscribers past
+// their grace deadline after the last pass: it should be zero except for a moment.
+func (a *App) registerGraceMetrics() {
+	g, reg := a.grace, a.reg
+	reg.CounterFunc("ocs_prov_grace_expired_total", "Subscribers suspended because their grace period ended.", nil, func() float64 { return f(g.Stats().Suspended) })
+	reg.CounterFunc("ocs_prov_grace_stale_total", "Overdue grace entries skipped because the subscriber had recovered, been given longer or no longer exists.", nil, func() float64 { return f(g.Stats().Stale) })
+	reg.CounterFunc("ocs_prov_grace_sweep_errors_total", "Grace sweeps or subscribers that failed on Redis or Kafka and will be retried.", nil, func() float64 { return f(g.Stats().Errors) })
+	reg.GaugeFunc("ocs_prov_grace_overdue", "Subscribers past their grace deadline and not yet suspended, after the last sweep.", nil, func() float64 { return float64(g.Stats().Overdue) })
+	reg.GaugeFunc("ocs_prov_grace_oldest_overdue_seconds", "How long the longest-overdue grace period has waited, after the last sweep.", nil, func() float64 { return g.Stats().OldestAge.Seconds() })
+}
+
 // registerAPIMetrics exposes what became of each submission.
 func (a *App) registerAPIMetrics(svc *service.Service) {
 	reg := a.reg

@@ -29,6 +29,9 @@ const (
 	ProvReload    ProvisionKind = 'R'
 	ProvRemove    ProvisionKind = 'X'
 	ProvOffering  ProvisionKind = 'P'
+	// ProvExpireGrace suspends a subscriber whose grace period (ending at Until) has run out. It is
+	// refused when the subscriber has left that grace period or been given a different one.
+	ProvExpireGrace ProvisionKind = 'E'
 )
 
 // ProvisionCode is the outcome of a provisioning step.
@@ -48,6 +51,8 @@ const (
 	ProvBucketNotEmpty    ProvisionCode = 10
 	ProvNotCashBucket     ProvisionCode = 11
 	ProvAllowanceExists   ProvisionCode = 12 // an allowance bucket of the offering exists and renew was not set
+	ProvGraceChanged      ProvisionCode = 13 // ProvExpireGrace: the grace period is not the one the request was made for
+	ProvGraceNotOver      ProvisionCode = 14 // ProvExpireGrace: the grace period has not ended yet
 )
 
 func (c ProvisionCode) String() string {
@@ -56,6 +61,7 @@ func (c ProvisionCode) String() string {
 		ProvExists: "already_exists", ProvInvalidTransition: "invalid_transition", ProvInsufficient: "insufficient_balance",
 		ProvTokenMismatch: "idempotency_token_reused", ProvNoBucket: "no_such_bucket", ProvTerminated: "subscriber_terminated",
 		ProvOverflow: "balance_overflow", ProvBucketNotEmpty: "bucket_not_empty", ProvNotCashBucket: "not_a_cash_bucket", ProvAllowanceExists: "allowance_exists",
+		ProvGraceChanged: "grace_changed", ProvGraceNotOver: "grace_not_over",
 	}
 	if n, ok := names[c]; ok {
 		return n
@@ -103,6 +109,11 @@ type ProvisionOp struct {
 	Renew      bool        // ProvOffering: reset allowance buckets that already exist
 	Allowances []Allowance // ProvOffering
 }
+
+// GraceIndexKey is the sorted set of subscribers in a grace period that has a deadline (score: the
+// deadline in unix ms; member: the subscriber's key prefix). It is a single key, one more reason the
+// data layer does not support Redis Cluster.
+const GraceIndexKey = "ocs:grace:due"
 
 // MaxIdentifiers is the most identifiers a profile records.
 const MaxIdentifiers = 8
@@ -205,6 +216,11 @@ func (o *ProvisionOp) args() ([]any, error) {
 			return nil, fmt.Errorf("%w: target state", ErrInvalid)
 		}
 		a = append(a, o.Target, ms(o.Until))
+	case ProvExpireGrace:
+		if o.Until.IsZero() {
+			return nil, fmt.Errorf("%w: grace deadline", ErrInvalid)
+		}
+		a = append(a, ms(o.Until))
 	case ProvTopUp, ProvAdjust:
 		if err := needID(); err != nil {
 			return nil, err
@@ -270,7 +286,7 @@ func (c *Client) Provision(ctx context.Context, op ProvisionOp) (ProvisionResult
 	if err != nil {
 		return ProvisionResult{}, err
 	}
-	v, rep, err := c.run(ctx, c.provision, []string{Prefix(op.Key)}, args, true)
+	v, rep, err := c.run(ctx, c.provision, []string{Prefix(op.Key), GraceIndexKey}, args, true)
 	if err != nil {
 		return ProvisionResult{}, err
 	}
@@ -331,7 +347,7 @@ func decodeProvision(kind ProvisionKind, raw []any) (ProvisionResult, error) {
 	switch kind {
 	case ProvCreate:
 		r.Version = num(0)
-	case ProvLifecycle:
+	case ProvLifecycle, ProvExpireGrace:
 		if len(vals) < 3 {
 			return r, errors.New("datalayer: malformed lifecycle reply")
 		}
@@ -459,4 +475,61 @@ func splitIDs(s string) []string {
 		return nil
 	}
 	return strings.Split(s, ",")
+}
+
+// GraceDue is a subscriber whose grace period ended at Until.
+type GraceDue struct {
+	Key   string
+	Until time.Time
+}
+
+// DueGrace returns up to limit subscribers whose grace deadline is at or before now, oldest first,
+// and how many such subscribers there are in all.
+func (c *Client) DueGrace(ctx context.Context, now time.Time, limit int) ([]GraceDue, int64, error) {
+	max := strconv.FormatInt(now.UnixMilli(), 10)
+	zs, err := c.rdb.ZRangeByScoreWithScores(ctx, GraceIndexKey, &redis.ZRangeBy{Min: "-inf", Max: max, Count: int64(limit)}).Result()
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := c.rdb.ZCount(ctx, GraceIndexKey, "-inf", max).Result()
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]GraceDue, 0, len(zs))
+	for _, z := range zs {
+		m, _ := z.Member.(string)
+		key, ok := strings.CutSuffix(strings.TrimPrefix(m, "{sub:"), "}")
+		if !ok || !strings.HasPrefix(m, "{sub:") || key == "" {
+			continue // not something this package wrote
+		}
+		out = append(out, GraceDue{Key: key, Until: time.UnixMilli(int64(z.Score))})
+	}
+	return out, total, nil
+}
+
+// ClearGraceDue removes a subscriber from the grace index once the end of its grace period has been
+// handled, but only if the entry still carries the deadline that was handled (a longer grace given in
+// the meantime stays indexed).
+func (c *Client) ClearGraceDue(ctx context.Context, key string, until time.Time) error {
+	m := Prefix(key)
+	sc, err := c.rdb.ZScore(ctx, GraceIndexKey, m).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if int64(sc) != until.UnixMilli() {
+		return nil
+	}
+	return c.rdb.ZRem(ctx, GraceIndexKey, m).Err()
+}
+
+// GraceOverdue reports how many subscribers are past their grace deadline and how long the oldest has waited.
+func (c *Client) GraceOverdue(ctx context.Context, now time.Time) (int64, time.Duration, error) {
+	list, total, err := c.DueGrace(ctx, now, 1)
+	if err != nil || len(list) == 0 {
+		return total, 0, err
+	}
+	return total, now.Sub(list[0].Until), nil
 }
