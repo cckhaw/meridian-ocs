@@ -12,14 +12,20 @@
 --
 -- Modes L and N settle the usage of an UPDATE that was refused while the data tier was down, after the fact. They
 -- settle the open reservation of the rating group against the reported usage (charging what exceeds it, as an
--- update does) but reserve nothing; the answer stored for the request is a refusal. Both are idempotent: a marker
--- key (P:late:<sid>:<reqNo>) makes a second submission a no-op.
---   N  the request never reached the data tier (circuit breaker open, connection never made). Applied whatever
---      request number the session has reached since: the usage was reported once, to us, and nowhere else.
---   L  the outcome of the original call is unknown (it may have been applied). Applied only if no request with
---      that number or a later one has been processed (reqNo > last); if the session is already at that number the
---      original was applied (nothing to charge); if it moved past it the usage may have been reported again, so
---      nothing is charged (code 3) and a person decides.
+-- update does) but reserve nothing; the answer stored for the request is a refusal. Both are idempotent (a marker
+-- key, P:late:<sid>:<reqNo>), both advance the session to reqNo when it is ahead (so a retransmission of the refused
+-- request is answered with the refusal and charges nothing twice), and neither ever charges a request the data
+-- tier already applied.
+--   N  (exact, the default) The session remembers which of its last 8 request numbers were applied: every request
+--      processed normally leaves a field a:<reqNo>, the field of reqNo-8 is removed, and field w says the session
+--      keeps this record. N finds a:<reqNo> (or reqNo == last): the request WAS applied, by the original call or by
+--      a retransmission after the outage, so nothing is charged. It finds neither and reqNo is within 8 of last (or
+--      ahead of it): the request was NOT applied, whether or not the session moved on since, so its usage is
+--      charged. Older than that window, or a session that predates the record: whether it was applied can no longer
+--      be told, nothing is charged (code 3) and a person decides.
+--   L  (strict, for peers that may report refused usage again under a new request number) Applied only if no
+--      request with that number or a later one has been processed (reqNo > last); at that number the original was
+--      applied (nothing to charge); past it the usage may have been reported again, so nothing is charged (code 3).
 --   result: 0 granted | 1 granted-partial + final | 2 limit reached | 3 no eligible bucket
 --           | 4 subscriber barred (suspended or terminated)
 
@@ -54,6 +60,9 @@ if mode == 'I' or mode == 'E' then
   end
 elseif mode == 'N' then
   if not last then return { 2 } end
+  local l = tonumber(last)
+  if reqNo == l or redis.call('HEXISTS', sk, 'a:' .. fmt(reqNo)) == 1 then return { 1, 0 } end -- applied already
+  if reqNo < l and (reqNo < l - 7 or redis.call('HEXISTS', sk, 'w') == 0) then return { 3 } end -- cannot be told
 else
   if not last then return { 2 } end
   local l = tonumber(last)
@@ -180,9 +189,15 @@ end
 -- 3. Persist session state and the stored answer.
 local packed = {}
 for i = 1, #out do packed[i] = fmt(out[i]) end
-if mode ~= 'N' or reqNo > tonumber(last) then
-  redis.call('HSET', sk, 'last', fmt(reqNo), 'ans', table.concat(packed, ','))
+-- Remember which request numbers were applied (the last 8): see the header.
+local fields = { 'a:' .. fmt(reqNo), '1' }
+if mode == 'I' then fields[#fields + 1] = 'w'; fields[#fields + 1] = '1' end
+if not late or reqNo > tonumber(last) then
+  fields[#fields + 1] = 'last'; fields[#fields + 1] = fmt(reqNo)
+  fields[#fields + 1] = 'ans'; fields[#fields + 1] = table.concat(packed, ',')
 end
+redis.call('HSET', sk, unpack(fields))
+if reqNo >= 8 then redis.call('HDEL', sk, 'a:' .. fmt(reqNo - 8)) end
 if mode == 'T' then redis.call('HSET', sk, 'closed', '1') end
 local ttl = (mode == 'T' or mode == 'E') and 3600000 or (validity * 1000 + grace + 3600000)
 redis.call('PEXPIRE', sk, ttl)

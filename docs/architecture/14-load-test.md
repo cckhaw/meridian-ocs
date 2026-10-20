@@ -147,10 +147,17 @@ across a restart is shown by that one run and by the spool's own tests, not by a
    **Refused updates carried lost usage too**, and the load test could not see it at first (a refused update
    was "settled or not, unknowable"). They are now recorded and settled after the fact as well: in a Redis stop
    with sessions in flight, 151 terminates and 150 refused updates were saved and all 301 charged afterwards.
-   Across these 5 runs (Redis stopped twice, killed twice, and stopped with a gateway restart) every balance
-   reconciled with nothing lost. **4 refused updates in all were left ambiguous** (2 in each of two runs: the call
-   had been made and failed, and the session had moved on before the reconciler ran), so they were deliberately
-   **not** charged and are waiting for a person. That is the policy working as designed, and also a cost: those subscribers were not charged for that usage.
+   Across 5 runs with that version (Redis stopped twice, killed twice, stopped with a gateway restart) every
+   balance reconciled with nothing lost, but **4 refused updates were left ambiguous** (2 in each of two runs):
+   the call had been made and failed and the session had moved on before the reconciler ran, and the rule then
+   was to charge only while the session stood still. Reading RFC 4006 §5.7 (a client may re-send the same request
+   after a timeout) showed a worse problem with the other half of that rule, and one fix for both: the data tier
+   now remembers which of a session's last 8 request numbers it applied (`a:<n>` fields in the session), so a
+   refused update is charged exactly when it was not applied. A retransmission applied after the outage is not
+   charged a second time (a test that fails without the record), and nothing is ambiguous unless the update is
+   more than 8 requests behind its session. Across **7 runs with that version** (Redis stopped three times,
+   killed three times, and stopped with a gateway restart) every balance reconciled and **690 records
+   (terminates and refused updates) were saved and all 690 charged afterwards, with 0 lost and 0 ambiguous**.
 2. **The first version of the check blamed the system for a gap in its own model**: it assumed a `204` meant
    settled. It now states what it cannot know and takes the rest from the gateway's counters.
 3. **Behaviour during a Redis outage is not uniform** (hanging until the client times out versus an
@@ -191,9 +198,10 @@ Redis persistence, or replica acknowledgement, and none was tested. The measured
    **Redis failover** (there is no Sentinel or operator, so a killed primary is simply restarted: a promoted
    replica that lacks an acknowledged write is untested). Whether a SIGKILLed primary can lose commits the
    replica acknowledged depends on AOF settings and was exercised only a handful of times. The reconciler
-   covers terminates and refused updates, leaves ambiguous refused updates to a person, assumes the network
-   element does not report refused usage again under a new request number (unverified against real peers), and the
-   gateway's spool is node-local ([03](03-rating-engine.md)).
+   covers terminates and refused updates, leaves a refused update more than 8 requests behind its session to a
+   person, assumes a network element does not report refused usage again under a *new* request number (supported
+   for Gy by RFC 4006, unverified for Nchf and real peers; `OCS_UNSETTLED_PEER_REPEATS` is the cautious setting),
+   and the gateway's spool is node-local ([03](03-rating-engine.md)).
 4. **Seeding goes through the provisioning API**, about 250 subscribers per second here, and at most 99,999
    per run; nothing exercises a large subscriber population or a skewed (hot-subscriber) distribution
    beyond choosing a small `--subscribers`.
