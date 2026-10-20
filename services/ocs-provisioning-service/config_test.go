@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cckhaw/meridian-ocs/pkg/svcenv"
 )
@@ -11,7 +12,7 @@ func env(m map[string]string) svcenv.Getenv { return func(k string) string { ret
 
 func valid() map[string]string {
 	return map[string]string{
-		"OCS_KAFKA_BROKERS": "k1:9092,k2:9092", "OCS_CURRENCY": "EUR", "OCS_PROVISIONING_AUTH": "mtls",
+		"OCS_KAFKA_BROKERS": "k1:9092,k2:9092", "OCS_CURRENCY": "EUR", "OCS_PROVISIONING_AUTH": "mtls", "OCS_PROV_APPROVAL": "off",
 		"OCS_PROV_TLS_CERT": "/c.pem", "OCS_PROV_TLS_KEY": "/k.pem", "OCS_PROV_CLIENT_CA": "/ca.pem",
 	}
 }
@@ -82,4 +83,58 @@ func TestAuthenticationCanBeSwitchedOffExplicitly(t *testing.T) {
 	if c, err := LoadConfig(env(m)); err != nil || c.Auth != "off" {
 		t.Fatalf("%+v %v", c, err)
 	}
+}
+
+func TestApprovalSettings(t *testing.T) {
+	base := func() map[string]string {
+		return map[string]string{"OCS_KAFKA_BROKERS": "k:9092", "OCS_CURRENCY": "EUR", "OCS_PROVISIONING_AUTH": "mtls",
+			"OCS_PROV_TLS_CERT": "c", "OCS_PROV_TLS_KEY": "k", "OCS_PROV_CLIENT_CA": "ca", "OCS_PROV_PRIVILEGED": "care,risk",
+			"OCS_PROV_APPROVAL": "adjust_balance>5000,change_lifecycle:terminated"}
+	}
+	load := func(m map[string]string) (Config, error) { return LoadConfig(func(k string) string { return m[k] }) }
+	if c, err := load(base()); err != nil || !c.Approval.Enabled() || c.ApprovalTTL != 24*time.Hour || c.ApprovalSelf {
+		t.Fatalf("%+v %v", c, err)
+	}
+	for name, tc := range map[string]struct {
+		mutate func(map[string]string)
+		want   string
+	}{
+		"the choice must be made":        {func(m map[string]string) { delete(m, "OCS_PROV_APPROVAL") }, "OCS_PROV_APPROVAL must be set"},
+		"a typo in a rule":               {func(m map[string]string) { m["OCS_PROV_APPROVAL"] = "adjust_balanc" }, "only privileged commands"},
+		"one person cannot approve":      {func(m map[string]string) { m["OCS_PROV_PRIVILEGED"] = "care" }, "at least two different callers"},
+		"approvers make a second person": {func(m map[string]string) { m["OCS_PROV_PRIVILEGED"] = "care"; m["OCS_PROV_APPROVERS"] = "risk" }, ""},
+		"the same name twice is one":     {func(m map[string]string) { m["OCS_PROV_PRIVILEGED"] = "care"; m["OCS_PROV_APPROVERS"] = "care" }, "at least two different callers"},
+		"self-approval with mtls":        {func(m map[string]string) { m["OCS_PROV_APPROVAL_SELF"] = "true" }, "refused with OCS_PROVISIONING_AUTH=mtls"},
+		"bad self value":                 {func(m map[string]string) { m["OCS_PROV_APPROVAL_SELF"] = "yes" }, `"true" or "false"`},
+		"ttl too short":                  {func(m map[string]string) { m["OCS_PROV_APPROVAL_TTL"] = "10s" }, "between 1m and 720h"},
+		"ttl too long":                   {func(m map[string]string) { m["OCS_PROV_APPROVAL_TTL"] = "9000h" }, "between 1m and 720h"},
+		"approvers with approval off":    {func(m map[string]string) { m["OCS_PROV_APPROVAL"] = "off"; m["OCS_PROV_APPROVERS"] = "risk" }, "has no effect"},
+		"self with approval off":         {func(m map[string]string) { m["OCS_PROV_APPROVAL"] = "off"; m["OCS_PROV_APPROVAL_SELF"] = "true" }, "OCS_PROV_APPROVAL_SELF"},
+		"auth off, approval, no self":    {func(m map[string]string) { devOff(m) }, "nobody could approve"},
+		"auth off with approvers": {func(m map[string]string) {
+			devOff(m)
+			m["OCS_PROV_APPROVAL_SELF"] = "true"
+			m["OCS_PROV_APPROVERS"] = "risk"
+		}, "has no effect with OCS_PROVISIONING_AUTH=off"},
+		"auth off, approval, self allowed": {func(m map[string]string) { devOff(m); m["OCS_PROV_APPROVAL_SELF"] = "true" }, ""},
+	} {
+		m := base()
+		tc.mutate(m)
+		_, err := load(m)
+		if tc.want == "" {
+			if err != nil {
+				t.Errorf("%s: %v", name, err)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want an error mentioning %q", name, err, tc.want)
+		}
+	}
+}
+
+func devOff(m map[string]string) {
+	m["OCS_PROVISIONING_AUTH"] = "off"
+	delete(m, "OCS_PROV_TLS_CERT")
+	delete(m, "OCS_PROV_TLS_KEY")
+	delete(m, "OCS_PROV_CLIENT_CA")
+	delete(m, "OCS_PROV_PRIVILEGED")
 }

@@ -117,7 +117,44 @@ check((await page.textContent('#lifecycle .action-status')).includes('exactly') 
 const key = (await page.textContent('#find-result h2')).split(' ')[0];
 await page.fill('#act-lifecycle-confirm', key);
 await page.click('#act-lifecycle-go');
-await page.waitForFunction(() => document.querySelector('#find-result .pill.terminated'));
+
+// ---- approval: termination is held back until a second person approves (the dev server's policy:
+// adjust_balance>1000,change_lifecycle:terminated; self-approval is allowed there because there is one identity)
+await page.waitForFunction(() => document.querySelector('#action-flash') && document.querySelector('#action-flash').textContent.includes('Submitted for approval'));
+check((await page.textContent('#action-flash')).includes('Submitted for approval, not applied yet'), 'termination is submitted for approval, not applied');
+await page.waitForFunction(() => document.querySelector('#tab-approvals').textContent.includes('(1)'));
+check(await page.locator('#find-result .pill.suspended').count() === 1 && await page.locator('#find-result .pill.terminated').count() === 0, 'the subscriber is still suspended while the request waits');
+check((await page.textContent('#approval-hint')).includes('adjust_balance>1000'), 'the manage card says which changes wait for a second person');
+check((await page.textContent('#tab-approvals')).includes('(1)'), 'the Approvals tab counts the waiting request');
+
+// a large correction waits too, and can be withdrawn
+await page.fill('#act-adjust-delta', '5000');
+await page.fill('#act-adjust-reason', 'test credit');
+await page.click('#act-adjust');
+await page.waitForFunction(() => document.querySelector('#action-flash') && document.querySelector('#action-flash').textContent.includes('Submitted for approval') && document.querySelector('#tab-approvals').textContent.includes('(2)'));
+check((await page.textContent('#find-result table')).includes('1700') || (await page.textContent('#find-result table')).includes('1750'), 'a held correction does not change the balance');
+
+await page.click('#tab-approvals');
+await page.waitForSelector('#approvals-list .approval');
+check(await page.locator('#approvals-list .approval').count() === 2, 'both requests are listed');
+const cards = await page.locator('#approvals-list .approval').allTextContents();
+check(cards.some((t) => t.includes('Change status of') && t.includes('terminated')) && cards.some((t) => t.includes('Correct balance') && t.includes('add 5000')), 'each request says in words what will happen');
+check(cards.every((t) => t.includes('Requested by') && t.includes('anonymous')), 'each request names who made it');
+await page.screenshot({ path: `${shots}/console-approvals.png` });
+const correction = page.locator('#approvals-list .approval', { hasText: 'add 5000' });
+await correction.locator('button:has-text("Withdraw")').click();
+await page.waitForSelector('#approval-flash');
+check((await page.textContent('#approval-flash')).includes('withdrawn'), 'a request can be withdrawn');
+check(await page.locator('#approvals-list .approval').count() === 1, 'a withdrawn request leaves the queue');
+
+const term = page.locator('#approvals-list .approval', { hasText: 'terminated' });
+await term.locator('button:has-text("Approve")').click();
+await page.waitForFunction(() => document.querySelector('#approval-flash') && /applied|could not be applied/.test(document.querySelector('#approval-flash').textContent));
+check((await page.textContent('#approval-flash')).includes('Approved and applied'), 'approving applies the termination');
+check(await page.locator('#approvals-empty').isVisible() && !(await page.textContent('#tab-approvals')).includes('('), 'the queue is empty afterwards');
+await page.click('#tab-find');
+await page.click('#find-submit');
+await page.waitForSelector('#find-result .pill.terminated');
 check((await page.textContent('#manage')).includes('terminated; nothing can be changed') && (await page.locator('#manage form').count()) === 0, 'a terminated subscriber offers no actions');
 await page.screenshot({ path: `${shots}/console-terminated.png` });
 

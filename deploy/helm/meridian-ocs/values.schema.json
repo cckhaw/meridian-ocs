@@ -306,6 +306,10 @@
         "rejectRatio": {
           "type": "number",
           "minimum": 0
+        },
+        "approvalWaitSeconds": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "additionalProperties": false
@@ -707,6 +711,32 @@
         },
         "privileged": {
           "type": "array"
+        },
+        "approval": {
+          "type": "object",
+          "properties": {
+            "policy": {
+              "type": [
+                "string",
+                "integer",
+                "number"
+              ]
+            },
+            "approvers": {
+              "type": "array"
+            },
+            "ttl": {
+              "type": [
+                "string",
+                "integer",
+                "number"
+              ]
+            },
+            "allowSelf": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
         },
         "maxTopUp": {
           "type": [

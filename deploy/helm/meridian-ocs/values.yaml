@@ -93,6 +93,7 @@ alerts:
   provisioningLagP99Seconds: 30      # acceptance to recorded outcome
   catalogStaleSeconds: 300           # time since a node last read the shared catalog
   rejectRatio: 0.01                  # share of mediation records in suspense or rejected
+  approvalWaitSeconds: 14400         # a provisioning request waiting this long for approval
 dashboard:
   enabled: false
   labels: {grafana_dashboard: "1"}   # the label your Grafana sidecar selects on
@@ -163,6 +164,13 @@ provisioning:
   currency: ""               # REQUIRED, e.g. EUR
   clients: []                # certificate common names of standard callers; empty = any client of the CA
   privileged: []             # may adjust balances, remove buckets and change lifecycle state
+  # Two-person approval (docs/architecture/08-provisioning.md). A privileged command that matches the policy
+  # waits until a DIFFERENT authorised person approves exactly what was requested.
+  approval:
+    policy: ""               # REQUIRED: "off", or rules such as adjust_balance>5000,change_lifecycle:terminated,remove_bucket
+    approvers: []            # certificate common names that may approve and reject without being privileged
+    ttl: ""                  # how long a request waits (default 24h)
+    allowSelf: false         # a requester may approve their own request: development with auth "off" only
   maxTopUp: ""
   maxAdjust: ""
   workers: ""

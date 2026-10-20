@@ -80,6 +80,12 @@ refuses "mtls needs named callers"                 "provisioning.clients and/or"
 refuses "named callers with auth off are refused"  "have no effect with auth=off"            -f ci/dev.yaml --set provisioning.clients={crm}
 refuses "provisioning needs a currency"            "provisioning.currency is required"       $S --set provisioning.currency=
 refuses "provisioning needs kafka"                 "kafka.brokers is required"               $S --set kafka.brokers=
+refuses "the approval choice must be made"          "provisioning.approval.policy is required" $S --set provisioning.approval.policy=
+refuses "a typo in an approval rule"                "unknown rule"                           $S --set provisioning.approval.policy=adjust_balanc
+refuses "one person cannot approve (mtls)"          "at least two different callers"         $S --set 'provisioning.privileged={care}' --set provisioning.approval.approvers=null
+refuses "self-approval is refused with mtls"        "allowSelf is refused with provisioning.auth=mtls" $S --set provisioning.approval.allowSelf=true
+refuses "approvers with approval off"               "have no effect with policy"             $S --set provisioning.approval.policy=off
+refuses "approval with auth off needs allowSelf"    "nobody could approve a request"         -f ci/dev.yaml --set provisioning.approval.allowSelf=false
 refuses "catalog needs publishers"                 "catalog.publishers"                      $S --set catalog.publishers=null
 refuses "catalog auth must be chosen"              "catalog.auth must be set"                $S --set catalog.auth=
 refuses "nchf oauth must be chosen"                "gateway.nchf.oauth must be"              $S --set gateway.nchf.oauth=
@@ -117,6 +123,8 @@ grep -qE '^  replicas: 1$' <<<"$st" && ok "mediation runs exactly one pod (its l
 # the admin port is only reachable through the -admin Services
 svcs=$(awk 'BEGIN{RS="---\n"} /kind: Service/ && !/-admin/' <<<"$secure")
 grep -q 'port: 8080' <<<"$svcs" && bad "a client-facing Service exposes the admin port" || ok "client-facing Services never expose the admin port"
+grep -q 'name: OCS_PROV_APPROVAL,' <<<"$workloads" && ok "provisioning workloads get the approval policy (the worker enforces it too)" || bad "the approval policy is missing from a provisioning workload"
+[ "$(count "$workloads" 'name: OCS_PROV_APPROVAL,')" -eq 2 ] && ok "both the API and the worker carry the same policy" || bad "the API and worker must carry the same approval policy"
 # Redis credentials reach the pods as files from Secrets, never as environment values
 grep -q 'OCS_REDIS_PASSWORD_FILE' <<<"$workloads" && ! grep -qE 'name: OCS_REDIS_PASSWORD[,}]' <<<"$workloads" && ok "the Redis password is a mounted file, not an environment value" || bad "the Redis password is exposed as an environment value"
 n_redis=$(count "$workloads" 'name: redis-password$')

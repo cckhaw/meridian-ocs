@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"time"
 
 	"github.com/cckhaw/meridian-ocs/pkg/svcenv"
+	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/approval"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/bus"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/command"
 )
@@ -30,6 +32,11 @@ import (
 //	OCS_PROV_TLS_CERT, OCS_PROV_TLS_KEY, OCS_PROV_CLIENT_CA   server certificate and the CA of client certificates
 //	OCS_PROV_CLIENTS         common names of standard callers (empty = any client of the CA)
 //	OCS_PROV_PRIVILEGED      common names allowed to adjust, remove and change lifecycle state
+//	OCS_PROV_APPROVAL        required: "off", or the rules that need a second person's approval, for example
+//	                         adjust_balance>5000,change_lifecycle:terminated,remove_bucket (package approval)
+//	OCS_PROV_APPROVERS       common names that may approve and reject without being privileged
+//	OCS_PROV_APPROVAL_TTL    how long a request waits for approval (default 24h)
+//	OCS_PROV_APPROVAL_SELF   "true" lets a requester approve their own request: development with authentication off only
 type Config struct {
 	Mode           string
 	RedisAddr      string
@@ -45,6 +52,11 @@ type Config struct {
 	ClientCA       string
 	Standard       []string
 	Privileged     []string
+
+	Approval     approval.Policy
+	Approvers    []string
+	ApprovalTTL  time.Duration
+	ApprovalSelf bool
 }
 
 var currencyRe = regexp.MustCompile(`^[A-Z]{3}$`)
@@ -102,17 +114,62 @@ func LoadConfig(g svcenv.Getenv) (Config, error) {
 		return c, errors.New("OCS_PROV_WORKERS must be positive")
 	}
 
+	if c.Approval, err = approval.ParsePolicy(g("OCS_PROV_APPROVAL")); err != nil {
+		return c, err
+	}
+	c.Approvers = g.List("OCS_PROV_APPROVERS")
+	if c.ApprovalTTL, err = g.Duration("OCS_PROV_APPROVAL_TTL", 24*time.Hour); err != nil {
+		return c, err
+	}
+	if c.ApprovalTTL < time.Minute || c.ApprovalTTL > 30*24*time.Hour {
+		return c, errors.New("OCS_PROV_APPROVAL_TTL must be between 1m and 720h")
+	}
+	switch g("OCS_PROV_APPROVAL_SELF") {
+	case "", "false":
+	case "true":
+		c.ApprovalSelf = true
+	default:
+		return c, fmt.Errorf(`OCS_PROV_APPROVAL_SELF must be "true" or "false", got %q`, g("OCS_PROV_APPROVAL_SELF"))
+	}
+
 	switch c.Auth {
 	case "mtls":
 		if c.TLSCert == "" || c.TLSKey == "" || c.ClientCA == "" {
 			return c, errors.New("OCS_PROVISIONING_AUTH=mtls needs OCS_PROV_TLS_CERT, OCS_PROV_TLS_KEY and OCS_PROV_CLIENT_CA")
 		}
+		if c.ApprovalSelf {
+			return c, errors.New("OCS_PROV_APPROVAL_SELF=true is refused with OCS_PROVISIONING_AUTH=mtls: it would let one person approve their own request")
+		}
+		if c.Approval.Enabled() {
+			// A request needs a requester and a different approver.
+			names := map[string]struct{}{}
+			for _, n := range append(append([]string{}, c.Privileged...), c.Approvers...) {
+				names[n] = struct{}{}
+			}
+			if len(names) < 2 {
+				return c, errors.New("OCS_PROV_APPROVAL needs at least two different callers who can approve (OCS_PROV_PRIVILEGED and OCS_PROV_APPROVERS together): otherwise nobody could ever approve a request")
+			}
+		}
 	case "off":
 		if len(c.Standard) > 0 || len(c.Privileged) > 0 {
 			return c, errors.New("OCS_PROV_CLIENTS / OCS_PROV_PRIVILEGED have no effect with OCS_PROVISIONING_AUTH=off: refusing a configuration that looks restricted but is not")
 		}
+		if len(c.Approvers) > 0 {
+			return c, errors.New("OCS_PROV_APPROVERS has no effect with OCS_PROVISIONING_AUTH=off: refusing a configuration that looks restricted but is not")
+		}
+		if c.Approval.Enabled() && !c.ApprovalSelf {
+			return c, errors.New("OCS_PROV_APPROVAL with OCS_PROVISIONING_AUTH=off: every caller is the same person, so nobody could approve a request; set OCS_PROV_APPROVAL_SELF=true to try the flow in development")
+		}
 	default:
 		return c, fmt.Errorf("OCS_PROVISIONING_AUTH must be set to \"mtls\" or \"off\", got %q", c.Auth)
+	}
+	if !c.Approval.Enabled() {
+		if len(c.Approvers) > 0 {
+			return c, errors.New("OCS_PROV_APPROVERS has no effect with OCS_PROV_APPROVAL=off: refusing a configuration that looks restricted but is not")
+		}
+		if c.ApprovalSelf {
+			return c, errors.New("OCS_PROV_APPROVAL_SELF has no effect with OCS_PROV_APPROVAL=off")
+		}
 	}
 	return c, nil
 }

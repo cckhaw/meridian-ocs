@@ -28,7 +28,7 @@ func TestProvisioningUsesAProtectedRedis(t *testing.T) {
 	t.Cleanup(cluster.Close)
 	start := func(extra map[string]string) error {
 		e := map[string]string{"OCS_KAFKA_BROKERS": cluster.ListenAddrs()[0], "OCS_REDIS_ADDR": addr, "OCS_REDIS_REPLICAS": "0",
-			"OCS_CURRENCY": "EUR", "OCS_PROVISIONING_AUTH": "off", "OCS_PROV_REST_ADDR": "127.0.0.1:0", "OCS_PROV_GRPC_ADDR": "off"}
+			"OCS_CURRENCY": "EUR", "OCS_PROV_APPROVAL": "off", "OCS_PROVISIONING_AUTH": "off", "OCS_PROV_REST_ADDR": "127.0.0.1:0", "OCS_PROV_GRPC_ADDR": "off"}
 		for k, v := range extra {
 			e[k] = v
 		}

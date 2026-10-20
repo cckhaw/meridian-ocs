@@ -196,6 +196,27 @@ spec:
           annotations:
             summary: "More than 1% of provisioning API requests fail with a server error"
             description: "Check Redis and Kafka; refusals for a retryable reason are 503."
+        - alert: OcsApprovalWaiting
+          expr: max(ocs_prov_approvals_oldest_age_seconds) > {{ $a.approvalWaitSeconds }}
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "A provisioning request has waited a long time for approval"
+            description: "A privileged change (balance correction, bucket removal or termination) has been waiting for a second person for more than {{ div $a.approvalWaitSeconds 3600 }} hours. It expires if nobody decides."
+        - alert: OcsSelfApprovalAttempted
+          expr: sum(increase(ocs_prov_approvals_total{result="refused_self"}[15m])) > 0
+          for: 0m
+          labels: {severity: warning}
+          annotations:
+            summary: "Someone tried to approve their own request"
+            description: "The attempt was refused. Look for a shared certificate or a person using two identities."
+        - alert: OcsApprovalTrailNotPublished
+          expr: sum(increase(ocs_prov_approval_event_errors_total[15m])) > 0
+          for: 0m
+          labels: {severity: warning}
+          annotations:
+            summary: "Approval audit events could not be published"
+            description: "Decisions were recorded, but the approval.* events did not reach Kafka. The audit trail downstream has gaps."
         - alert: OcsProvisioningUnavailable
           expr: sum(rate(ocs_prov_submissions_total{result="unavailable"}[5m])) > 0
           for: 5m

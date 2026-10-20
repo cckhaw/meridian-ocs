@@ -10,7 +10,7 @@ with web consoles, metrics, alert rules, a Helm chart and a one-command local st
 99.999 % availability, zero double-spend. None of these has been demonstrated yet; see
 [What is not built yet](#what-is-not-built-yet).
 
-*Last updated: 2026-10-20, after Redis password and TLS support. This README is kept current with every
+*Last updated: 2026-10-20, after two-person approval for privileged provisioning changes. This README is kept current with every
 change: see [Keeping this up to date](#keeping-this-up-to-date).*
 
 ## Try it
@@ -25,7 +25,7 @@ dev/smoke.sh                  # provisions a subscriber, charges it over Nchf, c
 docker compose down -v        # stop and forget everything
 ```
 
-Development only: the services have authentication off and ports are bound to `127.0.0.1` (Redis does require a password and TLS). Details, ports, what
+Development only: the services have authentication off and ports are bound to `127.0.0.1` (Redis does require a password and TLS). Large corrections and terminations are held for two-person approval (see the console's *Approvals* tab; self-approval is allowed here because there is only one identity). Details, ports, what
 starts in which order and what was verified: [13 – local stack](docs/architecture/13-local-stack.md).
 
 **Just the consoles, with Go and `redis-server` installed (no Docker):**
@@ -63,9 +63,10 @@ mean production-ready). The list of what does not exist yet is [further down](#w
 | Area | What exists | Doc |
 |---|---|---|
 | Provisioning | asynchronous commands over REST and gRPC (mTLS), through Kafka to workers; create, top-up, adjust, bundles, buckets, lifecycle, attach offering; idempotency keys; privileged vs standard callers; lookup by MSISDN/IMSI/NAI | [08](docs/architecture/08-provisioning.md) |
-| Subscriber console (web) | find a subscriber, create one (with offering and top-up), top up, change offering, correct a balance, change status (termination needs the key typed in); shows only what the caller's certificate allows | [08](docs/architecture/08-provisioning.md) |
+| Two-person approval | privileged changes (large balance corrections, terminations, bucket removals: chosen by one policy setting) wait until a *different* authorised person approves exactly what was requested; decided atomically in Redis, enforced again by the worker, expiring, audited on the events topic, over REST, gRPC and the console | [08](docs/architecture/08-provisioning.md#two-person-approval) |
+| Subscriber console (web) | find a subscriber, create one (with offering and top-up), top up, change offering, correct a balance, change status (termination needs the key typed in), and for approvers an Approvals tab; shows only what the caller's certificate allows | [08](docs/architecture/08-provisioning.md) |
 | Catalog editor (web) | create and configure offerings and price plans, validate, compare prices against the live version, publish, history and rollback drafts | [09](docs/architecture/09-catalog.md) |
-| Metrics and alerts | Prometheus metrics from every service, 28 alert rules (unit-tested with `promtool`), a Grafana dashboard | [11](docs/architecture/11-aiops.md), [12](docs/architecture/12-deployment.md) |
+| Metrics and alerts | Prometheus metrics from every service, 31 alert rules (unit-tested with `promtool`), a Grafana dashboard | [11](docs/architecture/11-aiops.md), [12](docs/architecture/12-deployment.md) |
 | AI Ops interface | guarded control plane in the gateway (allow-listed, clamped, auto-reverting, two-person rule for risky changes, audited), declarative mapping workbench, structured logs; no agent included | [11](docs/architecture/11-aiops.md) |
 | Helm chart | gateway, provisioning (api and worker), catalog, mediation, AI Ops; autoscaling, disruption budgets, spread, optional NetworkPolicy, ServiceMonitor, alert rules, dashboard; refuses insecure choices; values schema; checked in CI | [12](docs/architecture/12-deployment.md) |
 | Local stack | `docker-compose.yml` plus a smoke test that runs in CI | [13](docs/architecture/13-local-stack.md) |
@@ -75,8 +76,8 @@ Architecture and decisions: [01](docs/architecture/01-system-architecture.md),
 
 ## What is not built yet
 
-Honest list, grouped; each module's doc has the detail. Items marked **(next candidate)** are the
-ones I would build first.
+Honest list, grouped; each module's doc has the detail. The item marked **(next candidate)** is the
+one I would build first.
 
 **Scale, performance and platform**
 - **No load test.** The numbers in the docs are micro-benchmarks in a small sandbox (about 110 µs per Redis
@@ -110,8 +111,8 @@ ones I would build first.
   in suspense; offline rating is list price on cash for bytes only.
 
 **Consoles and access control**
-- No login of its own (it relies on browser client certificates; production would put SSO/OIDC in front).
-- **No two-person approval** for balance corrections, termination or catalog publishes. **(next candidate)**
+- No login of its own (it relies on browser client certificates; production would put SSO/OIDC in front), so an approver is identified by certificate name only: two people sharing a certificate are one person.
+- Two-person approval covers provisioning only: **catalog publishes** can still be made by one publisher alone, and approval is "one approver is enough" with no notification to approvers (they poll the console or consume `approval.requested` events).
 - No bundle/bucket screens, no usage or transaction history, no list or search by name, no bulk actions.
 - The catalog version record does not keep the author; the catalog service has no gRPC API.
 

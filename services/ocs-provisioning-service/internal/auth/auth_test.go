@@ -101,3 +101,31 @@ func TestReadHonoursTheAllowList(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestApproversMayDecideAndReadButNotRequest(t *testing.T) {
+	a := New([]string{"crm"}, []string{"care", "risk"}).WithApprovers([]string{"audit", "care"})
+	for who, want := range map[string]bool{"care": true, "risk": true, "audit": true, "crm": false, "stranger": false} {
+		if got := a.CanApprove(who) == nil; got != want {
+			t.Errorf("CanApprove(%s) = %v", who, got)
+		}
+	}
+	if err := a.CanApprove(""); err != ErrUnauthenticated {
+		t.Fatalf("%v", err)
+	}
+	// An approver-only caller sees what it is asked to decide on, but cannot make privileged requests.
+	if err := a.Read("audit"); err != nil {
+		t.Fatalf("an approver must be able to read: %v", err)
+	}
+	if err := a.Allow("audit", command.AdjustBalance); err != ErrForbidden {
+		t.Fatalf("an approver-only caller must not be able to request: %v", err)
+	}
+	if err := a.Allow("audit", command.TopUp); err != ErrForbidden {
+		t.Fatalf("nor routine commands unless it is a standard caller: %v", err)
+	}
+	if n := a.Identities(); n != 3 { // care, risk, audit
+		t.Fatalf("%d", n)
+	}
+	if err := Off().CanApprove(""); err != nil {
+		t.Fatal("with authentication off everyone may")
+	}
+}

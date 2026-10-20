@@ -54,6 +54,8 @@ concurrently.
 | adjust balance (signed) | `POST /v1/subscribers/{key}/adjustments` | **yes** |
 | remove bucket | `DELETE /v1/subscribers/{key}/buckets/{bucket}?force=true` | **yes** |
 | change lifecycle | `POST /v1/subscribers/{key}/lifecycle` | **yes** |
+| list requests waiting for approval | `GET /v1/approvals` | approver |
+| approve / reject a request | `POST /v1/commands/{id}/approve`, `POST /v1/commands/{id}/reject` (`{"reason"}`) | approver |
 | attach offering | `POST /v1/subscribers/{key}/offering` | no |
 | command status | `GET /v1/commands/{id}` | no |
 | read subscriber by key | `GET /v1/subscribers/{key}` | no |
@@ -191,6 +193,74 @@ purpose. The offering decides the price plan used to rate the subscriber
 Suspended or Terminated, `charge.lua` answers `BARRED` for new quota while still
 settling usage from sessions already open.
 
+## Two-person approval
+
+A privileged caller can move or destroy value: correct a balance, remove a bucket, suspend or terminate a
+subscriber. With approval on, such a command is **not queued when it is submitted**. It waits as a request
+until a *different* authorised person approves exactly what was requested; one person alone can never make
+it happen. Routine flows (create, top-up, bundles, offering changes) are never held back.
+
+**Policy** (`OCS_PROV_APPROVAL`, required: `off` is a choice that has to be made): `off`, or a comma
+separated list of rules.
+
+| Rule | Holds back |
+|---|---|
+| `adjust_balance` | every balance correction |
+| `adjust_balance>5000` | corrections larger than 5000 (absolute; minor units or units) |
+| `change_lifecycle` | every status change |
+| `change_lifecycle:terminated\|suspended` | only these target states |
+| `remove_bucket` | every bucket removal |
+
+Parsing is strict: an unknown type or state, a bad threshold, an empty or duplicated rule is an error, so a
+typo cannot silently leave a command unprotected.
+
+**Flow.** The privileged endpoints answer `202` with `"state":"pending_approval"`, the rule and the expiry
+instead of `accepted`; nothing is queued and nothing changes. The request is stored whole in Redis. An
+approver (`GET /v1/approvals` lists what waits, with a plain-words summary) calls
+`POST /v1/commands/{id}/approve`; the service records the approval, queues the stored command **with the
+approval attached**, and the worker applies it. The approver supplies nothing but their identity, so what is
+applied is exactly what was requested. `POST .../reject` ends a request for good (the requester may
+withdraw their own). A request that nobody decides in `OCS_PROV_APPROVAL_TTL` (default 24 h) is reported as
+`expired` and can no longer be approved. States: `pending_approval` -> `accepted` -> `applied`/`failed`, or
+`rejected`, or `expired`. `GET /v1/commands/{id}` shows the rule, who asked, and who approved or rejected.
+
+**Who.** Approvers are the privileged callers plus `OCS_PROV_APPROVERS` (certificate names that may approve,
+reject and read, but not make privileged requests). The approver must differ from the requester: that is
+decided inside one atomic Redis script together with the state and the expiry, so two approvers racing for
+one request cannot both win, and a self-approval is refused (`403 self_approval`) whatever the API caller
+does. With mutual TLS the service refuses to start unless at least two different callers can approve, and
+refuses `OCS_PROV_APPROVAL_SELF=true`. With authentication **off** everyone is `anonymous`, so a policy is
+refused unless `OCS_PROV_APPROVAL_SELF=true` explicitly allows a requester to approve their own request:
+for trying the flow in development only.
+
+**Defence in depth.** The worker enforces the same policy: a command the policy holds back is applied only if
+it carries an approval by someone other than its requester (`approval_required` / `self_approval` otherwise,
+recorded as a final failure). It cannot stop a writer who can forge the approval field on the Kafka topic,
+but it stops an API bug or a message that skipped the approval step. Consequently the policy must be the same
+on the API and worker pods (the chart guarantees it), and turning a policy on makes privileged commands that
+were already queued unapproved fail.
+
+**Audit trail.** Events on the events topic: `approval.requested` (who, rule, what), `approval.approved`
+(approver), `approval.rejected` (who, why); the resulting `balance.modified` / `lifecycle.changed` event carries
+`approvedBy` next to `by`. The decision itself is recorded in the status store before the event is published;
+a failure to publish an approval event is counted (`ocs_prov_approval_event_errors_total`) and logged, and does
+not undo the decision.
+
+**Recovery.** If queuing an approved command fails, the request goes back to pending and the approval can be
+repeated. If the process dies after recording the approval but before queuing it, the same approver repeating
+it (after the republish delay) queues it again; applying is idempotent. A requester repeating their own request
+never queues their copy once it is approved.
+
+**Console.** Approvers get an *Approvals* tab (with a count) listing what waits, in words, with Approve and
+Reject (a reason) buttons; the requester's own requests show *Withdraw* only, with the reason approval is
+disabled. After a privileged action that is held back, the subscriber card says so ("Submitted for approval,
+not applied yet") and shows the rule; nothing changes on the card until it is approved.
+
+**Metrics and alerts.** `ocs_prov_approvals_total{result}` (requested, approved, declined, refused_self,
+refused_expired, refused_not_pending), `ocs_prov_approvals_pending` and `ocs_prov_approvals_oldest_age_seconds`
+(read from Redis every 30 s), `ocs_prov_approval_event_errors_total`; alerts for a request waiting too long,
+an attempted self-approval and an unpublished trail (doc 12).
+
 ## Authorization
 
 Authentication is mTLS; the caller identity is the client certificate CN
@@ -212,7 +282,12 @@ Topic `OCS_KAFKA_EVENTS_TOPIC`, key = subscriber, JSON, `v: 1`:
 | `balance.modified` | top-up, adjustment, bundle, bucket set/remove | `bucket`, `delta`, `balance`, `reason` |
 | `lifecycle.changed` | lifecycle change applied | `from`, `to`, `reason` |
 | `offering.changed` | offering attached or renewed | `from`, `to` (offering ids; `from` empty if none), `buckets` |
-| `command.failed` | business failure (e.g. insufficient balance, conflict) | `outcome`, `message` |
+| `command.failed` | business failure (e.g. insufficient balance, conflict, `approval_required`) | `outcome`, `message` |
+| `approval.requested` | a privileged command was held for approval | `by`, `rule`, `reason` (what will happen, in words) |
+| `approval.approved` | a second person approved it | `by`, `approvedBy` |
+| `approval.rejected` | it was declined or withdrawn | `by`, `rejectedBy`, `reason` |
+
+Events of commands that needed approval also carry `approvedBy`.
 
 ## Configuration
 
@@ -224,6 +299,10 @@ Topic `OCS_KAFKA_EVENTS_TOPIC`, key = subscriber, JSON, `v: 1`:
 | `OCS_PROVISIONING_AUTH` | `mtls` or `off` | required |
 | `OCS_PROV_TLS_CERT` / `_KEY` / `OCS_PROV_CLIENT_CA` | server cert and client CA | required for `mtls` |
 | `OCS_PROV_CLIENTS`, `OCS_PROV_PRIVILEGED` | allowed CNs | any / none |
+| `OCS_PROV_APPROVAL` | `off`, or the rules that need a second person (see above) | **required** |
+| `OCS_PROV_APPROVERS` | CNs that may approve and reject without being privileged | none |
+| `OCS_PROV_APPROVAL_TTL` | how long a request waits (1m to 720h) | 24h |
+| `OCS_PROV_APPROVAL_SELF` | `true` lets a requester approve their own request; development with auth off only | false |
 | `OCS_PROV_REST_ADDR`, `OCS_PROV_GRPC_ADDR` | listeners | `:8443`, `:9443` |
 | `OCS_PROV_WORKERS` | key-hash lanes | 16 |
 | `OCS_PROV_MAX_TOPUP`, `OCS_PROV_MAX_ADJUST` | per-call ceilings | 10,000,000 / 1,000,000 |
@@ -242,6 +321,18 @@ Durability env (replica `WAIT`) is shared with the gateway through
 - `e2e_test.go`: REST and gRPC over real mTLS -> in-process Kafka (kfake) ->
   workers -> real `redis-server`, then the charging path: a suspended subscriber
   gets `ItemBarred`.
+- Two-person approval: the policy parser (strict, table-driven), the status store against a real
+  `redis-server` (one winner among 16 concurrent approvers, expiry to the millisecond, self-approval,
+  rollback of a failed approval, index consistency), the service (not queued until approved, exactly the
+  requested command queued with the approval attached, repeating a request never queues the unapproved copy,
+  recovery after a failed or lost queue), the worker's second enforcement, configuration refusals, REST and gRPC
+  (who may list, approve and reject; status codes), and an end-to-end test through mutual TLS with four
+  identities, Kafka, workers and Redis. Mutation-checked: allowing self-approval, queueing a held command, not
+  attaching the approval, skipping the worker's check, republishing the requester's copy and dropping the
+  approve authorisation each make a test fail. In a real browser (`console.mjs`): a large correction and a
+  termination are held, listed in words, one withdrawn, one approved and applied. Through the real Docker stack
+  (`dev/smoke.sh`): held, balance unchanged, approved, applied, and `approval.requested` ->
+  `approval.approved` -> `balance.modified` (with `approvedBy`) in the Kafka events topic.
 - Smoke of the real binary against a standalone broker and Redis, driven by
   `curl`/`openssl`: config refusals, create -> applied, top-up -> balance 2500,
   standard caller denied a privileged op (403), no client certificate refused,
@@ -263,8 +354,13 @@ Durability env (replica `WAIT`) is shared with the gateway through
 - Offering changes reach gateways after their profile cache expires (no push invalidation), and a subscriber cannot be moved to another offering without also creating that offering's allowances (no 'switch plan only' command).
 - The console has no login of its own (it relies on browser client certificates; a production deployment
   would normally put SSO/OIDC in front). It covers find, create, top-up, offering change, balance
-  correction and lifecycle change, but not bundles or removing/reloading single buckets, no list or
-  search by name, no bulk actions, no two-person approval for corrections or termination, and no
+  correction and lifecycle change and, for approvers, the Approvals tab, but not bundles or
+  removing/reloading single buckets, no list or search by name, no bulk actions, and no
   transaction or usage history.
+- Approval: one approver is enough (no "two of three"); a request is approved or not as a whole (an approver
+  cannot amend it); requests that never needed approval (routine flows) have no second check; the pending
+  gauges are read every 30 s; an approver is identified by certificate name only, so two people sharing a
+  certificate are one person; there is no notification to approvers (poll the console, or consume the
+  `approval.requested` events); and the same policy is not available for catalog publishes yet.
 - Lookup by identifier shows balances and identifiers but not sessions, usage or ledger entries.
 - Reads by key are not logged (lookups by identifier are).

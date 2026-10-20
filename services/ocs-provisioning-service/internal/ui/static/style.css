@@ -61,3 +61,6 @@ form.action h3 { font-size: .95rem; margin: 0; }
 .checks { display: flex; gap: .5rem; align-items: center; font-weight: 400; padding: .4rem 0; }
 .checks input { width: auto; }
 button.danger { color: var(--bad); border-color: var(--bad); }
+.warn-text { color: var(--warn); font-weight: 600; }
+.approval h3 { margin: 0 0 .4rem; font-size: 1rem; overflow-wrap: anywhere; }
+.row > h2.grow { flex: 1; margin: 0; }

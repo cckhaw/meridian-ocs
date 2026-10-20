@@ -34,7 +34,8 @@ provisioning:
   tls: {secretName: prov-tls}
   currency: EUR
   clients: [crm]
-  privileged: [care]
+  privileged: [care, risk]
+  approval: {policy: "adjust_balance>5000,change_lifecycle:terminated,remove_bucket", approvers: [audit]}
 catalog:
   auth: mtls
   tls: {secretName: catalog-tls}

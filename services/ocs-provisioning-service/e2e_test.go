@@ -41,7 +41,10 @@ type system struct {
 
 // startSystem runs the whole service: Kafka (in-process), Redis, workers, REST
 // and gRPC with mutual TLS, exactly as main assembles it.
-func startSystem(t *testing.T) *system {
+func startSystem(t *testing.T) *system { return startSystemWith(t, nil) }
+
+// startSystemWith is startSystem with some settings changed.
+func startSystemWith(t *testing.T, override map[string]string) *system {
 	t.Helper()
 	pki := tlstest.New(t)
 	rdb := redistest.Start(t)
@@ -54,11 +57,14 @@ func startSystem(t *testing.T) *system {
 	t.Cleanup(cluster.Close)
 
 	env := map[string]string{
-		"OCS_KAFKA_BROKERS": cluster.ListenAddrs()[0], "OCS_REDIS_ADDR": rdb.Options().Addr, "OCS_CURRENCY": "EUR",
+		"OCS_KAFKA_BROKERS": cluster.ListenAddrs()[0], "OCS_REDIS_ADDR": rdb.Options().Addr, "OCS_CURRENCY": "EUR", "OCS_PROV_APPROVAL": "off",
 		"OCS_PROVISIONING_AUTH": "mtls", "OCS_PROV_TLS_CERT": pki.CertFile, "OCS_PROV_TLS_KEY": pki.KeyFile, "OCS_PROV_CLIENT_CA": pki.CAFile,
 		"OCS_PROV_REST_ADDR": "127.0.0.1:0", "OCS_PROV_GRPC_ADDR": "127.0.0.1:0",
 		"OCS_PROV_CLIENTS": "crm,care", "OCS_PROV_PRIVILEGED": "care", "OCS_PROV_WORKERS": "4",
 		"OCS_REDIS_REPLICAS": "0", // durability is covered elsewhere; this test has no replica
+	}
+	for k, v := range override {
+		env[k] = v
 	}
 	g := func(k string) string { return env[k] }
 	cfg, err := LoadConfig(g)
@@ -426,7 +432,7 @@ func TestServeConsoleForManualTesting(t *testing.T) {
 	}
 
 	env := map[string]string{
-		"OCS_KAFKA_BROKERS": cluster.ListenAddrs()[0], "OCS_REDIS_ADDR": rdb.Options().Addr, "OCS_CURRENCY": "EUR",
+		"OCS_KAFKA_BROKERS": cluster.ListenAddrs()[0], "OCS_REDIS_ADDR": rdb.Options().Addr, "OCS_CURRENCY": "EUR", "OCS_PROV_APPROVAL": "adjust_balance>1000,change_lifecycle:terminated", "OCS_PROV_APPROVAL_SELF": "true",
 		"OCS_PROVISIONING_AUTH": "off", "OCS_PROV_REST_ADDR": addr, "OCS_PROV_GRPC_ADDR": "off", "OCS_REDIS_REPLICAS": "0",
 	}
 	g := func(k string) string { return env[k] }
@@ -512,5 +518,128 @@ func TestMetricsCountWhatHappened(t *testing.T) {
 	}
 	if strings.Contains(out, "m-1") || strings.Contains(out, "491709990001") {
 		t.Error("a subscriber identifier leaked into the metrics")
+	}
+}
+
+// Two-person approval through the whole system: mutual TLS with four identities, Kafka, the workers
+// and Redis. Nothing happens until a different person approves; the person who asked cannot.
+func TestTwoPersonApprovalThroughTheWholeSystem(t *testing.T) {
+	s := startSystemWith(t, map[string]string{
+		"OCS_PROV_CLIENTS": "crm", "OCS_PROV_PRIVILEGED": "care,risk", "OCS_PROV_APPROVERS": "audit",
+		"OCS_PROV_APPROVAL": "adjust_balance>1000,change_lifecycle:terminated",
+	})
+	balance := func() float64 {
+		_, m := s.call(t, "crm", "GET", "/v1/subscribers/acct-ap", "", nil)
+		for _, b := range m["buckets"].([]any) {
+			if b.(map[string]any)["id"] == "cash" {
+				return b.(map[string]any)["balance"].(float64)
+			}
+		}
+		return 0
+	}
+	if code, m := s.call(t, "crm", "POST", "/v1/subscribers", "ap-create", map[string]any{"subscriberKey": "acct-ap", "paymentType": "prepaid",
+		"identifiers": []map[string]string{{"type": "msisdn", "value": "491709990042"}}}); code != 202 {
+		t.Fatalf("%d %v", code, m)
+	}
+	s.waitApplied(t, "ap-create")
+	s.call(t, "crm", "POST", "/v1/subscribers/acct-ap/top-ups", "ap-pay", map[string]any{"amountMinorUnits": 10000, "currency": "EUR"})
+	s.waitApplied(t, "ap-pay")
+
+	// A correction below the threshold is routine.
+	code, m := s.call(t, "care", "POST", "/v1/subscribers/acct-ap/adjustments", "ap-small", map[string]any{"delta": -500, "currency": "EUR", "reason": "small"})
+	if code != 202 || m["state"] != "accepted" {
+		t.Fatalf("%d %v", code, m)
+	}
+	if got := s.waitApplied(t, "ap-small"); got["state"] != "applied" || balance() != 9500 {
+		t.Fatalf("%v balance %v", got, balance())
+	}
+
+	// A large one waits.
+	code, m = s.call(t, "care", "POST", "/v1/subscribers/acct-ap/adjustments", "ap-big", map[string]any{"delta": -2500, "currency": "EUR", "reason": "goodwill"})
+	if ap, _ := m["approval"].(map[string]any); code != 202 || m["state"] != "pending_approval" || ap["required"] != true {
+		t.Fatalf("%d %v", code, m)
+	}
+	time.Sleep(300 * time.Millisecond) // long enough for a message that was wrongly queued to be applied
+	if balance() != 9500 {
+		t.Fatalf("the balance moved before anyone approved: %v", balance())
+	}
+	if code, m = s.call(t, "crm", "GET", "/v1/commands/ap-big", "", nil); m["state"] != "pending_approval" {
+		t.Fatalf("%d %v", code, m)
+	}
+
+	// The requester cannot approve; a routine caller cannot either; a stranger is not even a client.
+	if code, m = s.call(t, "care", "POST", "/v1/commands/ap-big/approve", "", nil); code != 403 || m["error"].(map[string]any)["code"] != "self_approval" {
+		t.Fatalf("self-approval: %d %v", code, m)
+	}
+	if code, _ = s.call(t, "crm", "POST", "/v1/commands/ap-big/approve", "", nil); code != 403 {
+		t.Fatalf("a standard caller approves: %d", code)
+	}
+	if code, _ = s.call(t, "crm", "GET", "/v1/approvals", "", nil); code != 403 {
+		t.Fatalf("a standard caller lists approvals: %d", code)
+	}
+	if balance() != 9500 {
+		t.Fatalf("a refused approval changed the balance: %v", balance())
+	}
+
+	// Another privileged caller approves: it is queued, applied by the worker, and the record names both.
+	if code, m = s.call(t, "risk", "POST", "/v1/commands/ap-big/approve", "", nil); code != 200 || m["state"] != "accepted" {
+		t.Fatalf("%d %v", code, m)
+	}
+	got := s.waitApplied(t, "ap-big")
+	ap, _ := got["approval"].(map[string]any)
+	if got["state"] != "applied" || ap["requestedBy"] != "care" || ap["approvedBy"] != "risk" || balance() != 7000 {
+		t.Fatalf("%v balance %v", got, balance())
+	}
+
+	// A termination is rejected by an approver who cannot make requests themselves; nothing happens.
+	if code, m = s.call(t, "risk", "POST", "/v1/subscribers/acct-ap/lifecycle", "ap-term", map[string]any{"target": "terminated", "reason": "fraud?"}); m["state"] != "pending_approval" {
+		t.Fatalf("%d %v", code, m)
+	}
+	if code, m = s.call(t, "audit", "GET", "/v1/approvals", "", nil); code != 200 || len(m["approvals"].([]any)) != 1 {
+		t.Fatalf("an approver lists the queue: %d %v", code, m)
+	}
+	if code, _ = s.call(t, "audit", "POST", "/v1/subscribers/acct-ap/lifecycle", "ap-x", map[string]any{"target": "terminated"}); code != 403 {
+		t.Fatalf("an approver-only caller must not be able to request: %d", code)
+	}
+	if code, m = s.call(t, "audit", "POST", "/v1/commands/ap-term/reject", "", map[string]any{"reason": "not fraud"}); code != 200 || m["state"] != "rejected" {
+		t.Fatalf("%d %v", code, m)
+	}
+	if _, m = s.call(t, "crm", "GET", "/v1/subscribers/acct-ap", "", nil); m["status"] != "active" {
+		t.Fatalf("a rejected termination changed the subscriber: %v", m)
+	}
+	if code, m = s.call(t, "audit", "POST", "/v1/commands/ap-term/approve", "", nil); code != 409 {
+		t.Fatalf("approving a rejected request: %d %v", code, m)
+	}
+
+	// Over gRPC the same rules apply, and the same queue is visible.
+	conn, err := grpc.NewClient("passthrough:///"+s.grpc, grpc.WithTransportCredentials(credentials.NewTLS(s.pki.ClientTLS(t, "care"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	care := ocsv1.NewProvisioningServiceClient(conn)
+	gctx, gcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer gcancel()
+	acc, err := care.ChangeLifecycle(gctx, &ocsv1.ChangeLifecycleRequest{IdempotencyKey: "ap-gterm", SubscriberKey: "acct-ap", Target: ocsv1.LifecycleState_LIFECYCLE_STATE_TERMINATED})
+	if err != nil || acc.State != ocsv1.CommandState_COMMAND_STATE_PENDING_APPROVAL {
+		t.Fatalf("%+v %v", acc, err)
+	}
+	if code, m = s.call(t, "audit", "GET", "/v1/approvals", "", nil); len(m["approvals"].([]any)) != 1 {
+		t.Fatalf("the gRPC request must be in the same queue: %d %v", code, m)
+	}
+
+	// The numbers match what happened.
+	var sb strings.Builder
+	if _, err := s.app.Metrics().WriteTo(&sb); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`ocs_prov_approvals_total{result="requested"} 3`, `ocs_prov_approvals_total{result="approved"} 1`,
+		`ocs_prov_approvals_total{result="declined"} 1`, `ocs_prov_approvals_total{result="refused_self"} 1`,
+		`ocs_prov_approvals_total{result="refused_not_pending"} 1`, `ocs_prov_approval_event_errors_total 0`,
+	} {
+		if !strings.Contains(sb.String(), want) {
+			t.Errorf("missing %q", want)
+		}
 	}
 }

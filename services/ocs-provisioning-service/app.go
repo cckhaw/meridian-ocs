@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -40,6 +41,9 @@ type App struct {
 	wrk  *worker.Worker
 	rep  *catalog.Replicator
 	reg  *telemetry.Registry
+	svc  *service.Service
+
+	pending, pendingOldest atomic.Int64 // approval requests waiting, and the age in seconds of the oldest
 
 	restSrv *http.Server
 	grpcSrv *grpc.Server
@@ -102,14 +106,15 @@ func NewApp(ctx context.Context, cfg Config, g svcenv.Getenv, logf func(string, 
 		}
 		applier := &worker.DataApplier{Data: data, Dir: identity.NewRedisDirectory(a.rdb, cfg.IdentityPrefix)}
 		lag := reg.Histogram("ocs_prov_command_lag_seconds", "Time from acceptance of a command to its recorded outcome.", nil, commandLagBuckets...)
-		a.wrk = worker.New(worker.Config{Bus: cfg.Bus, Limits: cfg.Limits, Workers: cfg.Workers, Logf: logf, Lag: lag}, a.cons, applier, st, a.prod)
+		a.wrk = worker.New(worker.Config{Bus: cfg.Bus, Limits: cfg.Limits, Workers: cfg.Workers, Logf: logf, Lag: lag,
+			Policy: cfg.Approval, AllowSelfApproval: cfg.ApprovalSelf}, a.cons, applier, st, a.prod)
 		a.registerWorkerMetrics()
 	}
 
 	if cfg.runsAPI() {
 		az := auth.Off()
 		if cfg.Auth == "mtls" {
-			az = auth.New(cfg.Standard, cfg.Privileged)
+			az = auth.New(cfg.Standard, cfg.Privileged).WithApprovers(cfg.Approvers)
 		}
 		logf("API access: %s", az.Describe())
 		// The catalog resolves attach_offering. Provisioning does not depend on it
@@ -125,10 +130,14 @@ func NewApp(ctx context.Context, cfg Config, g svcenv.Getenv, logf func(string, 
 		} else {
 			logf("no catalog version in effect yet; attach_offering is unavailable until one is published")
 		}
-		svc := service.New(service.Config{Limits: cfg.Limits, CommandsTopic: cfg.Bus.CommandsTopic, Catalog: store, Directory: identity.NewRedisDirectory(a.rdb, cfg.IdentityPrefix)}, st, a.prod, data)
+		svc := service.New(service.Config{Limits: cfg.Limits, CommandsTopic: cfg.Bus.CommandsTopic, EventsTopic: cfg.Bus.EventsTopic, Catalog: store,
+			Policy: cfg.Approval, ApprovalTTL: cfg.ApprovalTTL, AllowSelfApproval: cfg.ApprovalSelf, Logf: logf, Directory: identity.NewRedisDirectory(a.rdb, cfg.IdentityPrefix)}, st, a.prod, data)
+
+		a.svc = svc
+		a.registerAPIMetrics(svc)
+		a.registerApprovalMetrics(svc)
 
 		if cfg.RESTAddr != "off" {
-			a.registerAPIMetrics(svc)
 			a.restSrv = &http.Server{Handler: telemetry.Instrument(rest.New(svc, az), reg, "ocs_prov", "/v1/"), ReadHeaderTimeout: 5 * time.Second,
 				ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
 			if cfg.Auth == "mtls" {
@@ -179,6 +188,9 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if a.rep != nil {
 		start(func() error { return a.rep.Run(ctx) })
+	}
+	if a.svc != nil {
+		start(func() error { a.refreshPending(ctx, a.svc); return nil })
 	}
 	if a.restSrv != nil {
 		a.logf("REST listening on %s", a.RESTAddr())

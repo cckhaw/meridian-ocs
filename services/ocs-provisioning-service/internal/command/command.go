@@ -55,9 +55,14 @@ type Command struct {
 	V          int    `json:"v"`
 	ID         string `json:"id"` // the caller's idempotency key
 	Type       Type   `json:"type"`
-	Key        string `json:"key"` // subscriber key
-	AcceptedAt int64  `json:"at"`  // unix ms, set by the service
-	Principal  string `json:"by,omitempty"`
+	Key        string `json:"key"`          // subscriber key
+	AcceptedAt int64  `json:"at"`           // unix ms, set by the service
+	Principal  string `json:"by,omitempty"` // who requested it
+	// ApprovedBy and ApprovedAt are set by the service when a second person approved a command that
+	// needed approval (see package approval). They are not part of the request: callers cannot
+	// supply them (the API has no such field) and they are excluded from the idempotency fingerprint.
+	ApprovedBy string `json:"approvedBy,omitempty"`
+	ApprovedAt int64  `json:"approvedAt,omitempty"`
 
 	// create_subscriber
 	Payment     string       `json:"payment,omitempty"`
@@ -322,7 +327,7 @@ func validUnit(s string) bool { return s == "bytes" || s == "seconds" || s == "e
 // are the same request only if their fingerprints match.
 func (c *Command) Fingerprint() string {
 	cp := *c
-	cp.ID, cp.AcceptedAt, cp.Principal = "", 0, ""
+	cp.ID, cp.AcceptedAt, cp.Principal, cp.ApprovedBy, cp.ApprovedAt = "", 0, "", "", 0
 	// Derived from the catalog at acceptance: a retry after a catalog change is
 	// still the same request.
 	cp.Allowances, cp.CatalogVersion = nil, 0

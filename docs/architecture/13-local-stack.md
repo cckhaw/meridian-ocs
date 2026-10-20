@@ -33,7 +33,7 @@ so it runs natively on Apple Silicon.
 | `redpanda`, `topics` | `redpandadata/redpanda:v26.1.18` | Kafka API; `topics` creates the three provisioning topics (3 partitions) and exits | 19092 (Kafka API) |
 | `catalog` | built | catalog REST and editor | 8444 (`/ui/`) |
 | `seed` | `curlimages/curl` | publishes `dev/seed-catalog.json` once (plans `basic`, `gold`; offerings `basic-offer`, `gold-offer`), then exits; leaves an existing catalog alone | none |
-| `provisioning` | built | REST + console, gRPC, command workers | 8443 (`/ui/`), 9443 |
+| `provisioning` | built | REST + console, gRPC, command workers; **two-person approval on** for corrections above 1000 and for terminations, with self-approval allowed because authentication is off (try it in the console: the *Approvals* tab) | 8443 (`/ui/`), 9443 |
 | `gateway` | built | Diameter Gy and Nchf, rating engine in-process; tariff from the catalog, default plan `basic` | 3868, 8000 |
 | `mediation` | built | offline CDR pipeline; input and output on the `mediation-data` volume | none |
 | `aiops` | built | mapping workbench | 8445 |
@@ -68,11 +68,11 @@ failure, so a slow dependency only costs a retry.
 
 Run for real with Docker (daemon and Compose v5 in the development sandbox, linux/amd64): the five images
 build through the real Dockerfile (15 to 30 MB each) and the whole stack starts with the
-ordering above; `dev/smoke.sh` passes (12 checks): all services ready, a catalog version in
+ordering above; `dev/smoke.sh` passes (14 checks): all services ready, a catalog version in
 effect, subscriber created, offering attached and topped up through Kafka and the workers,
 found by MSISDN, Nchf quota granted from the offering's bundle at the catalog's price with the
 balance moving (10 GiB bundle: -1,000,000 on grant, +750,000 back when 250,000 were used and the
-session was released), a CDR enriched by mediation, and metrics reflecting the traffic. A
+session was released), a correction of -2000 held for approval with the balance unchanged and then applied after approval (the Kafka events topic shows `approval.requested`, `approval.approved` and `balance.modified` with `approvedBy`), a CDR enriched by mediation, and metrics reflecting the traffic. A
 restart (`down` then `up`, volumes kept) keeps the subscriber and does not reseed the catalog.
 The same run was repeated with Redis behind a password and TLS (replication over TLS with the
 replica acknowledgement still arriving; a plaintext client gets an I/O error and a client without the

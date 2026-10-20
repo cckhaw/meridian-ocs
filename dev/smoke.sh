@@ -90,6 +90,23 @@ settled=$(bundle)
 [ "$settled" -gt "$after" ] || die "the unused part of the reservation was not returned ($after -> $settled)"
 ok "release settled 250,000 bytes used and returned the rest: $after -> $settled"
 
+# ---- two-person approval: a large correction waits until it is approved (self-approval is allowed in this
+# development stack, where authentication is off; with mutual TLS a different person must approve)
+cash() { curl -fsS "$PROV/v1/subscribers/$key" | tr -d '\n ' | sed -n 's/.*"balance":\([0-9]*\)[^}]*"id":"cash".*/\1/p'; }
+cash_before=$(cash)
+big=$(curl -fsS -X POST -H 'Content-Type: application/json' -H "Idempotency-Key: $key-big" \
+  -d '{"delta":-2000,"currency":"EUR","reason":"smoke test correction"}' "$PROV/v1/subscribers/$key/adjustments")
+[ "$(field state <<<"$big")" = pending_approval ] || die "a large correction was not held for approval" "$big"
+sleep 1
+[ "$(cash)" = "$cash_before" ] || die "the balance moved before the correction was approved"
+curl -fsS "$PROV/v1/approvals" | grep -q "$key-big" || die "the request is not in the approval queue"
+ok "a correction of -2000 is held for approval and the balance is unchanged ($cash_before)"
+curl -fsS -X POST "$PROV/v1/commands/$key-big/approve" >/dev/null
+await "$key-big"
+[ "$(cash)" = "$((cash_before - 2000))" ] || die "the approved correction was not applied ($cash_before -> $(cash))"
+ok "approving it applied it: $cash_before -> $(cash)"
+curl -fsS http://127.0.0.1:9081/metrics | grep -q 'ocs_prov_approvals_total{result="approved"} [1-9]' || die "approval metrics are missing"
+
 # ---- offline mediation: a CDR file for this subscriber is enriched and written out (needs docker compose)
 if command -v docker >/dev/null && docker compose ps --status running mediation 2>/dev/null | grep -q mediation; then
   counter() { curl -fsS http://127.0.0.1:9083/metrics | sed -n "s/^ocs_mediation_records_total{outcome=\"$1\"} //p"; }

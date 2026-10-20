@@ -30,6 +30,9 @@ const (
 	ProvisioningService_GetCommand_FullMethodName       = "/ocs.v1.ProvisioningService/GetCommand"
 	ProvisioningService_GetSubscriber_FullMethodName    = "/ocs.v1.ProvisioningService/GetSubscriber"
 	ProvisioningService_FindSubscriber_FullMethodName   = "/ocs.v1.ProvisioningService/FindSubscriber"
+	ProvisioningService_ListApprovals_FullMethodName    = "/ocs.v1.ProvisioningService/ListApprovals"
+	ProvisioningService_ApproveCommand_FullMethodName   = "/ocs.v1.ProvisioningService/ApproveCommand"
+	ProvisioningService_RejectCommand_FullMethodName    = "/ocs.v1.ProvisioningService/RejectCommand"
 )
 
 // ProvisioningServiceClient is the client API for ProvisioningService service.
@@ -61,6 +64,11 @@ type ProvisioningServiceClient interface {
 	GetSubscriber(ctx context.Context, in *GetSubscriberRequest, opts ...grpc.CallOption) (*Subscriber, error)
 	// Look a subscriber up by one of its identifiers (MSISDN, IMSI or NAI).
 	FindSubscriber(ctx context.Context, in *FindSubscriberRequest, opts ...grpc.CallOption) (*Subscriber, error)
+	// Approval of privileged commands (when OCS_PROV_APPROVAL holds some back). Callers must be
+	// privileged or named approvers. The approver must differ from the requester.
+	ListApprovals(ctx context.Context, in *ListApprovalsRequest, opts ...grpc.CallOption) (*ListApprovalsResponse, error)
+	ApproveCommand(ctx context.Context, in *ApproveCommandRequest, opts ...grpc.CallOption) (*CommandAccepted, error)
+	RejectCommand(ctx context.Context, in *RejectCommandRequest, opts ...grpc.CallOption) (*CommandAccepted, error)
 }
 
 type provisioningServiceClient struct {
@@ -181,6 +189,36 @@ func (c *provisioningServiceClient) FindSubscriber(ctx context.Context, in *Find
 	return out, nil
 }
 
+func (c *provisioningServiceClient) ListApprovals(ctx context.Context, in *ListApprovalsRequest, opts ...grpc.CallOption) (*ListApprovalsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListApprovalsResponse)
+	err := c.cc.Invoke(ctx, ProvisioningService_ListApprovals_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *provisioningServiceClient) ApproveCommand(ctx context.Context, in *ApproveCommandRequest, opts ...grpc.CallOption) (*CommandAccepted, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommandAccepted)
+	err := c.cc.Invoke(ctx, ProvisioningService_ApproveCommand_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *provisioningServiceClient) RejectCommand(ctx context.Context, in *RejectCommandRequest, opts ...grpc.CallOption) (*CommandAccepted, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommandAccepted)
+	err := c.cc.Invoke(ctx, ProvisioningService_RejectCommand_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProvisioningServiceServer is the server API for ProvisioningService service.
 // All implementations must embed UnimplementedProvisioningServiceServer
 // for forward compatibility
@@ -210,6 +248,11 @@ type ProvisioningServiceServer interface {
 	GetSubscriber(context.Context, *GetSubscriberRequest) (*Subscriber, error)
 	// Look a subscriber up by one of its identifiers (MSISDN, IMSI or NAI).
 	FindSubscriber(context.Context, *FindSubscriberRequest) (*Subscriber, error)
+	// Approval of privileged commands (when OCS_PROV_APPROVAL holds some back). Callers must be
+	// privileged or named approvers. The approver must differ from the requester.
+	ListApprovals(context.Context, *ListApprovalsRequest) (*ListApprovalsResponse, error)
+	ApproveCommand(context.Context, *ApproveCommandRequest) (*CommandAccepted, error)
+	RejectCommand(context.Context, *RejectCommandRequest) (*CommandAccepted, error)
 	mustEmbedUnimplementedProvisioningServiceServer()
 }
 
@@ -249,6 +292,15 @@ func (UnimplementedProvisioningServiceServer) GetSubscriber(context.Context, *Ge
 }
 func (UnimplementedProvisioningServiceServer) FindSubscriber(context.Context, *FindSubscriberRequest) (*Subscriber, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method FindSubscriber not implemented")
+}
+func (UnimplementedProvisioningServiceServer) ListApprovals(context.Context, *ListApprovalsRequest) (*ListApprovalsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListApprovals not implemented")
+}
+func (UnimplementedProvisioningServiceServer) ApproveCommand(context.Context, *ApproveCommandRequest) (*CommandAccepted, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ApproveCommand not implemented")
+}
+func (UnimplementedProvisioningServiceServer) RejectCommand(context.Context, *RejectCommandRequest) (*CommandAccepted, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RejectCommand not implemented")
 }
 func (UnimplementedProvisioningServiceServer) mustEmbedUnimplementedProvisioningServiceServer() {}
 
@@ -461,6 +513,60 @@ func _ProvisioningService_FindSubscriber_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ProvisioningService_ListApprovals_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListApprovalsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProvisioningServiceServer).ListApprovals(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ProvisioningService_ListApprovals_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProvisioningServiceServer).ListApprovals(ctx, req.(*ListApprovalsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ProvisioningService_ApproveCommand_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ApproveCommandRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProvisioningServiceServer).ApproveCommand(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ProvisioningService_ApproveCommand_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProvisioningServiceServer).ApproveCommand(ctx, req.(*ApproveCommandRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ProvisioningService_RejectCommand_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RejectCommandRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProvisioningServiceServer).RejectCommand(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ProvisioningService_RejectCommand_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProvisioningServiceServer).RejectCommand(ctx, req.(*RejectCommandRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ProvisioningService_ServiceDesc is the grpc.ServiceDesc for ProvisioningService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -511,6 +617,18 @@ var ProvisioningService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "FindSubscriber",
 			Handler:    _ProvisioningService_FindSubscriber_Handler,
+		},
+		{
+			MethodName: "ListApprovals",
+			Handler:    _ProvisioningService_ListApprovals_Handler,
+		},
+		{
+			MethodName: "ApproveCommand",
+			Handler:    _ProvisioningService_ApproveCommand_Handler,
+		},
+		{
+			MethodName: "RejectCommand",
+			Handler:    _ProvisioningService_RejectCommand_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

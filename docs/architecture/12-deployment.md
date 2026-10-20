@@ -23,6 +23,11 @@ points at them (`redis.addr`, `kafka.brokers`).
   (rotation needs no restart); the TLS Secret carries `ca.crt` and, with `redis.tls.clientCert`,
   `tls.crt` / `tls.key`. Options that would have no effect are refused. The password never appears
   as an environment value (checked by `test.sh`). Details: [07](07-durability.md#connecting-to-redis-credentials-and-tls).
+- **Two-person approval is a stated choice.** `provisioning.approval.policy` is required (`"off"` or rules such as
+  `adjust_balance>5000,change_lifecycle:terminated,remove_bucket`); the chart checks the rule syntax, refuses a
+  policy with mutual TLS unless at least two different callers can approve, refuses `allowSelf` with mutual TLS,
+  refuses approvers or `allowSelf` with `"off"`, and gives the API and worker pods the same policy (the worker
+  enforces it too). With policy `"off"` the install notes say so. Details: [08](08-provisioning.md#two-person-approval).
 - **No secrets in values.** Certificates and keys are Kubernetes Secrets you create
   (cert-manager works: `tls.crt`, `tls.key`, `ca.crt`) and reference by name, mounted
   read-only. The NRF's token-signing certificate is a Secret too.
@@ -74,13 +79,13 @@ mediation already exported metrics ([11](11-aiops.md)); this part adds the rest:
   author is ever a label (checked by tests): labels are bounded enums (result,
   outcome, type, code class).
 
-Alerts (28, six groups; thresholds in `alerts.*`): scrape target down; charging P99
+Alerts (31, six groups; thresholds in `alerts.*`): scrape target down; charging P99
 above 10 ms (warning) and 50 ms (critical); requests answered by the fail policy;
 breaker open, or forced open for 30 minutes; **commits acknowledged by fewer replicas
 than required** (the durability promise); replica wait suspended; load shedding; audit
 dropped; identity directory errors and conflicts; usage the catalog cannot price;
 catalog sync stale or failing, **no version in effect**, **nodes on different versions**;
-catalog publish errors and denied publishes; provisioning stalled (commands accepted
+catalog publish errors and denied publishes; a request **waiting too long for approval**, an attempted self-approval, approval events not published; provisioning stalled (commands accepted
 but none finishing), lag, dead letters, worker retries, API 5xx, commands that cannot
 be queued; mediation reject share, ledger commits not replicated, mapping rejected.
 Rules are scoped to the release by the admin-Service job name and namespace, but
@@ -111,10 +116,10 @@ deliberate refusals each checked for the right reason (missing image, auth not
 chosen, `off` without `allowInsecure`, mTLS without a Secret or named callers,
 Nchf in clear, OAuth without keys, control plane with nobody allowed in,
 `allowNoReplica`, NetworkPolicy with empty lists, typos, an unquoted `off`, ...);
-`promtool check rules` and **8 alert unit-test scenarios** (the alerts fire on synthetic
+`promtool check rules` and **10 alert unit-test scenarios** (the alerts fire on synthetic
 series when they should and stay quiet when they should: degraded serving,
 under-replicated commits, provisioning stalled vs keeping up, catalog version skew,
-slow vs fast charging); a check that **every metric name in the rules and dashboard is
+slow vs fast charging, approvals waiting too long, self-approval attempts); a check that **every metric name in the rules and dashboard is
 registered in the Go code**; the generated `values.schema.json` and `dashboard.json`
 are current (`gen-schema.py`, `gen-dashboard.py`); and properties of the rendered pods (non-root, read-only filesystem, no privilege
 escalation, no token, seccomp, no CPU limits, mediation single pod, admin port not on

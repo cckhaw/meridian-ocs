@@ -63,7 +63,11 @@ func (s *Server) submit(ctx context.Context, c *command.Command, err error) (*oc
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	return &ocsv1.CommandAccepted{CommandId: acc.CommandID, State: commandState(acc.State), Duplicate: acc.Duplicate}, nil
+	out := &ocsv1.CommandAccepted{CommandId: acc.CommandID, State: commandState(acc.State), Duplicate: acc.Duplicate}
+	if acc.State == cmdstatus.PendingApproval {
+		out.Approval = &ocsv1.Approval{Rule: acc.Rule, RequestedBy: principal, ExpiresAt: timestamppb.New(acc.ExpiresAt)}
+	}
+	return out, nil
 }
 
 func invalid(msg string) error { return &command.ValidationError{Msg: msg} }
@@ -189,6 +193,16 @@ func (s *Server) GetCommand(ctx context.Context, r *ocsv1.GetCommandRequest) (*o
 	if rec.Type == command.AttachOffering {
 		out.FromState, out.ToState, out.FromOffering, out.ToOffering = "", "", rec.From, rec.To
 	}
+	if rec.Rule != "" {
+		ap := &ocsv1.Approval{Rule: rec.Rule, RequestedBy: rec.RequestedBy, ApprovedBy: rec.ApprovedBy, RejectedBy: rec.RejectedBy, RejectReason: rec.RejectReason}
+		if !rec.ApprovedAt.IsZero() {
+			ap.ApprovedAt = timestamppb.New(rec.ApprovedAt)
+		}
+		if !rec.ExpiresAt.IsZero() && (rec.State == cmdstatus.PendingApproval || rec.State == cmdstatus.Expired) {
+			ap.ExpiresAt = timestamppb.New(rec.ExpiresAt)
+		}
+		out.Approval = ap
+	}
 	if !rec.CompletedAt.IsZero() {
 		out.CompletedAt = timestamppb.New(rec.CompletedAt)
 	}
@@ -305,6 +319,12 @@ func commandState(s cmdstatus.State) ocsv1.CommandState {
 		return ocsv1.CommandState_COMMAND_STATE_APPLIED
 	case cmdstatus.Failed:
 		return ocsv1.CommandState_COMMAND_STATE_FAILED
+	case cmdstatus.PendingApproval:
+		return ocsv1.CommandState_COMMAND_STATE_PENDING_APPROVAL
+	case cmdstatus.Rejected:
+		return ocsv1.CommandState_COMMAND_STATE_REJECTED
+	case cmdstatus.Expired:
+		return ocsv1.CommandState_COMMAND_STATE_EXPIRED
 	}
 	return ocsv1.CommandState_COMMAND_STATE_UNSPECIFIED
 }
@@ -322,6 +342,12 @@ func toStatus(err error) error {
 		return status.Error(codes.NotFound, "not found")
 	case errors.Is(err, service.ErrIdempotencyConflict):
 		return status.Error(codes.AlreadyExists, "this idempotency key was already used for a different request")
+	case errors.Is(err, service.ErrSelfApproval):
+		return status.Error(codes.PermissionDenied, "a request cannot be approved by the person who made it")
+	case errors.Is(err, service.ErrNotPending):
+		return status.Error(codes.FailedPrecondition, "the request is not waiting for approval (it was decided already, or it never needed one)")
+	case errors.Is(err, service.ErrApprovalExpired):
+		return status.Error(codes.FailedPrecondition, "nobody approved the request in time; make it again")
 	case errors.Is(err, context.Canceled):
 		return status.Error(codes.Canceled, "cancelled")
 	case errors.Is(err, context.DeadlineExceeded):
@@ -332,4 +358,47 @@ func toStatus(err error) error {
 		return status.Error(codes.Unavailable, "temporarily unavailable, retry with the same idempotency key")
 	}
 	return status.Error(codes.Internal, "internal error")
+}
+
+// ListApprovals lists the requests waiting for a second person.
+func (s *Server) ListApprovals(ctx context.Context, _ *ocsv1.ListApprovalsRequest) (*ocsv1.ListApprovalsResponse, error) {
+	if err := s.az.CanApprove(s.principal(ctx)); err != nil {
+		return nil, toStatus(err)
+	}
+	list, err := s.svc.PendingApprovals(ctx, 100)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	out := &ocsv1.ListApprovalsResponse{}
+	for _, p := range list {
+		out.Approvals = append(out.Approvals, &ocsv1.PendingApproval{CommandId: p.CommandID, Type: string(p.Type), SubscriberKey: p.Key,
+			RequestedBy: p.RequestedBy, RequestedAt: timestamppb.New(p.RequestedAt), ExpiresAt: timestamppb.New(p.ExpiresAt), Rule: p.Rule,
+			Summary: p.Summary, BucketId: p.BucketID, Amount: p.Amount, Currency: p.Currency, Reason: p.Reason, Target: p.Target})
+	}
+	return out, nil
+}
+
+// ApproveCommand approves a waiting request; the approver must differ from the requester.
+func (s *Server) ApproveCommand(ctx context.Context, r *ocsv1.ApproveCommandRequest) (*ocsv1.CommandAccepted, error) {
+	principal := s.principal(ctx)
+	if err := s.az.CanApprove(principal); err != nil {
+		return nil, toStatus(err)
+	}
+	acc, err := s.svc.Approve(ctx, r.CommandId, principal)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &ocsv1.CommandAccepted{CommandId: acc.CommandID, State: commandState(acc.State), Duplicate: acc.Duplicate}, nil
+}
+
+// RejectCommand declines a waiting request.
+func (s *Server) RejectCommand(ctx context.Context, r *ocsv1.RejectCommandRequest) (*ocsv1.CommandAccepted, error) {
+	principal := s.principal(ctx)
+	if err := s.az.CanApprove(principal); err != nil {
+		return nil, toStatus(err)
+	}
+	if err := s.svc.Reject(ctx, r.CommandId, principal, r.Reason); err != nil {
+		return nil, toStatus(err)
+	}
+	return &ocsv1.CommandAccepted{CommandId: r.CommandId, State: ocsv1.CommandState_COMMAND_STATE_REJECTED}, nil
 }

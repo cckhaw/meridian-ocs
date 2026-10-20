@@ -13,8 +13,10 @@ import (
 	"github.com/cckhaw/meridian-ocs/pkg/catalog"
 	"github.com/cckhaw/meridian-ocs/pkg/datalayer"
 	"github.com/cckhaw/meridian-ocs/pkg/identity"
+	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/approval"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/bus"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/command"
+	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/events"
 	"github.com/cckhaw/meridian-ocs/services/ocs-provisioning-service/internal/status"
 )
 
@@ -26,6 +28,12 @@ var (
 	ErrUnavailable = errors.New("service: temporarily unavailable")
 	// ErrNotFound: unknown command or subscriber.
 	ErrNotFound = errors.New("service: not found")
+	// ErrNotPending: the request is not waiting for approval (decided already, or it never needed one).
+	ErrNotPending = errors.New("service: the request is not waiting for approval")
+	// ErrApprovalExpired: nobody approved the request in time.
+	ErrApprovalExpired = errors.New("service: the approval request expired")
+	// ErrSelfApproval: the approver is the person who made the request.
+	ErrSelfApproval = errors.New("service: a request cannot be approved by the person who made it")
 	// ErrNoCatalog: an offering was requested but no catalog version is in
 	// effect (or the service has no catalog); nothing was accepted.
 	ErrNoCatalog = errors.New("service: no catalog available")
@@ -44,6 +52,17 @@ type Config struct {
 	// Catalog supplies the offerings for attach_offering (optional: without it
 	// that command is refused with ErrNoCatalog).
 	Catalog *catalog.Store
+	// Policy says which commands wait for a second person; the zero value holds nothing back.
+	Policy approval.Policy
+	// ApprovalTTL is how long a request waits for approval (default 24h).
+	ApprovalTTL time.Duration
+	// AllowSelfApproval lets the requester approve their own request. For development with
+	// authentication off, where every caller is the same person; never with mutual TLS.
+	AllowSelfApproval bool
+	// EventsTopic receives the approval trail (default ocs.provisioning.events).
+	EventsTopic string
+	// Logf records approval decisions (who, what); nil discards.
+	Logf func(format string, args ...any)
 	// Directory resolves an MSISDN, IMSI or NAI to a subscriber key for
 	// FindSubscriber (optional: without it lookups answer ErrUnavailable).
 	Directory identity.Directory
@@ -58,6 +77,8 @@ type Service struct {
 
 	accepted, duplicates, rejected, conflicts, unavailable atomic.Uint64
 	byType                                                 map[command.Type]*atomic.Uint64
+
+	requested, approved, declined, refusedSelf, refusedLate, refusedState, eventErrors atomic.Uint64
 }
 
 // SubmitStats count what became of the submissions since start.
@@ -91,6 +112,12 @@ func New(cfg Config, st *status.Store, prod bus.Producer, data *datalayer.Client
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	if cfg.ApprovalTTL <= 0 {
+		cfg.ApprovalTTL = 24 * time.Hour
+	}
+	if cfg.EventsTopic == "" {
+		cfg.EventsTopic = "ocs.provisioning.events"
+	}
 	by := map[command.Type]*atomic.Uint64{}
 	for _, t := range command.Types {
 		by[t] = new(atomic.Uint64)
@@ -106,6 +133,9 @@ type Accepted struct {
 	CommandID string
 	State     status.State
 	Duplicate bool
+	// Rule and ExpiresAt are set when the command is waiting for approval.
+	Rule      string
+	ExpiresAt time.Time
 }
 
 // Submit validates and queues a command.
@@ -144,7 +174,15 @@ func (s *Service) submit(ctx context.Context, c *command.Command) (Accepted, err
 			return Accepted{}, err
 		}
 	}
-	rec, created, err := s.status.Begin(ctx, c)
+	need, rule := s.cfg.Policy.Required(c)
+	var rec status.Record
+	var created bool
+	var err error
+	if need {
+		rec, created, err = s.status.BeginPending(ctx, c, rule, s.cfg.ApprovalTTL)
+	} else {
+		rec, created, err = s.status.Begin(ctx, c)
+	}
 	if err != nil {
 		return Accepted{}, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
@@ -152,12 +190,21 @@ func (s *Service) submit(ctx context.Context, c *command.Command) (Accepted, err
 		if rec.Fingerprint != c.Fingerprint() {
 			return Accepted{}, ErrIdempotencyConflict
 		}
-		if rec.State == status.Accepted && s.cfg.Now().Sub(rec.AcceptedAt) >= s.cfg.RepublishAfter {
+		// An approved command is queued by its approver (with the approval attached), never from
+		// the requester's copy.
+		if rec.State == status.Accepted && rec.ApprovedBy == "" && s.cfg.Now().Sub(rec.AcceptedAt) >= s.cfg.RepublishAfter {
 			if err := s.publish(ctx, c); err != nil {
 				return Accepted{}, fmt.Errorf("%w: %w", ErrUnavailable, err)
 			}
 		}
-		return Accepted{CommandID: c.ID, State: rec.State, Duplicate: true}, nil
+		return Accepted{CommandID: c.ID, State: rec.State, Duplicate: true, Rule: rec.Rule, ExpiresAt: rec.ExpiresAt}, nil
+	}
+	if need {
+		s.requested.Add(1)
+		s.trail(ctx, events.Event{Type: events.EventApprovalRequested, CommandID: c.ID, Key: c.Key, At: c.AcceptedAt,
+			By: c.Principal, Operation: string(c.Type), Rule: rule, Reason: approval.Summary(c)})
+		s.logf("approval requested: %s %s by %s (rule %s)", c.Type, c.ID, c.Principal, rule)
+		return Accepted{CommandID: c.ID, State: status.PendingApproval, Rule: rule, ExpiresAt: time.UnixMilli(c.AcceptedAt).Add(s.cfg.ApprovalTTL)}, nil
 	}
 	if err := s.publish(ctx, c); err != nil {
 		// The context may be the thing that failed; forgetting must not depend on it.

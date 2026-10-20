@@ -9,6 +9,7 @@ package status
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"time"
@@ -22,9 +23,15 @@ import (
 type State string
 
 const (
-	Accepted State = "accepted"
-	Applied  State = "applied"
-	Failed   State = "failed"
+	// PendingApproval: waiting for a second person (package approval). Nothing has been queued.
+	PendingApproval State = "pending_approval"
+	Accepted        State = "accepted"
+	Applied         State = "applied"
+	Failed          State = "failed"
+	// Rejected: an approver (or the requester) declined it; it will never be applied.
+	Rejected State = "rejected"
+	// Expired: nobody approved it in time; it will never be applied. Reported when read, never stored.
+	Expired State = "expired"
 )
 
 // Record is what is known about a command.
@@ -42,10 +49,21 @@ type Record struct {
 	Fingerprint string
 	AcceptedAt  time.Time
 	CompletedAt time.Time
+
+	// Approval (only for commands that needed it).
+	Rule         string // the policy rule that required approval
+	RequestedBy  string
+	ApprovedBy   string
+	ApprovedAt   time.Time
+	RejectedBy   string
+	RejectReason string
+	ExpiresAt    time.Time // while pending approval
 }
 
-// Final reports whether the command has finished.
-func (r Record) Final() bool { return r.State == Applied || r.State == Failed }
+// Final reports whether the command has finished: nothing more will happen to it.
+func (r Record) Final() bool {
+	return r.State == Applied || r.State == Failed || r.State == Rejected || r.State == Expired
+}
 
 // Result is the final outcome written by a worker.
 type Result struct {
@@ -148,8 +166,216 @@ func (s *Store) Get(ctx context.Context, id string) (Record, error) {
 		}
 		return time.Time{}
 	}
-	return Record{ID: id, Type: command.Type(m["type"]), Key: m["key"], State: State(m["state"]),
+	rec := Record{ID: id, Type: command.Type(m["type"]), Key: m["key"], State: State(m["state"]),
 		Outcome: m["outcome"], Message: m["msg"], Balance: num("bal"), OldBalance: num("old"),
 		From: m["from"], To: m["to"], Version: num("ver"), Fingerprint: m["fp"],
-		AcceptedAt: ms("at"), CompletedAt: ms("done")}, nil
+		AcceptedAt: ms("at"), CompletedAt: ms("done"),
+		Rule: m["rule"], RequestedBy: m["by"], ApprovedBy: m["appr"], ApprovedAt: ms("apprat"),
+		RejectedBy: m["rejby"], RejectReason: m["rejwhy"], ExpiresAt: ms("exp")}
+	// A request nobody approved in time is reported as expired; the record is not rewritten.
+	if rec.State == PendingApproval && !rec.ExpiresAt.IsZero() && !s.now().Before(rec.ExpiresAt) {
+		rec.State = Expired
+	}
+	return rec, nil
+}
+
+// ---- approval ---------------------------------------------------------------
+//
+// A command that needs a second person is stored whole, in state
+// pending_approval, and indexed by expiry in a sorted set. Approving it is one
+// Lua call that checks the state, the expiry and that the approver is not the
+// requester, and flips the record to accepted; only then is the command queued.
+// The decisions are in Redis, not in the process, so two approvers racing for
+// the same request cannot both win.
+
+// Outcome of an approval decision.
+type Outcome int
+
+const (
+	Done         Outcome = iota // the decision was recorded
+	NotFound                    // no such command
+	NotPending                  // already decided, or never needed approval
+	TimedOut                    // the request expired
+	SelfApproval                // the approver is the requester
+)
+
+func (s *Store) pendingKey() string { return s.prefix + "~pending" } // '~' cannot occur in a command id
+
+const beginPendingLua = `
+if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
+redis.call('HSET', KEYS[1], 'fp', ARGV[1], 'type', ARGV[2], 'key', ARGV[3], 'state', 'pending_approval', 'at', ARGV[4],
+           'by', ARGV[5], 'rule', ARGV[6], 'exp', ARGV[7], 'cmd', ARGV[8])
+redis.call('PEXPIRE', KEYS[1], ARGV[9])
+redis.call('ZADD', KEYS[2], ARGV[7], ARGV[10])
+return 1`
+
+// ARGV: approver, now, allowSelf, retention ms
+const approveLua = `
+local st = redis.call('HGET', KEYS[1], 'state')
+if not st then return {0} end
+if st ~= 'pending_approval' then return {2} end
+if tonumber(redis.call('HGET', KEYS[1], 'exp')) <= tonumber(ARGV[2]) then return {3} end
+if redis.call('HGET', KEYS[1], 'by') == ARGV[1] and ARGV[3] ~= '1' then return {4} end
+redis.call('HSET', KEYS[1], 'state', 'accepted', 'appr', ARGV[1], 'apprat', ARGV[2])
+redis.call('ZREM', KEYS[2], ARGV[5])
+redis.call('PEXPIRE', KEYS[1], ARGV[4])
+return {1, redis.call('HGET', KEYS[1], 'cmd')}`
+
+// ARGV: approver
+const unapproveLua = `
+if redis.call('HGET', KEYS[1], 'state') ~= 'accepted' or redis.call('HGET', KEYS[1], 'appr') ~= ARGV[1] then return 0 end
+redis.call('HSET', KEYS[1], 'state', 'pending_approval')
+redis.call('HDEL', KEYS[1], 'appr', 'apprat')
+redis.call('ZADD', KEYS[2], redis.call('HGET', KEYS[1], 'exp'), ARGV[2])
+return 1`
+
+// ARGV: by, reason, now
+const rejectLua = `
+local st = redis.call('HGET', KEYS[1], 'state')
+if not st then return 0 end
+if st ~= 'pending_approval' then return 2 end
+if tonumber(redis.call('HGET', KEYS[1], 'exp')) <= tonumber(ARGV[3]) then return 3 end
+redis.call('HSET', KEYS[1], 'state', 'rejected', 'rejby', ARGV[1], 'rejwhy', ARGV[2], 'done', ARGV[3])
+redis.call('ZREM', KEYS[2], ARGV[4])
+return 1`
+
+// BeginPending records a command that has to be approved before it is queued.
+// As with Begin, an existing id returns the existing record and created == false.
+func (s *Store) BeginPending(ctx context.Context, c *command.Command, rule string, ttl time.Duration) (rec Record, created bool, err error) {
+	raw, err := json.Marshal(c)
+	if err != nil {
+		return Record{}, false, err
+	}
+	exp := time.UnixMilli(c.AcceptedAt).Add(ttl)
+	n, err := redis.NewScript(beginPendingLua).Run(ctx, s.rdb, []string{s.prefix + c.ID, s.pendingKey()},
+		c.Fingerprint(), string(c.Type), c.Key, c.AcceptedAt, c.Principal, rule, exp.UnixMilli(), string(raw),
+		s.ttl.Milliseconds(), c.ID).Int()
+	if err != nil {
+		return Record{}, false, err
+	}
+	if n == 1 {
+		return Record{ID: c.ID, Type: c.Type, Key: c.Key, State: PendingApproval, Fingerprint: c.Fingerprint(),
+			AcceptedAt: time.UnixMilli(c.AcceptedAt), Rule: rule, RequestedBy: c.Principal, ExpiresAt: exp}, true, nil
+	}
+	rec, err = s.Get(ctx, c.ID)
+	return rec, false, err
+}
+
+// Approve records the approval and returns the stored command, ready to queue.
+// Only one of any number of concurrent approvers gets Done.
+func (s *Store) Approve(ctx context.Context, id, approver string, allowSelf bool) (*command.Command, Outcome, error) {
+	self := "0"
+	if allowSelf {
+		self = "1"
+	}
+	res, err := redis.NewScript(approveLua).Run(ctx, s.rdb, []string{s.prefix + id, s.pendingKey()},
+		approver, s.now().UnixMilli(), self, s.ttl.Milliseconds(), id).Slice()
+	if err != nil {
+		return nil, 0, err
+	}
+	switch res[0].(int64) {
+	case 1:
+		var c command.Command
+		if err := json.Unmarshal([]byte(res[1].(string)), &c); err != nil {
+			return nil, 0, err
+		}
+		c.ApprovedBy, c.ApprovedAt = approver, s.now().UnixMilli()
+		return &c, Done, nil
+	case 2:
+		return nil, NotPending, nil
+	case 3:
+		return nil, TimedOut, nil
+	case 4:
+		return nil, SelfApproval, nil
+	}
+	return nil, NotFound, nil
+}
+
+// Unapprove puts an approved request back to pending, for the approver whose
+// attempt to queue it failed, so the approval can be retried.
+func (s *Store) Unapprove(ctx context.Context, id, approver string) error {
+	return redis.NewScript(unapproveLua).Run(ctx, s.rdb, []string{s.prefix + id, s.pendingKey()}, approver, id).Err()
+}
+
+// Reject declines a pending request.
+func (s *Store) Reject(ctx context.Context, id, by, reason string) (Outcome, error) {
+	n, err := redis.NewScript(rejectLua).Run(ctx, s.rdb, []string{s.prefix + id, s.pendingKey()},
+		by, reason, s.now().UnixMilli(), id).Int()
+	if err != nil {
+		return 0, err
+	}
+	return [...]Outcome{NotFound, Done, NotPending, TimedOut}[n], nil
+}
+
+// StoredCommand returns the command held in a record (for re-queuing an
+// approval whose message may not have reached Kafka).
+func (s *Store) StoredCommand(ctx context.Context, id string) (*command.Command, error) {
+	raw, err := s.rdb.HGet(ctx, s.prefix+id, "cmd").Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	var c command.Command
+	if err := json.Unmarshal([]byte(raw), &c); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// Pending is a request waiting for approval, with the command it would run.
+type Pending struct {
+	Record
+	Command *command.Command
+}
+
+// ListPending returns the requests still waiting, oldest expiry first.
+func (s *Store) ListPending(ctx context.Context, limit int) ([]Pending, error) {
+	now := s.now().UnixMilli()
+	// Expired entries are dropped from the index (their records keep saying "expired").
+	if err := s.rdb.ZRemRangeByScore(ctx, s.pendingKey(), "-inf", strconv.FormatInt(now, 10)).Err(); err != nil {
+		return nil, err
+	}
+	ids, err := s.rdb.ZRangeByScore(ctx, s.pendingKey(), &redis.ZRangeBy{Min: "(" + strconv.FormatInt(now, 10), Max: "+inf", Count: int64(limit)}).Result()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Pending, 0, len(ids))
+	for _, id := range ids {
+		rec, err := s.Get(ctx, id)
+		if err != nil || rec.State != PendingApproval {
+			continue // decided since, or aged out of the store
+		}
+		c, err := s.StoredCommand(ctx, id)
+		if err != nil {
+			continue
+		}
+		out = append(out, Pending{Record: rec, Command: c})
+	}
+	return out, nil
+}
+
+// PendingStats counts the requests still waiting and tells how long the oldest has waited.
+func (s *Store) PendingStats(ctx context.Context) (count int64, oldest time.Duration, err error) {
+	now := s.now()
+	min := "(" + strconv.FormatInt(now.UnixMilli(), 10)
+	if count, err = s.rdb.ZCount(ctx, s.pendingKey(), min, "+inf").Result(); err != nil || count == 0 {
+		return count, 0, err
+	}
+	ids, err := s.rdb.ZRangeByScore(ctx, s.pendingKey(), &redis.ZRangeBy{Min: min, Max: "+inf", Count: 1}).Result()
+	if err != nil || len(ids) == 0 {
+		return count, 0, err
+	}
+	at, err := s.rdb.HGet(ctx, s.prefix+ids[0], "at").Int64()
+	if err != nil {
+		return count, 0, nil
+	}
+	return count, now.Sub(time.UnixMilli(at)), nil
+}
+
+// WithClock sets the time source (for tests that move time) and returns the store.
+func (s *Store) WithClock(now func() time.Time) *Store {
+	s.now = now
+	return s
 }

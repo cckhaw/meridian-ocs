@@ -8,5 +8,5 @@ gateway:
   replicas: 1
   diameter: {realm: dev.local, originHostSuffix: ocs.dev.local}
   nchf: {oauth: "off"}
-provisioning: {auth: "off", currency: EUR, split: false}
+provisioning: {auth: "off", currency: EUR, split: false, approval: {policy: "adjust_balance>1000,change_lifecycle:terminated", allowSelf: true}}
 catalog: {auth: "off"}
