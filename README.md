@@ -10,7 +10,7 @@ with web consoles, metrics, alert rules, a Helm chart and a one-command local st
 99.999 % availability, zero double-spend. None of these has been demonstrated yet; see
 [What is not built yet](#what-is-not-built-yet).
 
-*Last updated: 2026-10-20, after the Nchf behaviour for refused and unknown-session requests was checked against TS 32.290/32.291. This README is kept current with every
+*Last updated: 2026-10-20, after an alert for gateway spool volumes left behind by a scale-in was added and the Nchf `localSequenceNumber` protection was examined and deliberately not built. This README is kept current with every
 change: see [Keeping this up to date](#keeping-this-up-to-date).*
 
 ## Try it
@@ -68,7 +68,7 @@ mean production-ready). The list of what does not exist yet is [further down](#w
 | Two-person approval | privileged changes (large balance corrections, terminations, bucket removals: chosen by one policy setting) wait until a *different* authorised person approves exactly what was requested; decided atomically in Redis, enforced again by the worker, expiring, audited on the events topic, over REST, gRPC and the console | [08](docs/architecture/08-provisioning.md#two-person-approval) |
 | Subscriber console (web) | find a subscriber, create one (with offering and top-up), top up, change offering, correct a balance, change status (termination needs the key typed in), and for approvers an Approvals tab; shows only what the caller's certificate allows | [08](docs/architecture/08-provisioning.md) |
 | Catalog editor (web) | create and configure offerings and price plans, validate, compare prices against the live version, publish, history and rollback drafts | [09](docs/architecture/09-catalog.md) |
-| Metrics and alerts | Prometheus metrics from every service, 32 alert rules (unit-tested with `promtool`), a Grafana dashboard | [11](docs/architecture/11-aiops.md), [12](docs/architecture/12-deployment.md) |
+| Metrics and alerts | Prometheus metrics from every service, 36 alert rules (unit-tested with `promtool`), a Grafana dashboard | [11](docs/architecture/11-aiops.md), [12](docs/architecture/12-deployment.md) |
 | AI Ops interface | guarded control plane in the gateway (allow-listed, clamped, auto-reverting, two-person rule for risky changes, audited), declarative mapping workbench, structured logs; no agent included | [11](docs/architecture/11-aiops.md) |
 | Helm chart | gateway, provisioning (api and worker), catalog, mediation, AI Ops; autoscaling, disruption budgets, spread, optional NetworkPolicy, ServiceMonitor, alert rules, dashboard; refuses insecure choices; values schema; checked in CI | [12](docs/architecture/12-deployment.md) |
 | Local stack | `docker-compose.yml` plus a smoke test that runs in CI | [13](docs/architecture/13-local-stack.md) |
@@ -90,7 +90,7 @@ one I would build first.
   Diameter Gy mode and no soak, and fault injection covers five faults on the local stack only (no failover, partition or Kafka outage). **(next candidate: a run on dedicated hardware or a cluster)**
 - **Unsettled-usage reconciler gaps**: a refused update more than 8 requests behind its session is left uncharged for a person (it could be charged twice);
   the rule assumes a network element does not report refused usage again under a **new** request number: supported for conforming Gy clients by RFC 4006 §9.1 and its client state machine,
-  and for Nchf by the text of TS 32.290/32.291 (usage of a denied request "shall be deducted"), but 3GPP TS 32.299 and real PGW/SMF behaviour were not checked, so `OCS_UNSETTLED_PEER_REPEATS=true` gives the cautious behaviour; the Nchf `usedUnitContainer.localSequenceNumber` is not used yet and would make a repeated container harmless;
+  and for Nchf by the text of TS 32.290/32.291 (usage of a denied request "shall be deducted"), but 3GPP TS 32.299 and real PGW/SMF behaviour were not checked, so `OCS_UNSETTLED_PEER_REPEATS=true` gives the cautious behaviour; the Nchf `usedUnitContainer.localSequenceNumber` is deliberately not used for de-duplication (its scope is unspecified and a sender that fills it with a constant would lose revenue silently; [05](docs/architecture/05-nchf-adapter.md));
   the spool survives a replaced pod only in `persistent` mode (a StatefulSet; never attached to a real volume, scaling in strands the removed pods' volumes) and the gateway drains it for up to `OCS_UNSETTLED_DRAIN` on shutdown; a replay is rated at the tariff in effect then;
   dead letters need a human; with `OCS_UNSETTLED_SPOOL=off` the usage is lost (alerted on). See [03](docs/architecture/03-rating-engine.md).
 - **No Redis Cluster support** (`WAIT` is not available on Cluster) and no Sentinel/operator integration (the address is a single endpoint).
